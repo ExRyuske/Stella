@@ -97,7 +97,7 @@ export function nft_script(opts) {
 			(l.devices_mode == 'except') ? `ether saddr != ${macs(l)} ` : '';
 		push(out, `		${who}ip daddr @${l.id} goto act_${l.action}`);
 	}
-	push(out, `		goto act_${(opts.default_action == 'vpn') ? 'vpn' : 'direct'}`, '	}');
+	push(out, `		goto act_${(opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
 
 	push(out, '',
 		'	chain act_vpn {',

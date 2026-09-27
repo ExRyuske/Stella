@@ -11,7 +11,7 @@ import { build_config, outbound } from 'stella.xray';
 import { fnv1a } from 'stella.util';
 import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
-import { flowseal_strategy, zms_strategies, block_strategies, strategy_text } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose } from 'stella.zapret';
 import { CACHE_DIR, RUN_DIR, LISTS_DIR, sub_label, load_nodes as store_load_nodes, load_lists, load_devices } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
@@ -165,10 +165,45 @@ function enabled_lists() {
 
 // Используется ли действие zapret хоть где-то — тогда нужен nfqws и очередь.
 function zapret_used(lists) {
+	if (opt('main', 'default_action', 'vpn') == 'zapret')
+		return true;
 	for (let l in lists)
 		if (l.action == 'zapret')
 			return true;
 	return false;
+}
+
+function strategy_lines(text) {
+	let res = [];
+	for (let line in split(text || '', /\r?\n/)) {
+		line = trim(line);
+		if (line != '' && substr(line, 0, 1) != '#')
+			push(res, ...filter(split(line, /[ \t]+/), (a) => a != ''));
+	}
+	return res;
+}
+
+// Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord + игры.
+function zapret_parts() {
+	let yt = null;
+	let yt_name = opt('main', 'zapret_yt', '');
+	if (yt_name)
+		for (let st in json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]'))
+			if (st.name == yt_name)
+				yt = st.args;
+	return compose({
+		main: strategy_lines(opt('main', 'zapret_opts', '')),
+		yt,
+		discord: opt('main', 'zapret_discord', '0') == '1',
+		games: opt('main', 'zapret_games', '0') == '1',
+		tcp_ports: opt('main', 'zapret_tcp_ports', '80,443'),
+		udp_ports: opt('main', 'zapret_udp_ports', '443')
+	});
+}
+
+function zapret_ports() {
+	let z = zapret_parts();
+	return { tcp_ports: z.tcp_ports, udp_ports: z.udp_ports };
 }
 
 function routing_opts() {
@@ -185,11 +220,7 @@ function routing_opts() {
 			block_doh,
 			lists: map(lists, (l) => ({ id: l.id, action: l.action, cidrs: l.cidrs, devices_mode: l.devices_mode, macs: l.macs })),
 			devices: load_devices(uci),
-			zapret: zapret_used(lists) ? {
-				qnum: ZAPRET_QNUM,
-				tcp_ports: opt('main', 'zapret_tcp_ports', '80,443'),
-				udp_ports: opt('main', 'zapret_udp_ports', '443')
-			} : null
+			zapret: zapret_used(lists) ? { qnum: ZAPRET_QNUM, ...zapret_ports() } : null
 		},
 		dnsmasq: { dns_port: DNS_PORT, block_doh, lists: map(lists, (l) => ({ id: l.id, domains: l.domains })) }
 	};
@@ -310,14 +341,10 @@ function cmd_lists(only) {
 function cmd_zapret_cmd() {
 	if (!zapret_used(enabled_lists()))
 		return 1;
-	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
-	let args = [ bin, `--qnum=${ZAPRET_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK) ];
-	for (let line in split(opt('main', 'zapret_opts', ''), /\r?\n/)) {
-		line = trim(line);
-		if (line == '' || substr(line, 0, 1) == '#')
-			continue;
-		push(args, ...filter(split(line, /[ \t]+/), (a) => a != ''));
-	}
+	let z = zapret_parts();
+	if (!length(z.args))
+		return 1;
+	let args = [ opt('main', 'zapret_bin', ZAPRET_BIN), `--qnum=${ZAPRET_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...z.args ];
 	print(join('\n', args), '\n');
 	return 0;
 }
@@ -682,17 +709,34 @@ function cmd_zapret_test(...argv) {
 
 	let msg = 'Проверка закончена';
 	if (apply && readfile(stopf) == null) {
-		let best = null;
-		for (let st in list)
-			if (st.family != 'current' && (!best || res.items[st.name].ok > res.items[best.name].ok))
-				best = st;
-		let cur = res.items[cur_name || 'текущая']?.ok ?? -1;
-		if (best && res.items[best.name].ok > cur) {
-			zapret_apply(best);
-			msg = sprintf('Применена %s: %d из %d', best.name, res.items[best.name].ok, res.items[best.name].total);
+		let msgs = [];
+		// Основная и YouTube выбираются раздельно: лучшая Yv идёт в поле YouTube, а не
+		// в основную. Меняется, только если лучшая открывает больше текущей (для YouTube
+		// без своей стратегии — больше, чем без обхода).
+		for (let yt in [ false, true ]) {
+			let best = null;
+			for (let st in list)
+				if (st.family != 'current' && (st.family == 'yv') == yt && res.items[st.name]?.ok >= 0 &&
+				    (!best || res.items[st.name].ok > res.items[best.name].ok))
+					best = st;
+			if (!best)
+				continue;
+			let cur_key = yt ? opt('main', 'zapret_yt', '') : (cur_name || 'текущая');
+			let cur = res.items[cur_key]?.ok ?? (yt ? (res.baseline?.yv?.ok ?? -1) : -1);
+			let got = res.items[best.name];
+			if (got.ok > cur) {
+				if (yt) {
+					uci.set('stella', 'main', 'zapret_yt', best.name);
+					uci.commit('stella');
+					if (opt('main', 'enabled', '0') == '1')
+						system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+				}
+				else
+					zapret_apply(best);
+				push(msgs, sprintf('%s: %s (%d из %d)', yt ? 'YouTube' : 'основная', best.name, got.ok, got.total));
+			}
 		}
-		else
-			msg = 'Текущая стратегия не хуже лучшей из проверенных — оставлена';
+		msg = length(msgs) ? 'Применена ' + join(', ', msgs) : 'Текущие стратегии не хуже лучших из проверенных — оставлены';
 	}
 	writefile(progress, sprintf('%J', { state: readfile(stopf) != null ? 'stopped' : 'done', done: length(list), total: length(list), message: msg }));
 	unlink(stopf);
@@ -708,6 +752,101 @@ function cmd_zapret_apply(name) {
 		}
 	warn(`стратегии «${name}» нет в каталоге\n`);
 	return 1;
+}
+
+/* ---- обновления: сама Stella (релизы GitHub) и xray-core (репозиторий OpenWrt) ---- */
+
+const REPO = 'ExRyuske/Stella';
+
+function cmd_out(cmd) {
+	let p = popen(cmd, 'r');
+	let out = p ? p.read('all') : '';
+	p?.close();
+	return out || '';
+}
+
+function pkg_version(name, upgradable) {
+	let m = match(cmd_out(`apk list ${upgradable ? '-u' : '-I'} ${name} 2>/dev/null`), regexp(`${name}-([0-9][^ ]*)`));
+	return m ? m[1] : null;
+}
+
+// «0.1.2-r1» / «v0.1.2» → [0,1,2]; новее ли a, чем b.
+function newer(a, b) {
+	let va = map(split(match(a || '', /[0-9]+(\.[0-9]+)*/)?.[0] || '0', '.'), (x) => +x);
+	let vb = map(split(match(b || '', /[0-9]+(\.[0-9]+)*/)?.[0] || '0', '.'), (x) => +x);
+	for (let i = 0; i < max(length(va), length(vb)); i++)
+		if ((va[i] ?? 0) != (vb[i] ?? 0))
+			return (va[i] ?? 0) > (vb[i] ?? 0);
+	return false;
+}
+
+function latest_release() {
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	let r = json(fetch_any(`https://api.github.com/repos/${REPO}/releases/latest`, proxy) || 'null');
+	if (type(r) != 'object' || !r.tag_name)
+		return null;
+	let apk = null;
+	for (let a in r.assets || [])
+		if (match(a.name || '', /^luci-app-stella.*\.apk$/))
+			apk = a.browser_download_url;
+	return { tag: r.tag_name, apk, url: r.html_url, notes: r.body || '' };
+}
+
+// check — записать сведения в $RUN_DIR/update.json; stella / xray — обновить.
+function cmd_upgrade(what) {
+	system(`mkdir -p ${RUN_DIR}`);
+	if (what == 'check' || !what) {
+		system('apk update >/dev/null 2>&1');
+		let rel = latest_release();
+		let cur = pkg_version('luci-app-stella');
+		let info = {
+			at: time(),
+			stella: {
+				installed: cur,
+				latest: rel?.tag,
+				url: rel?.url,
+				notes: rel?.notes,
+				available: !!(rel && rel.apk && (!cur || newer(rel.tag, cur))),
+				error: rel ? null : 'не удалось получить релизы с GitHub (нет сети или репозиторий закрыт)'
+			},
+			xray: { installed: pkg_version('xray-core'), latest: pkg_version('xray-core', true) }
+		};
+		info.xray.available = !!info.xray.latest;
+		writefile(`${RUN_DIR}/update.json`, sprintf('%J', info));
+		print(sprintf('%.J\n', info));
+		return 0;
+	}
+
+	if (what == 'stella') {
+		let rel = latest_release();
+		if (!rel?.apk) {
+			warn('в последнем релизе нет пакета\n');
+			return 1;
+		}
+		let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+		let body = fetch_any(rel.apk, proxy);
+		if (body == null || !writefile('/tmp/luci-app-stella.apk', body)) {
+			warn('не удалось скачать пакет\n');
+			return 1;
+		}
+		let rc = system('apk add --allow-untrusted /tmp/luci-app-stella.apk');
+		unlink('/tmp/luci-app-stella.apk');
+		if (rc != 0)
+			return 1;
+	}
+	else if (what == 'xray') {
+		if (system('apk update >/dev/null 2>&1; apk upgrade xray-core') != 0)
+			return 1;
+	}
+	else
+		return usage();
+
+	// Новые файлы интерфейса и плагина rpcd, новый xray — подхватываем.
+	system('rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache; /etc/init.d/rpcd restart; ' +
+		(what == 'xray' ? '/etc/init.d/stella restart' : '/etc/init.d/stella reload') + ' >/dev/null 2>&1');
+	unlink(`${RUN_DIR}/update.json`);
+	print('обновлено\n');
+	return 0;
 }
 
 // Обновление по расписанию. Флаги *.running и логи — те же, что у кнопок в интерфейсе.
@@ -749,6 +888,17 @@ function cmd_tick() {
 		st.lists = now;
 		action ??= 'reload';
 	}
+	// Автоподбор Zapret — ночью (3–5 ч), раз в zapret_test_interval дней, только если
+	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей.
+	let zt_days = +opt('main', 'zapret_test_interval', '0');
+	let hour = +trim(popen('date +%H', 'r')?.read('all') || '12');
+	st.ztest ??= +(json(readfile(`${ZAPRET_DIR}/results.json`) || 'null')?.at || now);
+	if (zt_days > 0 && hour >= 3 && hour < 5 && now - st.ztest >= zt_days * 86400 - 3600 &&
+	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply')) {
+		st.ztest = now;
+		action = null;   // zapret-test при смене стратегии сам сделал reload
+	}
+
 	writefile(state_path, sprintf('%J', st));
 
 	// Отвязанно: при restart procd останавливает и этот процесс (он — часть службы).
@@ -778,6 +928,7 @@ function usage() {
 		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
+		'  upgrade check|stella|xray  проверить или установить обновления\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
 		'  parse <ссылка>     разобрать ссылку\n');
 	return 2;
@@ -795,6 +946,7 @@ const CMDS = {
 	'zapret-catalog': cmd_zapret_catalog,
 	'zapret-test': cmd_zapret_test,
 	'zapret-apply': cmd_zapret_apply,
+	upgrade: cmd_upgrade,
 	updater: cmd_updater,
 	'zapret-cmd': cmd_zapret_cmd,
 	parse: (link) => link ? cmd_parse(link) : usage()

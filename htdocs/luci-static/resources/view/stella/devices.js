@@ -3,6 +3,7 @@
 'require rpc';
 'require ui';
 'require dom';
+'require stella.ui as sui';
 
 const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
@@ -24,7 +25,7 @@ const CSS = `
 .st-table select { width:auto; min-width:10em }
 .st-dim { opacity:.6; font-size:85% }
 .st-act { text-align:right; white-space:nowrap; width:1% }
-.st-act .btn { padding:0 .5em; line-height:1.8em; min-height:0 }
+.st-act .btn { line-height:1.8em; min-height:0 }
 .st-bar { display:flex; gap:.5em; align-items:center; margin:.5em 0 1em }
 `;
 
@@ -129,12 +130,9 @@ return view.extend({
 						'change': (ev) => this.save(dev, undefined, ev.target.value)
 					}, POLICIES.map((p) => E('option', { 'value': p[0], 'selected': p[0] == dev.policy ? '' : null }, p[1])))),
 					E('td', { 'class': 'st-act' }, [
-						E('button', { 'class': 'btn cbi-button', 'title': _('Название'), 'click': () => this.showEdit(dev) }, '✎'),
+						sui.iconButton('edit', _('Название'), () => this.showEdit(dev)),
 						' ',
-						dev.configured ? E('button', {
-							'class': 'btn cbi-button', 'title': _('Забыть устройство'),
-							'click': ui.createHandlerFn(this, () => callRemove(dev.id).then(() => this.refresh()))
-						}, '✕') : ''
+						dev.configured ? sui.iconButton('close', _('Забыть устройство'), () => callRemove(dev.id).then(() => this.refresh())) : ''
 					])
 				]);
 			})

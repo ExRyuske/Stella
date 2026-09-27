@@ -21,7 +21,7 @@ function check(name, cond, info) {
 	}
 }
 
-for (let m in [ 'status', 'nodes', 'lists', 'devices', 'zapret_info', 'zapret_catalog', 'log' ]) {
+for (let m in [ 'status', 'nodes', 'lists', 'devices', 'zapret_info', 'zapret_catalog', 'update_info', 'log' ]) {
 	let r;
 	try { r = methods[m].call({ args: {} }); }
 	catch (e) { r = { exception: e.message }; }

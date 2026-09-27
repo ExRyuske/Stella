@@ -4,6 +4,7 @@
 'require ui';
 'require poll';
 'require dom';
+'require stella.ui as sui';
 
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
 const callAdd = rpc.declare({ object: 'stella', method: 'list_add', params: [ 'items', 'action', 'devices_mode', 'macs' ] });
@@ -68,14 +69,6 @@ const ACTIONS = [
 const INTERVALS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
 	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
 
-// Выпадающий список LuCI с готовыми вариантами и своим значением.
-function combo(value, choices, onchange, opts) {
-	const w = new ui.Combobox(value, Object.fromEntries(choices), Object.assign({ sort: false, custom_placeholder: _('свой вариант…') }, opts));
-	const el = w.render();
-	el.addEventListener('widget-change', () => onchange(w.getValue()));
-	return el;
-}
-
 
 const CSS = `
 .st-bar { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:.5em 0 1em }
@@ -86,7 +79,7 @@ const CSS = `
 .st-table tr.st-off td { opacity:.5 }
 .st-table select, .st-default select, .st-bar select { width:auto }
 .st-dim { opacity:.6; font-size:85% }
-.st-order .btn, .st-act .btn { padding:0 .5em; line-height:1.8em; min-height:0 }
+.st-order .btn, .st-act .btn { line-height:1.8em; min-height:0 }
 .st-act { text-align:right; white-space:nowrap; width:1% }
 .st-order { white-space:nowrap; width:1% }
 .st-scope { color:#39f }
@@ -121,17 +114,12 @@ function actionSelect(value, onchange) {
 		ACTIONS.map((a) => E('option', { 'value': a[0], 'selected': (a[0] == value) ? '' : null }, a[1])));
 }
 
-function plural(n, one, few, many) {
-	const m10 = n % 10, m100 = n % 100;
-	return (m10 == 1 && m100 != 11) ? one : (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) ? few : many;
-}
-
 function countLabel(l) {
 	const p = [];
 	if (l.domains)
-		p.push('%d %s'.format(l.domains, plural(l.domains, _('домен'), _('домена'), _('доменов'))));
+		p.push('%d %s'.format(l.domains, sui.plural(l.domains, _('домен'), _('домена'), _('доменов'))));
 	if (l.cidrs)
-		p.push('%d %s'.format(l.cidrs, plural(l.cidrs, _('подсеть'), _('подсети'), _('подсетей'))));
+		p.push('%d %s'.format(l.cidrs, sui.plural(l.cidrs, _('подсеть'), _('подсети'), _('подсетей'))));
 	return p.length ? p.join(' · ') : (l.urls.length ? _('не загружен') : _('пусто'));
 }
 
@@ -233,7 +221,7 @@ return view.extend({
 		])));
 
 		let action = l.action;
-		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('Мои сайты') : '' });
+		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('например, Видео и соцсети') : '' });
 		const text = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4,
 			'placeholder': 'mysite.ru\n203.0.113.0/24\nhttps://example.com/list.lst' },
 			[ [ ...l.urls.filter((u) => !catUrls[u]), ...l.entries ].join('\n') ]);
@@ -275,23 +263,20 @@ return view.extend({
 				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, sites, action, undefined, mode.value, macs));
 			}
 
-			const items = [];
-			for (const [ cb, it, u ] of checks)
-				if (cb.checked)
-					items.push({ name: it[0], urls: u });
-			for (const u of urls)
-				items.push({ name: listName(u), urls: [ u ] });
-			if (sites.length)
-				items.push({ name: name.value.trim() || _('Мои сайты'), entries: sites });
-			if (!items.length)
+			// Всё выбранное — один список: пункты каталога, свои ссылки и сайты.
+			const picked = checks.filter(([ cb ]) => cb.checked);
+			const all_urls = [ ...picked.flatMap(([ , , u ]) => u), ...urls ];
+			if (!all_urls.length && !sites.length)
 				return ui.addNotification(null, E('p', {}, _('Ничего не выбрано.')), 'warning');
+			const names = [ ...picked.map(([ , it ]) => it[0]), ...urls.map(listName), ...(sites.length ? [ _('свои сайты') ] : []) ];
+			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
 			ui.hideModal();
-			return this.call(callAdd(items, action, mode.value, macs));
+			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, mode.value, macs));
 		};
 
 		ui.showModal(isNew ? _('Новый список') : _('Список «%s»').format(l.name), [
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name,
-				isNew ? E('small', { 'class': 'st-dim' }, _('Для своих сайтов; готовые списки из каталога добавятся со своими названиями.')) : '' ]),
+				isNew ? E('small', { 'class': 'st-dim' }, _('Если не указать — по выбранному, например «YouTube, Discord».')) : '' ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Что делать с этими сайтами')), actionSelect(action, (v) => action = v) ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Готовые списки (itdoginfo)')), cat ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Свои сайты, подсети или ссылки на списки — по одному в строке')), text,
@@ -368,10 +353,24 @@ return view.extend({
 			return (r && r.ok >= 0) ? '%d из %d'.format(r.ok, r.total) : (r ? _('ошибка') : '');
 		};
 
-		// Выбор стратегии: каталог по источникам; смена применяется сразу.
+		// Выбор стратегии: каталог по источникам (без YouTube — у неё свой выбор ниже);
+		// смена применяется сразу.
 		const groups = {};
 		for (const st of zc.strategies)
-			(groups[st.family] = groups[st.family] || []).push(st);
+			if (st.family != 'yv')
+				(groups[st.family] = groups[st.family] || []).push(st);
+		const ytSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_yt: ev.target.value }).then(() => this.refresh()) }, [
+			E('option', { 'value': '', 'selected': cfg.zapret_yt ? null : '' }, _('как в основной')),
+			...zc.strategies.filter((st) => st.family == 'yv').map((st) =>
+				E('option', { 'value': st.name, 'selected': st.name == cfg.zapret_yt ? '' : null }, st.name + (res[st.name] ? '  · ' + score(st.name) : '')))
+		]);
+		const flag = (key, label, title) => E('label', { 'title': title }, [
+			E('input', { 'type': 'checkbox', 'checked': cfg[key] == '1' ? '' : null,
+				'change': (ev) => this.saveSetting({ [key]: ev.target.checked ? '1' : '0' }).then(() => { cfg[key] = ev.target.checked ? '1' : '0'; }) }),
+			' ', label ]);
+		const sched = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_test_interval: ev.target.value }).then(() => { cfg.zapret_test_interval = ev.target.value; }) },
+			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ].map(([ v, t ]) =>
+				E('option', { 'value': v, 'selected': (cfg.zapret_test_interval || '0') == v ? '' : null }, t)));
 		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
 			if (ev.target.value == '__custom')
 				return this.showZapret();
@@ -461,7 +460,16 @@ return view.extend({
 			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Стратегия')), sel,
 				(zc.current && res[zc.current]) ? E('span', { 'class': 'st-dim' }, score(zc.current)) : '',
 				E('span', { 'class': 'st-dim' }, [ '· ', state ]) ]),
+			E('div', { 'class': 'st-zrow' }, [ E('b', {}, 'YouTube'), ytSel ]),
+			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Дополнительно')),
+				flag('zapret_discord', _('голос и видео Discord'), _('UDP 19294–19344, 50000–50100 и TCP для discord.media')),
+				flag('zapret_games', _('игры'), _('UDP и TCP 1024–65535, как игровой фильтр Flowseal')) ]),
+			(cfg.zapret_games == '1' || cfg.zapret_discord == '1') && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
+				_('Игровые серверы и голос Discord ходят по IP, которых нет в списках: чтобы Zapret их касался, выберите вверху «Всё, что не попало в списки: через Zapret» или добавьте их адреса в список с действием «Zapret».')) : '',
 			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Автоподбор')), ...test ]),
+			E('div', { 'class': 'st-zrow' }, [ _('по расписанию:'), sched,
+				E('details', { 'style': 'display:inline-block' }, [ E('summary', { 'style': 'cursor:pointer', 'class': 'st-dim' }, _('как проверяется')),
+					E('div', { 'class': 'st-dim', 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей; по расписанию — всегда так.')) ]) ]),
 			results,
 			svc
 		]);
@@ -474,7 +482,8 @@ return view.extend({
 			E('span', {}, _('Всё, что не попало в списки:')),
 			E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.call(callDefault(ev.target.value)) }, [
 				E('option', { 'value': 'vpn', 'selected': d.default_action == 'vpn' ? '' : null }, _('через VPN')),
-				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую'))
+				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую')),
+				E('option', { 'value': 'zapret', 'selected': d.default_action == 'zapret' ? '' : null }, _('через Zapret'))
 			]),
 			E('span', { 'class': 'st-dim' }, _('Списки проверяются сверху вниз, срабатывает первый подходящий.'))
 		]);
@@ -489,10 +498,10 @@ return view.extend({
 		const n = d.lists.length;
 		const rows = d.lists.map((l, i) => E('tr', { 'class': l.enabled ? '' : 'st-off' }, [
 			E('td', { 'class': 'st-order' }, [
-				E('button', { 'class': 'btn cbi-button', 'title': _('Выше'), 'disabled': i == 0 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, -1))) }, '↑'),
-				E('button', { 'class': 'btn cbi-button', 'title': _('Ниже'), 'disabled': i == n - 1 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, 1))) }, '↓')
+				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Выше'), 'disabled': i == 0 ? '' : null,
+					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, -1))) }, sui.icon('up')),
+				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Ниже'), 'disabled': i == n - 1 ? '' : null,
+					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, 1))) }, sui.icon('down'))
 			]),
 			E('td', {}, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
 				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, ev.target.checked)) })),
@@ -503,10 +512,9 @@ return view.extend({
 			]),
 			E('td', {}, actionSelect(l.action, (v) => this.call(callEdit(l.id, undefined, undefined, undefined, v, undefined)))),
 			E('td', { 'class': 'st-act' }, [
-				l.urls.length ? E('button', { 'class': 'btn cbi-button', 'title': _('Обновить'),
-					'click': ui.createHandlerFn(this, () => this.call(callUpdate(l.id))) }, '⟳') : '',
+				l.urls.length ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
 				' ',
-				E('button', { 'class': 'btn cbi-button', 'title': _('Изменить'), 'click': () => this.showList(l) }, '✎')
+				sui.iconButton('edit', _('Изменить'), () => this.showList(l))
 			])
 		]));
 
@@ -541,7 +549,7 @@ return view.extend({
 				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showList(null) }, _('Добавить')),
 				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callUpdate(undefined))) }, _('Обновить все')),
 				E('span', { 'class': 'st-inline' }, [ _('автообновление'),
-					combo(cfg.lists_interval, INTERVALS, (v) => this.saveSetting({ lists_interval: v }), { custom_placeholder: _('часов…') }) ])
+					sui.combo(cfg.lists_interval, INTERVALS, (v) => this.saveSetting({ lists_interval: v }), { custom_placeholder: _('часов…') }) ])
 			]),
 			this.tableBox,
 			this.zapretBox

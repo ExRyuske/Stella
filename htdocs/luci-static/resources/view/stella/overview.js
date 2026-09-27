@@ -4,6 +4,7 @@
 'require ui';
 'require poll';
 'require dom';
+'require stella.ui as sui';
 
 const callStatus = rpc.declare({ object: 'stella', method: 'status' });
 const callCheck = rpc.declare({ object: 'stella', method: 'check' });
@@ -12,6 +13,9 @@ const callSetEnabled = rpc.declare({ object: 'stella', method: 'set_enabled', pa
 const callLog = rpc.declare({ object: 'stella', method: 'log', expect: { log: '' } });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
+const callUpdateInfo = rpc.declare({ object: 'stella', method: 'update_info' });
+const callUpdateCheck = rpc.declare({ object: 'stella', method: 'update_check' });
+const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
 
 const DNS_REMOTE = [
 	[ 'https://1.1.1.1/dns-query', 'Cloudflare (DoH) — https://1.1.1.1/dns-query' ],
@@ -23,14 +27,6 @@ const DNS_DIRECT = [
 	[ 'https://1.1.1.1/dns-query', 'Cloudflare (DoH) — https://1.1.1.1/dns-query' ],
 	[ 'https://8.8.8.8/dns-query', 'Google (DoH) — https://8.8.8.8/dns-query' ]
 ];
-
-// Выпадающий список LuCI с готовыми вариантами и своим значением.
-function combo(value, choices, onchange, opts) {
-	const w = new ui.Combobox(value, Object.fromEntries(choices), Object.assign({ sort: false, custom_placeholder: _('свой вариант…') }, opts));
-	const el = w.render();
-	el.addEventListener('widget-change', () => onchange(w.getValue()));
-	return el;
-}
 
 
 const CSS = `
@@ -49,7 +45,7 @@ const CSS = `
 
 return view.extend({
 	load() {
-		return Promise.all([ callStatus(), callSettings() ]);
+		return Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]);
 	},
 
 	renderStatus(st) {
@@ -99,7 +95,7 @@ return view.extend({
 	},
 
 	dnsField(key, value, choices) {
-		return combo(value, choices, (v) => this.save({ [key]: v }));
+		return sui.combo(value, choices, (v) => this.save({ [key]: v }));
 	},
 
 	flag(key, value, label) {
@@ -127,6 +123,80 @@ return view.extend({
 				])
 			])
 		]);
+	},
+
+	/* обновления */
+
+	renderUpdates(u) {
+		const info = u.info;
+		const rows = [];
+		const st = info && info.stella, xr = info && info.xray;
+
+		const line = (label, cur, extra) => [ E('span', { 'class': 'st-k' }, label), E('span', {}, [ cur, ' ', ...extra ]) ];
+		const btn = (what, text) => E('button', { 'class': 'btn cbi-button-positive', 'disabled': u.installing ? '' : null,
+			'click': ui.createHandlerFn(this, 'handleInstall', what) }, text);
+
+		let stExtra = [];
+		if (st && st.available)
+			stExtra = [ btn('stella', _('Обновить до %s').format(st.latest)), ' ',
+				st.url ? E('a', { 'href': st.url, 'target': '_blank' }, _('что нового')) : '' ];
+		else if (st && st.error)
+			stExtra = [ E('span', { 'class': 'st-dim' }, st.error) ];
+		else if (st)
+			stExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
+		rows.push(...line('Stella', st ? (st.installed || _('установлена не пакетом')) : '—', stExtra));
+
+		let xrExtra = [];
+		if (xr && xr.available)
+			xrExtra = [ btn('xray', _('Обновить до %s').format(xr.latest)) ];
+		else if (xr && xr.installed)
+			xrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
+		rows.push(...line('xray-core', xr ? (xr.installed || '—') : '—', xrExtra));
+
+		let action;
+		if (u.installing)
+			action = E('em', { 'class': 'spinning' }, _('устанавливаю… страница обновится сама'));
+		else if (u.checking)
+			action = E('em', { 'class': 'spinning' }, _('проверяю…'));
+		else
+			action = [ E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleUpdateCheck') }, _('Проверить обновления')),
+				info ? E('span', { 'class': 'st-dim' }, ' ' + _('проверено %s').format(new Date(info.at * 1000).toLocaleString('ru-RU'))) : '' ];
+		rows.push(E('span', {}, ''), E('span', {}, action));
+
+		dom.content(this.updBox, E('div', { 'class': 'st-card' }, rows));
+	},
+
+	pollUpdates() {
+		return callUpdateInfo().then((u) => {
+			const was = this.upd && this.upd.installing;
+			this.upd = u;
+			this.renderUpdates(u);
+			const busy = u.checking || u.installing;
+			if (busy && !this.updPoll) {
+				this.updPoll = () => this.pollUpdates();
+				poll.add(this.updPoll, 3);
+			}
+			else if (!busy && this.updPoll) {
+				poll.remove(this.updPoll);
+				this.updPoll = null;
+			}
+			if (was && !u.installing) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, u.log || _('Готово.')), 'info');
+				setTimeout(() => location.reload(), 3000);
+			}
+		}).catch(() => {
+			// Во время обновления rpcd перезапускается — вызов может не пройти, это нормально.
+		});
+	},
+
+	handleUpdateCheck() {
+		return callUpdateCheck().then(() => this.pollUpdates());
+	},
+
+	handleInstall(what) {
+		if (!confirm(what == 'xray' ? _('Обновить xray-core? Служба перезапустится.') : _('Установить новую версию Stella?')))
+			return;
+		return callUpdateInstall(what).then(() => this.pollUpdates());
 	},
 
 	handleEnable(on) {
@@ -160,8 +230,13 @@ return view.extend({
 	},
 
 	render(r) {
-		const [ st, cfg ] = r;
+		const [ st, cfg, upd ] = r;
 		this.statusBox = E('div');
+		this.updBox = E('div');
+		this.upd = upd;
+		this.renderUpdates(upd);
+		if (upd.checking || upd.installing)
+			this.pollUpdates();
 		this.checkBox = E('span', {}, E('button', {
 			'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleCheck')
 		}, _('Проверить')));
@@ -189,6 +264,8 @@ return view.extend({
 			E('h2', {}, 'Stella'),
 			this.statusBox,
 			this.renderDns(cfg),
+			E('h3', {}, _('Обновления')),
+			this.updBox,
 			log
 		]);
 	},

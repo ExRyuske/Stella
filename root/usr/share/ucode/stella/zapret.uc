@@ -106,3 +106,66 @@ export function block_strategies(text, family) {
 export function strategy_text(s) {
 	return join('\n', [ `#${s.name}`, ...s.args ]);
 };
+
+// Дополнительные блоки — как у Zapret Manager: голос и видео Discord (UDP + TCP для
+// discord.media) и игры (игровой фильтр Flowseal с портами 1024–65535).
+const FAKE = '/opt/zapret/files/fake';
+const DISCORD = [
+	'--filter-udp=19294-19344,50000-50100', '--filter-l7=discord,stun', '--dpi-desync=fake',
+	`--dpi-desync-fake-discord=${FAKE}/stun.bin`, `--dpi-desync-fake-stun=${FAKE}/stun.bin`, '--dpi-desync-repeats=6',
+	'--new',
+	'--filter-tcp=2053,2083,2087,2096,8443', '--hostlist-domains=discord.media', '--dpi-desync=multisplit',
+	'--dpi-desync-split-seqovl=652', '--dpi-desync-split-pos=2',
+	`--dpi-desync-split-seqovl-pattern=${FAKE}/tls_clienthello_www_google_com.bin`
+];
+const GAMES = [
+	'--filter-tcp=1024-65535', '--dpi-desync=multisplit', '--dpi-desync-any-protocol=1', '--dpi-desync-cutoff=n3',
+	'--dpi-desync-split-seqovl=568', '--dpi-desync-split-pos=1',
+	`--dpi-desync-split-seqovl-pattern=${FAKE}/tls_clienthello_www_google_com.bin`,
+	'--new',
+	'--filter-udp=1024-65535', '--dpi-desync=fake', '--dpi-desync-repeats=12', '--dpi-desync-any-protocol=1',
+	`--dpi-desync-fake-unknown-udp=${FAKE}/quic_initial_www_google_com.bin`, '--dpi-desync-cutoff=n2'
+];
+
+// «80,443,1000-2000,1500-3000» → слитые непересекающиеся диапазоны по возрастанию.
+export function merge_ports(list) {
+	let iv = [];
+	for (let part in split(join(',', list), ',')) {
+		let m = match(trim(part), /^([0-9]+)(-([0-9]+))?$/);
+		if (m)
+			push(iv, [ +m[1], m[3] ? +m[3] : +m[1] ]);
+	}
+	iv = sort(iv, (a, b) => a[0] - b[0]);
+	let out = [];
+	for (let r in iv) {
+		let last = out[length(out) - 1];
+		if (last && r[0] <= last[1] + 1)
+			last[1] = max(last[1], r[1]);
+		else
+			push(out, [ r[0], r[1] ]);
+	}
+	return join(',', map(out, (r) => (r[0] == r[1]) ? `${r[0]}` : `${r[0]}-${r[1]}`));
+};
+
+// Итоговые ключи nfqws и порты очереди. YouTube — первым: nfqws берёт первый подходящий
+// профиль, а Yv ограничены доменами YouTube и остальному не мешают.
+// opts: { main: [ключи], yt: [ключи] | null, discord, games, tcp_ports, udp_ports }
+export function compose(opts) {
+	let blocks = filter([ opts.yt, opts.main, opts.discord ? DISCORD : null, opts.games ? GAMES : null ], (b) => length(b));
+	let args = [];
+	for (let i, b in blocks) {
+		if (i)
+			push(args, '--new');
+		push(args, ...b);
+	}
+	let tcp = [ opts.tcp_ports || '80,443' ], udp = [ opts.udp_ports || '443' ];
+	if (opts.discord) {
+		push(tcp, '2053,2083,2087,2096,8443');
+		push(udp, '19294-19344,50000-50100');
+	}
+	if (opts.games) {
+		push(tcp, '1024-65535');
+		push(udp, '1024-65535');
+	}
+	return { args, tcp_ports: merge_ports(tcp), udp_ports: merge_ports(udp) };
+};

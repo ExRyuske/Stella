@@ -80,6 +80,10 @@ const SETTINGS = {
 	zapret_bin: { title: 'Программа nfqws', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+$/) != null },
 	zapret_opts: { title: 'Стратегия', def: '', apply: 'reload' },
 	zapret_strategy: { title: 'Стратегия из каталога', def: '', apply: 'reload' },
+	zapret_yt: { title: 'Стратегия для YouTube', def: '', apply: 'reload' },
+	zapret_discord: { title: 'Discord', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
+	zapret_games: { title: 'Игры', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
+	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => v in [ '0', '7', '30' ] },
 	zapret_tcp_ports: { title: 'Порты TCP', def: '80,443', apply: 'reload', check: PORTS },
 	zapret_udp_ports: { title: 'Порты UDP', def: '443', apply: 'reload', check: PORTS }
 };
@@ -514,8 +518,8 @@ const methods = {
 		args: { action: 'action' },
 		call: function(req) {
 			let a = req.args?.action;
-			if (a != 'vpn' && a != 'direct')
-				return { error: 'нужно vpn или direct' };
+			if (!(a in [ 'vpn', 'direct', 'zapret' ]))
+				return { error: 'нужно vpn, direct или zapret' };
 			let uci = cursor();
 			uci.set('stella', 'main', 'default_action', a);
 			uci.commit('stella');
@@ -622,6 +626,34 @@ const methods = {
 				import_tcp: z.get('zapret', 'config', 'NFQWS_PORTS_TCP'),
 				import_udp: z.get('zapret', 'config', 'NFQWS_PORTS_UDP')
 			};
+		}
+	},
+
+	// Обновления: проверка и установка идут в фоне (apk update и скачивание — долго).
+	update_info: {
+		call: function() {
+			return {
+				info: json(readfile(`${RUN_DIR}/update.json`) || 'null'),
+				checking: busy('upcheck'),
+				installing: busy('upgrade'),
+				log: readfile(`${RUN_DIR}/upgrade.log`) || ''
+			};
+		}
+	},
+
+	update_check: {
+		call: function() {
+			return { started: spawn('upcheck', '/usr/bin/stella upgrade check') };
+		}
+	},
+
+	update_install: {
+		args: { what: 'what' },
+		call: function(req) {
+			let what = req.args?.what;
+			if (!(what in [ 'stella', 'xray' ]))
+				return { error: 'нужно stella или xray' };
+			return { started: spawn('upgrade', `/usr/bin/stella upgrade ${what}`) };
 		}
 	},
 

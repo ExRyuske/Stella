@@ -9,7 +9,7 @@ import { decode } from 'stella.subscription';
 import { build_config, dns_server_ip } from 'stella.xray';
 import { parse_list } from 'stella.lists';
 import { nft_script, dnsmasq_conf } from 'stella.firewall';
-import { flowseal_strategy, zms_strategies, block_strategies } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
@@ -290,6 +290,20 @@ if (length(yv) == 2 && yv[0].name == 'Yv01' && yv[1].name == 'Yv02' && yv[0].arg
 	passed++;
 else
 	fail(`block_strategies: ${sprintf('%J', yv)}`);
+
+// Сборка стратегии: YouTube первым, блоки через --new, порты дополняются.
+let z = compose({ main: [ '--filter-tcp=443', '--dpi-desync=fake' ], yt: [ '--filter-tcp=443', '--hostlist=g.txt' ], discord: true, games: false, tcp_ports: '80,443', udp_ports: '443' });
+if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == '--filter-tcp=443' && index(join(' ', z.args), 'discord.media') > 0 &&
+    z.tcp_ports == '80,443,2053,2083,2087,2096,8443' && z.udp_ports == '443,19294-19344,50000-50100' && z.args[length(z.args) - 1] != '--new' &&
+    merge_ports([ '443,80', '1024-2000,1500-3000', '3001', 'x', '1024-65535,443' ]) == '80,443,1024-65535')
+	passed++;
+else
+	fail(`compose: ${sprintf('%J', z)}`);
+let z2 = compose({ main: [ '--a' ], yt: null, discord: false, games: true });
+if (join(' ', z2.args) == '--a --new ' + join(' ', slice(z2.args, 2)) && index(z2.udp_ports, '1024-65535') > 0)
+	passed++;
+else
+	fail(`compose games: ${sprintf('%J', z2)}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

@@ -4,6 +4,7 @@
 'require ui';
 'require poll';
 'require dom';
+'require stella.ui as sui';
 
 const callNodes = rpc.declare({ object: 'stella', method: 'nodes' });
 const callSelect = rpc.declare({ object: 'stella', method: 'select', params: [ 'id' ] });
@@ -19,14 +20,6 @@ const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', 
 const INTERVALS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
 	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
 
-// Выпадающий список LuCI с готовыми вариантами и своим значением.
-function combo(value, choices, onchange, opts) {
-	const w = new ui.Combobox(value, Object.fromEntries(choices), Object.assign({ sort: false, custom_placeholder: _('свой вариант…') }, opts));
-	const el = w.render();
-	el.addEventListener('widget-change', () => onchange(w.getValue()));
-	return el;
-}
-
 
 const PROTO = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'SS', hysteria: 'Hysteria2' };
 const NET = { raw: 'TCP', xhttp: 'XHTTP', ws: 'WS', httpupgrade: 'HTTPUpgrade', grpc: 'gRPC' };
@@ -37,8 +30,6 @@ const CSS = `
 .st-current select { width:auto }
 .st-bar { display:flex; flex-wrap:wrap; gap:.4em; align-items:center; margin-bottom:.8em }
 .st-bar input[type=text] { flex:1; min-width:10em }
-.st-icon { padding:0 .55em !important; min-width:2.2em }
-.st-icon.on { background:rgba(60,140,220,.25) }
 .st-group { border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:.6em }
 .st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; padding:.45em .8em; cursor:pointer; list-style:none }
 .st-group > summary::-webkit-details-marker { display:none }
@@ -47,7 +38,7 @@ const CSS = `
 .st-group .st-title { font-weight:bold }
 .st-group .st-meta { opacity:.6; font-size:85% }
 .st-group .st-actions { margin-left:auto; display:flex; gap:.25em }
-.st-group .st-actions .btn, .st-act .btn { padding:0 .5em; line-height:1.7em; min-height:0 }
+.st-group .st-actions .btn, .st-act .btn { line-height:1.7em; min-height:0 }
 .st-list { max-height:24em; overflow-y:auto; border-top:1px solid rgba(128,128,128,.3) }
 .st-list table { width:100%; border-collapse:collapse; margin:0 }
 .st-list td { padding:.3em .6em; border-bottom:1px solid rgba(128,128,128,.1); vertical-align:middle }
@@ -57,8 +48,8 @@ const CSS = `
 .st-ping { white-space:nowrap; text-align:right; width:5.5em; font-size:90% }
 .st-act { text-align:right; width:1%; white-space:nowrap }
 @media (hover:hover) { .st-list tr:not(:hover) .st-act .btn { visibility:hidden } }
-.st-star { cursor:pointer; padding:0 .2em; font-size:110%; color:#d9a400; user-select:none }
-.st-star.off { color:inherit; opacity:.25 }
+.st-star { cursor:pointer; color:#d9a400; user-select:none; display:inline-flex }
+.st-star.off { color:inherit; opacity:.3 }
 .st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.5 }
 `;
 
@@ -83,15 +74,6 @@ function pingLabel(v) {
 		return E('span', { 'class': 'st-bad' }, '✕');
 	const cls = (v < 800) ? 'st-ok' : (v < 1500) ? 'st-mid' : 'st-slow';
 	return E('span', { 'class': cls }, v + ' ' + _('мс'));
-}
-
-function plural(n, one, few, many) {
-	const m10 = n % 10, m100 = n % 100;
-	if (m10 == 1 && m100 != 11)
-		return one;
-	if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20))
-		return few;
-	return many;
 }
 
 function smallBtn(label, title, handler, cls) {
@@ -275,7 +257,7 @@ return view.extend({
 		const cfg = this.cfg;
 		ui.showModal(_('Серверы: настройки'), [
 			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Обновлять подписки')),
-				combo(cfg.sub_interval, INTERVALS, (v) => callSettingsSet({ sub_interval: v }).then((r) => {
+				sui.combo(cfg.sub_interval, INTERVALS, (v) => callSettingsSet({ sub_interval: v }).then((r) => {
 					if (r && r.error)
 						ui.addNotification(null, E('p', {}, r.error), 'danger');
 					else
@@ -295,7 +277,7 @@ return view.extend({
 		const d = this.data;
 		const all = d.nodes.filter((n) => n.source == src.id);
 		const tested = all.filter((n) => d.ping[n.id] != null).length;
-		const meta = [ '%d %s'.format(src.count, plural(src.count, _('узел'), _('узла'), _('узлов'))) ];
+		const meta = [ '%d %s'.format(src.count, sui.plural(src.count, _('узел'), _('узла'), _('узлов'))) ];
 		if (tested)
 			meta.push(_('отвечают %d').format(all.filter((n) => d.ping[n.id] >= 0).length));
 		if (src.kind == 'subscription' && src.updated)
@@ -369,7 +351,7 @@ return view.extend({
 						'class': 'st-star' + (star ? '' : ' off'),
 						'title': star ? _('Убрать из автовыбора') : _('Добавить в автовыбор'),
 						'click': ui.createHandlerFn(this, 'handleAuto', undefined, n.id, !star)
-					}, star ? '★' : '☆')),
+					}, sui.icon('star', star))),
 					E('td', {}, [
 						sel ? E('strong', {}, '✓ ' + n.name) : n.name,
 						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : '',
@@ -378,7 +360,7 @@ return view.extend({
 					(this.cells[n.id] = E('td', { 'class': 'st-ping' }, pingLabel(d.ping[n.id]))),
 					E('td', { 'class': 'st-act' }, [
 						sel ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
-						isSub ? '' : smallBtn('✕', _('Удалить'), () => this.handleRemove(n.id, n.name), 'cbi-button-remove')
+						isSub ? '' : sui.iconButton('close', _('Удалить'), () => this.handleRemove(n.id, n.name))
 					])
 				]);
 			});
@@ -388,9 +370,9 @@ return view.extend({
 					E('span', { 'class': 'st-title' }, isSub ? src.name : _('Отдельные ссылки')),
 					(this.metas[src.id] = E('span', { 'class': 'st-meta' }, this.metaText(src))),
 					E('span', { 'class': 'st-actions' }, [
-						smallBtn('⏱', _('Проверить задержку узлов'), () => this.handlePing(list.map((n) => n.id))),
-						isSub ? smallBtn('⟳', _('Обновить подписку'), () => this.handleUpdate(src.id)) : '',
-						isSub ? smallBtn('⚙', _('Настройки подписки'), () => this.showEdit(src)) : ''
+						sui.iconButton('ping', _('Проверить задержку узлов'), () => this.handlePing(list.map((n) => n.id))),
+						isSub ? sui.iconButton('refresh', _('Обновить подписку'), () => this.handleUpdate(src.id)) : '',
+						isSub ? sui.iconButton('settings', _('Настройки подписки'), () => this.showEdit(src)) : ''
 					])
 				]),
 				E('div', { 'class': 'st-list', 'data-src': src.id }, E('table', {}, rows.length ? rows :
@@ -419,10 +401,11 @@ return view.extend({
 		this.busyBox = E('span', { 'style': 'white-space:nowrap' });
 		this.groupsBox = E('div');
 
-		const sortBtn = E('button', {
-			'class': 'btn cbi-button st-icon', 'title': _('Сортировать по задержке'),
-			'click': () => { this.sortByPing = !this.sortByPing; sortBtn.classList.toggle('on', this.sortByPing); this.renderGroups(); }
-		}, '⇅');
+		const sortBtn = sui.iconButton('sort', _('Сортировать по задержке'), () => {
+			this.sortByPing = !this.sortByPing;
+			sortBtn.classList.toggle('on', this.sortByPing);
+			this.renderGroups();
+		});
 		const bar = E('div', { 'class': 'st-bar' }, [
 			E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showAdd() }, _('Добавить')),
 			E('input', {
@@ -430,10 +413,10 @@ return view.extend({
 				'input': (ev) => { this.filter = ev.target.value; this.renderGroups(); }
 			}),
 			this.busyBox,
-			E('button', { 'class': 'btn cbi-button st-icon', 'title': _('Проверить задержку всех узлов'), 'click': ui.createHandlerFn(this, 'handlePing', []) }, '⏱'),
-			E('button', { 'class': 'btn cbi-button st-icon', 'title': _('Обновить все подписки'), 'click': ui.createHandlerFn(this, 'handleUpdate', undefined) }, '⟳'),
+			sui.iconButton('ping', _('Проверить задержку всех узлов'), () => this.handlePing([])),
+			sui.iconButton('refresh', _('Обновить все подписки'), () => this.handleUpdate(undefined)),
 			sortBtn,
-			E('button', { 'class': 'btn cbi-button st-icon', 'title': _('Настройки'), 'click': () => this.showOptions() }, '⚙')
+			sui.iconButton('settings', _('Настройки'), () => this.showOptions())
 		]);
 
 		this.renderAll();
