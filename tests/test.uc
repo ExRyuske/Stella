@@ -9,7 +9,7 @@ import { decode } from 'stella.subscription';
 import { build_config, dns_server_ip } from 'stella.xray';
 import { parse_list } from 'stella.lists';
 import { nft_script, dnsmasq_conf } from 'stella.firewall';
-import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
@@ -291,19 +291,32 @@ if (length(yv) == 2 && yv[0].name == 'Yv01' && yv[1].name == 'Yv02' && yv[0].arg
 else
 	fail(`block_strategies: ${sprintf('%J', yv)}`);
 
-// Сборка стратегии: YouTube первым, блоки через --new, порты дополняются.
-let z = compose({ main: [ '--filter-tcp=443', '--dpi-desync=fake' ], yt: [ '--filter-tcp=443', '--hostlist=g.txt' ], discord: true, games: false, tcp_ports: '80,443', udp_ports: '443' });
-if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == '--filter-tcp=443' && index(join(' ', z.args), 'discord.media') > 0 &&
-    z.tcp_ports == '80,443,2053,2083,2087,2096,8443' && z.udp_ports == '443,19294-19344,50000-50100' && z.args[length(z.args) - 1] != '--new' &&
+// Отдельные наборы ZMS: Dv из скрипта, игровые порты из скрипта, Gv1–Gv4 по шаблону.
+let zms = readfile('tests/fixtures/zms-strategies.sh');
+let dv = zms_discord(zms), gp = zms_game_ports(zms), gv = game_strategies(gp);
+if (length(dv) == 2 && dv[0].name == 'Dv1' && dv[0].family == 'dv' && dv[0].args[0] == '--filter-tcp=2053,2083,2087,2096,8443' &&
+    index(gp.udp, '1024-2407') >= 0 && index(gp.tcp, '25565') >= 0 &&
+    length(gv) == 4 && gv[0].name == 'Gv1' && gv[3].args[5] == '--dpi-desync-cutoff=n4' && index(join(' ', gv[1].args), '--new --filter-tcp=') > 0)
+	passed++;
+else
+	fail(`наборы ZMS: ${sprintf('%J', { dv, gp, gv: gv[0] })}`);
+
+// Сборка: YouTube первым, Discord — голос + Dv, игры — Gv; порты дополняются и сливаются.
+let z = compose({ main: [ '--filter-tcp=443', '--dpi-desync=fake' ], yt: { args: [ '--filter-tcp=443', '--hostlist=g.txt' ] },
+	discord: dv[0], games: gv[1], tcp_ports: '80,443', udp_ports: '443' });
+let zj = join(' ', z.args);
+if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == '--filter-tcp=443' &&
+    index(zj, '--filter-l7=discord,stun') > 0 && index(zj, 'discord.media') > index(zj, '--filter-l7=discord,stun') &&
+    index(zj, '--dpi-desync-cutoff=n2') > 0 && z.args[length(z.args) - 1] != '--new' &&
+    index(z.tcp_ports, '2053') >= 0 && index(z.tcp_ports, '25565') >= 0 && z.udp_ports == '88,443,1024-2407,2409-4499,4502-65535' &&
     merge_ports([ '443,80', '1024-2000,1500-3000', '3001', 'x', '1024-65535,443' ]) == '80,443,1024-65535')
 	passed++;
 else
 	fail(`compose: ${sprintf('%J', z)}`);
-let z2 = compose({ main: [ '--a' ], yt: null, discord: false, games: true });
-if (join(' ', z2.args) == '--a --new ' + join(' ', slice(z2.args, 2)) && index(z2.udp_ports, '1024-65535') > 0)
+if (sprintf('%J', compose({ main: [ '--a' ] })) == '{ "args": [ "--a" ], "tcp_ports": "80,443", "udp_ports": "443" }')
 	passed++;
 else
-	fail(`compose games: ${sprintf('%J', z2)}`);
+	fail('compose без наборов');
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

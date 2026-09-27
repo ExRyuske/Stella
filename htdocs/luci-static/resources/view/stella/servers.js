@@ -236,7 +236,7 @@ return view.extend({
 		else if (auto)
 			node = [ E('span', { 'class': 'st-bad' }, _('Отметьте ★ хотя бы два узла для автовыбора.')) ];
 		else if (n)
-			node = [ E('strong', {}, n.name), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', pingLabel(d.ping[n.id]) ];
+			node = [ E('strong', {}, n.name), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id]))) ];
 		else if (d.selected)
 			node = [ E('span', { 'class': 'st-bad' }, _('Выбранный узел пропал из списка — выберите другой.')) ];
 		else
@@ -303,7 +303,11 @@ return view.extend({
 			if (this.metas[src.id])
 				this.metas[src.id].textContent = this.metaText(src);
 		this.renderBusy();
-		this.renderCurrent();
+		// Строка текущего узла не пересобирается (иначе закрывался бы открытый выбор режима) —
+		// меняется только её задержка.
+		const cur = d.nodes.find((x) => x.id == d.selected);
+		if (cur && this.curPing)
+			dom.content(this.curPing, pingLabel(d.ping[cur.id]));
 	},
 
 	renderGroups() {

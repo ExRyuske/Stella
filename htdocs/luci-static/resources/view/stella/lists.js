@@ -24,7 +24,7 @@ const callZCatalogUpdate = rpc.declare({ object: 'stella', method: 'zapret_catal
 const callZTest = rpc.declare({ object: 'stella', method: 'zapret_test', params: [ 'scope', 'apply' ] });
 const callZTestStop = rpc.declare({ object: 'stella', method: 'zapret_test_stop' });
 
-const FAMILIES = { v: 'Zapret Manager', yv: _('YouTube'), fs: 'Flowseal', current: _('текущая') };
+const FAMILIES = { v: 'Zapret Manager', yv: 'YouTube', fs: 'Flowseal', dv: 'Discord', gv: _('игры'), current: _('текущая') };
 
 const ITD = 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/';
 const META = 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/';
@@ -168,7 +168,13 @@ return view.extend({
 			this.zi = zi;
 			this.zc = zc;
 			this.setDevices(dr);
-			this.renderAll();
+			// Во время автоподбора меняется только ход проверки — обновляем одну строку,
+			// иначе перерисовка каждые 2 с закрывала бы открытые списки.
+			const p = zc.progress || {};
+			if (wasTesting && zc.testing && !was && !d.updating && this.zProgress)
+				this.zProgress.textContent = p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…');
+			else
+				this.renderAll();
 			if (wasTesting && !zc.testing && zc.progress && zc.progress.message)
 				ui.addNotification(null, E('p', {}, _('Автоподбор: %s').format(zc.progress.message)), 'info');
 			const busy = d.updating || zc.testing || zc.updating;
@@ -346,7 +352,7 @@ return view.extend({
 
 	renderZapret() {
 		const zi = this.zi, cfg = this.cfg, zc = this.zc;
-		const used = this.data.lists.some((l) => l.enabled && l.action == 'zapret');
+		const used = this.data.default_action == 'zapret' || this.data.lists.some((l) => l.enabled && l.action == 'zapret');
 		const res = (zc.results && zc.results.items) || {};
 		const score = (name) => {
 			const r = res[name];
@@ -357,20 +363,27 @@ return view.extend({
 		// смена применяется сразу.
 		const groups = {};
 		for (const st of zc.strategies)
-			if (st.family != 'yv')
+			if (st.family == 'v' || st.family == 'fs')
 				(groups[st.family] = groups[st.family] || []).push(st);
-		const ytSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_yt: ev.target.value }).then(() => this.refresh()) }, [
-			E('option', { 'value': '', 'selected': cfg.zapret_yt ? null : '' }, _('как в основной')),
-			...zc.strategies.filter((st) => st.family == 'yv').map((st) =>
-				E('option', { 'value': st.name, 'selected': st.name == cfg.zapret_yt ? '' : null }, st.name + (res[st.name] ? '  · ' + score(st.name) : '')))
-		]);
-		const flag = (key, label, title) => E('label', { 'title': title }, [
-			E('input', { 'type': 'checkbox', 'checked': cfg[key] == '1' ? '' : null,
-				'change': (ev) => this.saveSetting({ [key]: ev.target.checked ? '1' : '0' }).then(() => { cfg[key] = ev.target.checked ? '1' : '0'; }) }),
-			' ', label ]);
-		const sched = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_test_interval: ev.target.value }).then(() => { cfg.zapret_test_interval = ev.target.value; }) },
-			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ].map(([ v, t ]) =>
-				E('option', { 'value': v, 'selected': (cfg.zapret_test_interval || '0') == v ? '' : null }, t)));
+
+		// YouTube, Discord и игры — отдельные наборы, как в Zapret Manager; «1» от прежних
+		// версий — первый вариант набора.
+		const fam = (f) => zc.strategies.filter((st) => st.family == f);
+		const cur = (key, f) => (!cfg[key] || cfg[key] == '0') ? '' : (cfg[key] == '1' ? ((fam(f)[0] || {}).name || '') : cfg[key]);
+		const setSel = (key, f) => {
+			const v = cur(key, f);
+			return E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ [key]: ev.target.value }).then(() => {
+				cfg[key] = ev.target.value;
+				return this.refresh();
+			}) }, [
+				E('option', { 'value': '', 'selected': v ? null : '' }, _('выключено')),
+				...fam(f).map((st) => E('option', { 'value': st.name, 'selected': st.name == v ? '' : null }, st.name + (res[st.name] ? '  · ' + score(st.name) : '')))
+			]);
+		};
+		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
+		const sched = sui.combo(cfg.zapret_test_interval || '0',
+			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
+			(v) => this.saveSetting({ zapret_test_interval: v }).then(() => { cfg.zapret_test_interval = v; }), { custom_placeholder: _('дней…') });
 		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
 			if (ev.target.value == '__custom')
 				return this.showZapret();
@@ -385,8 +398,8 @@ return view.extend({
 
 		let state;
 		if (!used)
-			state = E('span', { 'class': 'st-dim' }, _('не используется — ни у одного списка не выбрано «Zapret»'));
-		else if (!cfg.zapret_opts)
+			state = E('span', { 'class': 'st-dim' }, _('не используется — нигде не выбрано «Zapret»'));
+		else if (!cfg.zapret_opts && !cur('zapret_yt', 'yv'))
 			state = E('span', { 'class': 'st-bad' }, _('стратегия не выбрана'));
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
@@ -399,7 +412,7 @@ return view.extend({
 		let test;
 		if (zc.testing)
 			test = [
-				E('em', { 'class': 'spinning' }, p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…')),
+				(this.zProgress = E('em', { 'class': 'spinning' }, p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…'))),
 				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZTestStop())) }, _('Остановить'))
 			];
 		else
@@ -415,18 +428,22 @@ return view.extend({
 		const names = Object.keys(res).filter((n) => res[n].family != 'current').sort((a, b) => res[b].ok - res[a].ok);
 		const base = zc.results && zc.results.baseline;
 		const baseText = base ? Object.keys(base).map((k) => (k == 'yv' ? _('YouTube') : _('общие')) + ' ' + base[k].ok + '/' + base[k].total).join(', ') : '';
+		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == zc.current && !zc.custom);
+		const apply = (n, r) => (r.family == 'yv')
+			? this.saveSetting({ zapret_yt: n }).then(() => { cfg.zapret_yt = n; return this.refresh(); })
+			: this.call(callZApply(n));
 		const results = names.length ? E('details', {}, [
 			E('summary', { 'style': 'cursor:pointer' }, _('Результаты проверки (%d)').format(names.length) +
 				(zc.results.at ? ' · ' + new Date(zc.results.at * 1000).toLocaleString('ru-RU') : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
 			E('div', { 'class': 'st-zres' }, E('table', {}, names.map((n) => {
 				const r = res[n];
 				const pct = (r.ok > 0 && r.total) ? Math.round(100 * r.ok / r.total) : 0;
-				return E('tr', { 'class': n == zc.current && !zc.custom ? 'st-cur' : '' }, [
+				return E('tr', { 'class': isCur(n, r) ? 'st-cur' : '' }, [
 					E('td', {}, n),
 					E('td', { 'class': 'st-dim' }, FAMILIES[r.family] || r.family),
 					E('td', { 'style': 'white-space:nowrap' }, [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ]),
-					E('td', { 'class': 'st-act' }, (n == zc.current && !zc.custom) ? _('текущая') :
-						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZApply(n))) }, _('Применить')))
+					E('td', { 'class': 'st-act' }, isCur(n, r) ? _('текущая') :
+						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => apply(n, r)) }, _('Применить')))
 				]);
 			})))
 		]) : '';
@@ -456,15 +473,13 @@ return view.extend({
 					zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю…')) : E('a', { 'href': '#', 'click': (ev) => { ev.preventDefault(); this.call(callZCatalogUpdate()); } }, _('обновить'))
 				])
 			]),
-			E('div', { 'class': 'st-dim', 'style': 'margin:.3em 0 .5em' }, _('Обход блокировок без VPN для списков с действием «Zapret». Стратегии — из Zapret Manager, его YouTube-набора и Flowseal.')),
+			E('div', { 'class': 'st-dim', 'style': 'margin:.3em 0 .5em' }, _('Обход блокировок без VPN для списков с действием «Zapret». Стратегии — как в Zapret Manager: основная и отдельные для YouTube, Discord и игр.')),
 			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Стратегия')), sel,
 				(zc.current && res[zc.current]) ? E('span', { 'class': 'st-dim' }, score(zc.current)) : '',
 				E('span', { 'class': 'st-dim' }, [ '· ', state ]) ]),
-			E('div', { 'class': 'st-zrow' }, [ E('b', {}, 'YouTube'), ytSel ]),
-			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Дополнительно')),
-				flag('zapret_discord', _('голос и видео Discord'), _('UDP 19294–19344, 50000–50100 и TCP для discord.media')),
-				flag('zapret_games', _('игры'), _('UDP и TCP 1024–65535, как игровой фильтр Flowseal')) ]),
-			(cfg.zapret_games == '1' || cfg.zapret_discord == '1') && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
+			E('div', { 'class': 'st-zrow' }, [ E('b', {}, 'YouTube'), ytSel,
+				E('b', {}, 'Discord'), dvSel, E('b', {}, _('Игры')), gvSel ]),
+			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
 				_('Игровые серверы и голос Discord ходят по IP, которых нет в списках: чтобы Zapret их касался, выберите вверху «Всё, что не попало в списки: через Zapret» или добавьте их адреса в список с действием «Zapret».')) : '',
 			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Автоподбор')), ...test ]),
 			E('div', { 'class': 'st-zrow' }, [ _('по расписанию:'), sched,
@@ -482,8 +497,8 @@ return view.extend({
 			E('span', {}, _('Всё, что не попало в списки:')),
 			E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.call(callDefault(ev.target.value)) }, [
 				E('option', { 'value': 'vpn', 'selected': d.default_action == 'vpn' ? '' : null }, _('через VPN')),
-				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую')),
-				E('option', { 'value': 'zapret', 'selected': d.default_action == 'zapret' ? '' : null }, _('через Zapret'))
+				E('option', { 'value': 'zapret', 'selected': d.default_action == 'zapret' ? '' : null }, _('через Zapret')),
+				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую'))
 			]),
 			E('span', { 'class': 'st-dim' }, _('Списки проверяются сверху вниз, срабатывает первый подходящий.'))
 		]);

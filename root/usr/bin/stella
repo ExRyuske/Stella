@@ -11,8 +11,8 @@ import { build_config, outbound } from 'stella.xray';
 import { fnv1a } from 'stella.util';
 import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
-import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose } from 'stella.zapret';
-import { CACHE_DIR, RUN_DIR, LISTS_DIR, sub_label, load_nodes as store_load_nodes, load_lists, load_devices } from 'stella.store';
+import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies } from 'stella.zapret';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
 const PING_URL = 'https://www.gstatic.com/generate_204';
@@ -44,8 +44,26 @@ function shq(s) {
 	return "'" + replace(s, "'", "'\\''") + "'";
 }
 
+function usage() {
+	warn('Использование: stella <команда>\n' +
+		'  update [подписка]  обновить подписки\n' +
+		'  nodes              список узлов (* — выбранный)\n' +
+		'  gen [файл|-]       сгенерировать конфиг xray\n' +
+		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
+		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
+		'  lists [id]         обновить списки сайтов\n' +
+		'  upgrade check|stella|xray  проверить или установить обновления\n' +
+		'  migrate            переименовать анонимные секции в постоянные\n' +
+		'  parse <ссылка>     разобрать ссылку\n');
+	return 2;
+}
+
+// Уникальное имя временного файла: скачивания из разных процессов (обновление подписок,
+// списков, каталога) могут совпасть по времени.
+let fetch_seq = 0;
+
 function fetch(url, ua, proxy) {
-	let tmp = `/tmp/stella-fetch.${time()}`;
+	let tmp = `/tmp/stella-fetch.${time()}.${fnv1a(url)}.${fetch_seq++}`;
 	let cmd = sprintf('curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 -A %s %s-o %s %s',
 		shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(tmp), shq(url));
 	let rc = system(cmd);
@@ -183,19 +201,24 @@ function strategy_lines(text) {
 	return res;
 }
 
-// Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord + игры.
+// Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
+// Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
 function zapret_parts() {
-	let yt = null;
-	let yt_name = opt('main', 'zapret_yt', '');
-	if (yt_name)
-		for (let st in json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]'))
-			if (st.name == yt_name)
-				yt = st.args;
+	let cat = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	let pick = (key, family) => {
+		let v = opt('main', key, '');
+		if (v == '' || v == '0')
+			return null;
+		for (let st in cat)
+			if (st.family == family && (st.name == v || v == '1'))
+				return st;
+		return null;
+	};
 	return compose({
 		main: strategy_lines(opt('main', 'zapret_opts', '')),
-		yt,
-		discord: opt('main', 'zapret_discord', '0') == '1',
-		games: opt('main', 'zapret_games', '0') == '1',
+		yt: pick('zapret_yt', 'yv'),
+		discord: pick('zapret_discord', 'dv'),
+		games: pick('zapret_games', 'gv'),
 		tcp_ports: opt('main', 'zapret_tcp_ports', '80,443'),
 		udp_ports: opt('main', 'zapret_udp_ports', '443')
 	});
@@ -532,8 +555,12 @@ function cmd_zapret_catalog() {
 	let keep = (family) => filter(old, (s) => s.family == family);
 	system(`mkdir -p ${shq(ZAPRET_DIR)}/fake`);
 
-	let v = zms_strategies(fetch_any(`${ZMS_RAW}/Zapret-Manager.sh`, proxy));
+	let zms = fetch_any(`${ZMS_RAW}/Zapret-Manager.sh`, proxy);
+	let v = zms_strategies(zms);
 	if (!length(v)) { warn('ZMS: стратегии v не получены, оставляю прежние\n'); v = keep('v'); }
+	let dv = zms_discord(zms);
+	if (!length(dv)) dv = keep('dv');
+	let gv = game_strategies(zms_game_ports(zms));
 
 	let yv = block_strategies(fetch_any(`${ZMS_RAW}/files/StrYoutube`, proxy), 'yv');
 	if (!length(yv)) { warn('ZMS: стратегии YouTube не получены, оставляю прежние\n'); yv = keep('yv'); }
@@ -560,12 +587,12 @@ function cmd_zapret_catalog() {
 	if (suite && type(json(suite)) == 'array')
 		writefile(`${ZAPRET_DIR}/suite.json`, suite);
 
-	let all = [ ...v, ...yv, ...fs ];
+	let all = [ ...v, ...yv, ...fs, ...dv, ...gv ];
 	let data = sprintf('%J', all);
 	if (length(all) && readfile(`${ZAPRET_DIR}/catalog.json`) != data)
 		writefile(`${ZAPRET_DIR}/catalog.json`, data);
 	writefile(`${ZAPRET_DIR}/catalog.updated`, `${time()}`);
-	printf('Каталог: v %d, YouTube %d, Flowseal %d\n', length(v), length(yv), length(fs));
+	printf('Каталог: v %d, YouTube %d, Flowseal %d, Discord %d, игры %d\n', length(v), length(yv), length(fs), length(dv), length(gv));
 	return length(all) ? 0 : 1;
 }
 
@@ -640,7 +667,9 @@ function zt_run(bin, args, hosts) {
 	if (!pid || system(`kill -0 ${pid} 2>/dev/null`) != 0)
 		return null;     // nfqws не принял ключи
 	let ok = zt_probe(hosts);
-	system(`kill ${pid} 2>/dev/null; sleep 0.2; kill -9 ${pid} 2>/dev/null`);
+	system(`kill ${pid} 2>/dev/null`);
+	sleep(200);
+	system(`kill -9 ${pid} 2>/dev/null`);
 	return ok;
 }
 
@@ -659,7 +688,9 @@ function cmd_zapret_test(...argv) {
 	let scope = filter(argv, (a) => a != '--apply')[0] || 'all';
 	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
 	let catalog = zapret_catalog();
-	let list = (scope == 'all') ? catalog : filter(catalog, (s) => s.family == scope || s.name == scope);
+	// Discord и игры проверить запросами curl нельзя — они в автоподбор не входят.
+	let testable = filter(catalog, (s) => s.family in [ 'v', 'fs', 'yv' ]);
+	let list = (scope == 'all') ? testable : filter(testable, (s) => s.family == scope || s.name == scope);
 	if (!length(list)) {
 		warn('нет стратегий для проверки — обновите каталог\n');
 		return 1;
@@ -851,10 +882,9 @@ function cmd_upgrade(what) {
 
 // Обновление по расписанию. Флаги *.running и логи — те же, что у кнопок в интерфейсе.
 function run_locked(name, cmd) {
-	let lock = `${RUN_DIR}/${name}.running`;
-	if (readfile(lock) != null)
+	if (task_busy(name))
 		return false;
-	system(`touch ${lock}; { ${cmd}; } >${RUN_DIR}/${name}.log 2>&1; rm -f ${lock}`);
+	system(`sh ${task_script(name, cmd)} </dev/null`);
 	return true;
 }
 
@@ -876,27 +906,25 @@ function cmd_tick() {
 	st.sub ??= newest_mtime(`${CACHE_DIR}/*.json`);
 	st.lists ??= newest_mtime(`${LISTS_DIR}/*.json`);
 
+	// После обновлений — reload: init передаёт procd контрольную сумму конфига xray, и тот
+	// перезапускается, только если конфиг изменился (например, у узла сменились ключи).
 	let action = null;
 	if (sub_h > 0 && now - st.sub >= sub_h * 3600 && run_locked('update', '/usr/bin/stella update')) {
 		st.sub = now;
-		// Провайдер мог сменить ключи выбранного узла — тогда нужен перезапуск xray.
-		let cfg = current_config();
-		if (cfg && sprintf('%.J\n', cfg) != readfile(`${CONF_DIR}/config.json`))
-			action = 'restart';
+		action = 'reload';
 	}
 	if (lists_h > 0 && now - st.lists >= lists_h * 3600 && run_locked('lists', '/usr/bin/stella lists')) {
 		st.lists = now;
-		action ??= 'reload';
+		action = 'reload';
 	}
 	// Автоподбор Zapret — ночью (3–5 ч), раз в zapret_test_interval дней, только если
 	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей.
 	let zt_days = +opt('main', 'zapret_test_interval', '0');
-	let hour = +trim(popen('date +%H', 'r')?.read('all') || '12');
+	let hour = +trim(cmd_out('date +%H') || '12');
 	st.ztest ??= +(json(readfile(`${ZAPRET_DIR}/results.json`) || 'null')?.at || now);
 	if (zt_days > 0 && hour >= 3 && hour < 5 && now - st.ztest >= zt_days * 86400 - 3600 &&
 	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply')) {
 		st.ztest = now;
-		action = null;   // zapret-test при смене стратегии сам сделал reload
 	}
 
 	writefile(state_path, sprintf('%J', st));
@@ -920,19 +948,6 @@ function cmd_parse(link) {
 	return n.error ? 1 : 0;
 }
 
-function usage() {
-	warn('Использование: stella <команда>\n' +
-		'  update [подписка]  обновить подписки\n' +
-		'  nodes              список узлов (* — выбранный)\n' +
-		'  gen [файл|-]       сгенерировать конфиг xray\n' +
-		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
-		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
-		'  lists [id]         обновить списки сайтов\n' +
-		'  upgrade check|stella|xray  проверить или установить обновления\n' +
-		'  migrate            переименовать анонимные секции в постоянные\n' +
-		'  parse <ссылка>     разобрать ссылку\n');
-	return 2;
-}
 
 const CMDS = {
 	update: cmd_update,

@@ -2,7 +2,7 @@
 
 'use strict';
 
-import { readfile, stat } from 'fs';
+import { readfile, writefile, stat } from 'fs';
 import { parse } from 'stella.uri';
 import { parse_list } from 'stella.lists';
 
@@ -95,4 +95,25 @@ export function load_devices(uci) {
 		});
 	});
 	return res;
+};
+
+// Фоновые задачи (обновление, проверка задержки, автоподбор…) — общие для CLI и rpcd.
+// Флаг $RUN_DIR/<имя>.running хранит PID процесса: задача занята, пока он жив. Сразу
+// после запуска, пока PID ещё не записан, в флаге «starting» — считается занятым 15 с.
+export function task_busy(name) {
+	let path = `${RUN_DIR}/${name}.running`;
+	let v = trim(readfile(path) || '');
+	if (v == 'starting')
+		return time() - (stat(path)?.mtime ?? 0) < 15;
+	return match(v, /^[0-9]+$/) != null && system(`kill -0 ${v} 2>/dev/null`) == 0;
+};
+
+// Скрипт задачи: пишет свой PID во флаг, выполняет cmd с логом в <имя>.log, снимает флаг.
+export function task_script(name, cmd) {
+	let run = `${RUN_DIR}/${name}.running`;
+	system(`mkdir -p ${RUN_DIR}`);
+	writefile(run, 'starting');
+	let script = `${RUN_DIR}/${name}.sh`;
+	writefile(script, `echo $$ >${run}\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrm -f ${run}\n`);
+	return script;
 };

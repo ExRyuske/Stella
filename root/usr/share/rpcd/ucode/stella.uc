@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, load_nodes, sub_label, load_lists, load_devices } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a } from 'stella.util';
 
@@ -38,16 +38,13 @@ function running() {
 }
 
 function busy(name) {
-	let st = stat(`${RUN_DIR}/${name}.running`);
-	// Зависший флаг (например, процесс убит) не должен блокировать навсегда.
-	return st != null && time() - st.mtime < 600;
+	return task_busy(name);
 }
 
 function spawn(name, cmd) {
 	if (busy(name))
 		return false;
-	let lock = `${RUN_DIR}/${name}.running`;
-	system(`mkdir -p ${RUN_DIR}; ( touch ${lock}; { ${cmd}; } >${RUN_DIR}/${name}.log 2>&1; rm -f ${lock} ) </dev/null >/dev/null 2>&1 &`);
+	system(`sh ${task_script(name, cmd)} </dev/null >/dev/null 2>&1 &`);
 	return true;
 }
 
@@ -81,17 +78,18 @@ const SETTINGS = {
 	zapret_opts: { title: 'Стратегия', def: '', apply: 'reload' },
 	zapret_strategy: { title: 'Стратегия из каталога', def: '', apply: 'reload' },
 	zapret_yt: { title: 'Стратегия для YouTube', def: '', apply: 'reload' },
-	zapret_discord: { title: 'Discord', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
-	zapret_games: { title: 'Игры', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
-	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => v in [ '0', '7', '30' ] },
+	zapret_discord: { title: 'Стратегия для Discord', def: '', apply: 'reload' },
+	zapret_games: { title: 'Стратегия для игр', def: '', apply: 'reload' },
+	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
 	zapret_tcp_ports: { title: 'Порты TCP', def: '80,443', apply: 'reload', check: PORTS },
 	zapret_udp_ports: { title: 'Порты UDP', def: '443', apply: 'reload', check: PORTS }
 };
 
-// Работает ли чужой nfqws (отдельная служба zapret), а не запущенный Stella (--qnum=202).
+// Работает ли чужой nfqws (отдельная служба zapret), а не запущенный Stella: свой — на
+// очереди 202, проверочный при автоподборе — на 205.
 function zapret_foreign_nfqws() {
 	for (let line in split(cmd_output('ps w') || '', '\n'))
-		if (match(line, /nfqws/) && !match(line, /--qnum=202/) && !match(line, /ps w/))
+		if (match(line, /nfqws/) && !match(line, /--qnum=20[25]/) && !match(line, /ps w/))
 			return true;
 	return false;
 }
@@ -254,7 +252,9 @@ const methods = {
 			let id = req.args?.id;
 			if (id && !match(id, /^[A-Za-z0-9_]+$/))
 				return { error: 'некорректный id' };
-			return { started: spawn('update', `/usr/bin/stella update ${id || ''}`) };
+			// После обновления — reload: xray перезапустится, только если у узла сменились ключи.
+			let apply = (cursor().get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : '';
+			return { started: spawn('update', `/usr/bin/stella update ${id || ''}${apply}`) };
 		}
 	},
 
@@ -289,7 +289,7 @@ const methods = {
 			if (subs || links)
 				uci.commit('stella');
 			if (subs)
-				spawn('update', '/usr/bin/stella update');
+				spawn('update', '/usr/bin/stella update' + ((uci.get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : ''));
 			return { subscriptions: subs, links, errors };
 		}
 	},
@@ -304,13 +304,17 @@ const methods = {
 				return { error: 'подписка не найдена' };
 			if (a.url != null && !match(a.url, /^https?:\/\/\S+$/))
 				return { error: 'нужна ссылка http(s)://' };
+			let was_enabled = uci.get('stella', a.id, 'enabled') != '0';
 			for (let k in [ 'name', 'url', 'user_agent' ])
 				if (a[k] != null)
 					uci.set('stella', a.id, k, a[k]);
 			if (a.enabled != null)
 				uci.set('stella', a.id, 'enabled', a.enabled ? '1' : '0');
 			uci.commit('stella');
-			restart_if_enabled(uci);
+			// Название, URL и User-Agent на работающий xray не влияют; включение и выключение
+			// меняет набор узлов — reload перезапустит xray, только если конфиг изменился.
+			if (a.enabled != null && !!a.enabled != was_enabled)
+				reload_if_enabled(uci);
 			return { ok: true };
 		}
 	},
@@ -325,9 +329,15 @@ const methods = {
 			if (t != 'subscription' && t != 'node')
 				return { error: 'не найдено' };
 			uci.delete('stella', id);
+			// Отметки автовыбора на удалённые узлы (сам узел или узлы подписки) — тоже прочь.
+			let auto = str_list(uci.get('stella', 'main', 'auto_node'));
+			let keep = filter(auto, (x) => x != id && index(x, `${id}_`) != 0);
+			if (length(keep) != length(auto))
+				length(keep) ? uci.set('stella', 'main', 'auto_node', keep) : uci.delete('stella', 'main', 'auto_node');
 			uci.commit('stella');
 			if (t == 'subscription')
 				unlink(`${CACHE_DIR}/${id}.json`);
+			reload_if_enabled(uci);
 			return { ok: true };
 		}
 	},

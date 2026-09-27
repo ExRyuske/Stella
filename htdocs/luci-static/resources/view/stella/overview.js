@@ -36,7 +36,6 @@ const CSS = `
 .st-card .cbi-dropdown { min-width:26em; max-width:100% }
 .st-head { display:flex; align-items:center; gap:1em; flex-wrap:wrap; margin-bottom:1em }
 .st-head .st-state { font-size:120%; font-weight:bold }
-.st-head .btn { margin-left:auto }
 .st-ok { color:#2a2 } .st-bad { color:#c33 } .st-dim { opacity:.55; font-size:90% }
 .st-log summary { cursor:pointer; padding:.4em 0 }
 .st-log textarea { width:100%; font-family:monospace; font-size:12px }

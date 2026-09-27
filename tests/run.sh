@@ -9,6 +9,9 @@ uc() {
 	"$UCODE" -L "$UCODE_LIB/*.so" -L "$PWD/tests/mock/*.uc" -L "$PWD/root/usr/share/ucode/*.uc" "$@"
 }
 
+# Вызовы функций до объявления: ucode их не поднимает, и ошибка всплывает только при работе.
+python3 scripts/check_ucode_order.py
+
 # Компиляция точек входа (CLI и плагин rpcd) — ловит синтаксис, несовместимый с ucode роутера.
 for f in root/usr/bin/stella root/usr/share/rpcd/ucode/stella.uc; do
 	uc -c -o /dev/null "$f" || { echo "FAIL: $f не компилируется"; exit 1; }

@@ -107,25 +107,54 @@ export function strategy_text(s) {
 	return join('\n', [ `#${s.name}`, ...s.args ]);
 };
 
-// Дополнительные блоки — как у Zapret Manager: голос и видео Discord (UDP + TCP для
-// discord.media) и игры (игровой фильтр Flowseal с портами 1024–65535).
+// Отдельные наборы — как у Zapret Manager:
+//   dv — варианты TCP-блока для discord.media (Dv1…); к ним всегда добавляется блок
+//        голоса и видео Discord по UDP;
+//   gv — игры (Gv1…Gv4): UDP-блок с разной отсечкой + общий TCP-блок, на игровых
+//        портах ZMS.
 const FAKE = '/opt/zapret/files/fake';
-const DISCORD = [
+const DISCORD_VOICE = [
 	'--filter-udp=19294-19344,50000-50100', '--filter-l7=discord,stun', '--dpi-desync=fake',
-	`--dpi-desync-fake-discord=${FAKE}/stun.bin`, `--dpi-desync-fake-stun=${FAKE}/stun.bin`, '--dpi-desync-repeats=6',
-	'--new',
-	'--filter-tcp=2053,2083,2087,2096,8443', '--hostlist-domains=discord.media', '--dpi-desync=multisplit',
-	'--dpi-desync-split-seqovl=652', '--dpi-desync-split-pos=2',
-	`--dpi-desync-split-seqovl-pattern=${FAKE}/tls_clienthello_www_google_com.bin`
+	`--dpi-desync-fake-discord=${FAKE}/stun.bin`, `--dpi-desync-fake-stun=${FAKE}/stun.bin`, '--dpi-desync-repeats=6'
 ];
-const GAMES = [
-	'--filter-tcp=1024-65535', '--dpi-desync=multisplit', '--dpi-desync-any-protocol=1', '--dpi-desync-cutoff=n3',
-	'--dpi-desync-split-seqovl=568', '--dpi-desync-split-pos=1',
-	`--dpi-desync-split-seqovl-pattern=${FAKE}/tls_clienthello_www_google_com.bin`,
-	'--new',
-	'--filter-udp=1024-65535', '--dpi-desync=fake', '--dpi-desync-repeats=12', '--dpi-desync-any-protocol=1',
-	`--dpi-desync-fake-unknown-udp=${FAKE}/quic_initial_www_google_com.bin`, '--dpi-desync-cutoff=n2'
-];
+const DISCORD_TCP = '2053,2083,2087,2096,8443';
+const DISCORD_UDP = '19294-19344,50000-50100';
+export const GAME_PORTS = {
+	udp: '88,1024-2407,2409-4499,4502-19293,19345-49999,50101-65535',
+	tcp: '2099,2802,2302,2502,3478-3480,3724,6000-8000,8085,8090,8100,8903,8904,25565,27015-27030,27036-27037,35500-35600,50001,60442'
+};
+
+// Zapret-Manager.sh: DvN=$'--ключ\n--ключ…'
+export function zms_discord(script) {
+	let res = [];
+	for (let line in split(script || '', '\n')) {
+		let m = match(line, /^Dv([0-9]+)=\$'(.*)'$/);
+		if (m)
+			push(res, { name: `Dv${m[1]}`, family: 'dv', args: filter(split(m[2], '\\n'), (a) => substr(a, 0, 2) == '--') });
+	}
+	return res;
+};
+
+// Игровые порты из Zapret-Manager.sh (PORTS_UDP="…"; PORTS_TCP="…"), иначе — встроенные.
+export function zms_game_ports(script) {
+	let u = match(script || '', /PORTS_UDP="([0-9,-]+)"/), t = match(script || '', /PORTS_TCP="([0-9,-]+)"/);
+	return { udp: u ? u[1] : GAME_PORTS.udp, tcp: t ? t[1] : GAME_PORTS.tcp };
+};
+
+export function game_strategies(ports) {
+	let tcp_common = [
+		`--filter-tcp=${ports.tcp}`, '--dpi-desync-any-protocol=1', '--dpi-desync-cutoff=n5', '--dpi-desync=multisplit',
+		'--dpi-desync-split-seqovl=582', '--dpi-desync-split-pos=1', `--dpi-desync-split-seqovl-pattern=${FAKE}/stun.bin`
+	];
+	let res = [];
+	for (let n = 1; n <= 4; n++) {
+		let udp = (n == 1)
+			? [ `--filter-udp=${ports.udp}`, '--dpi-desync=fake', '--dpi-desync-cutoff=d2', '--dpi-desync-any-protocol=1', `--dpi-desync-fake-unknown-udp=${FAKE}/stun.bin` ]
+			: [ `--filter-udp=${ports.udp}`, '--dpi-desync=fake', '--dpi-desync-repeats=10', '--dpi-desync-any-protocol=1', `--dpi-desync-fake-unknown-udp=${FAKE}/stun.bin`, `--dpi-desync-cutoff=n${n}` ];
+		push(res, { name: `Gv${n}`, family: 'gv', args: [ ...udp, '--new', ...tcp_common ], tcp_ports: ports.tcp, udp_ports: ports.udp });
+	}
+	return res;
+};
 
 // «80,443,1000-2000,1500-3000» → слитые непересекающиеся диапазоны по возрастанию.
 export function merge_ports(list) {
@@ -149,23 +178,29 @@ export function merge_ports(list) {
 
 // Итоговые ключи nfqws и порты очереди. YouTube — первым: nfqws берёт первый подходящий
 // профиль, а Yv ограничены доменами YouTube и остальному не мешают.
-// opts: { main: [ключи], yt: [ключи] | null, discord, games, tcp_ports, udp_ports }
+// opts: { main: [ключи], yt: стратегия | null, discord: стратегия | null,
+//         games: стратегия | null, tcp_ports, udp_ports }
 export function compose(opts) {
-	let blocks = filter([ opts.yt, opts.main, opts.discord ? DISCORD : null, opts.games ? GAMES : null ], (b) => length(b));
+	let blocks = [ opts.yt?.args, opts.main ];
+	if (opts.discord)
+		push(blocks, DISCORD_VOICE, opts.discord.args);
+	if (opts.games)
+		push(blocks, opts.games.args);
+
 	let args = [];
-	for (let i, b in blocks) {
-		if (i)
+	for (let b in filter(blocks, (b) => length(b))) {
+		if (length(args))
 			push(args, '--new');
 		push(args, ...b);
 	}
 	let tcp = [ opts.tcp_ports || '80,443' ], udp = [ opts.udp_ports || '443' ];
 	if (opts.discord) {
-		push(tcp, '2053,2083,2087,2096,8443');
-		push(udp, '19294-19344,50000-50100');
+		push(tcp, DISCORD_TCP);
+		push(udp, DISCORD_UDP);
 	}
 	if (opts.games) {
-		push(tcp, '1024-65535');
-		push(udp, '1024-65535');
+		push(tcp, opts.games.tcp_ports || GAME_PORTS.tcp);
+		push(udp, opts.games.udp_ports || GAME_PORTS.udp);
 	}
 	return { args, tcp_ports: merge_ports(tcp), udp_ports: merge_ports(udp) };
 };

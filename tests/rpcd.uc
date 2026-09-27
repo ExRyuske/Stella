@@ -4,6 +4,7 @@
 'use strict';
 
 import { writefile, readfile } from 'fs';
+import { task_busy, task_script } from 'stella.store';
 
 let path = getenv('STELLA_UCI_JSON');
 writefile(path, sprintf('%J', {
@@ -56,6 +57,14 @@ r = methods.settings_set.call({ args: { values: { dns_direct: 'https://1.1.1.1/d
 let st = methods.settings.call({ args: {} });
 check('settings_set', r.ok && st.dns_direct == 'https://1.1.1.1/dns-query' && st.block_doh == '0' &&
 	sprintf('%J', st.lan_ifname) == '[ "br-lan", "br-guest" ]' && st.sub_interval == '6' && st.lists_interval == '24', st);
+
+// Флаги фоновых задач: «starting» — занято, PID живого процесса — занято, мёртвого — свободно.
+let rd = getenv('STELLA_RUN_DIR');
+task_script('t1', 'true');
+check('task starting', task_busy('t1'), null);
+writefile(`${rd}/t1.running`, '999999');
+check('task dead pid', !task_busy('t1'), null);
+check('task no flag', !task_busy('nope'), null);
 
 print(failed ? `rpcd: ${failed} FAIL\n` : 'rpcd: OK\n');
 exit(failed ? 1 : 0);

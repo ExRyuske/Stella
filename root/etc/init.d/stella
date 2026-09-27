@@ -35,6 +35,10 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command /usr/bin/xray run -c "$CONF"
+	# Контрольная сумма конфига: при reload procd перезапустит xray, только если конфиг
+	# действительно изменился (узел, ключи после обновления подписки, DNS…), и не тронет
+	# соединения, если поменялись одни списки.
+	procd_set_param env STELLA_CONF_SUM="$(md5sum <"$CONF" | cut -d' ' -f1)"
 	procd_set_param respawn 3600 5 0
 	procd_set_param limits nofile="65535 65535"
 	procd_set_param stdout 1
@@ -58,11 +62,12 @@ start_service() {
 		procd_close_instance
 	fi
 
-	# Обновление подписок и списков по расписанию.
-	local sub_h lists_h
+	# Обновление подписок и списков и ночной автоподбор Zapret по расписанию.
+	local sub_h lists_h zt_days
 	config_get sub_h main sub_interval 12
 	config_get lists_h main lists_interval 24
-	if [ "$sub_h" != 0 ] || [ "$lists_h" != 0 ]; then
+	config_get zt_days main zapret_test_interval 0
+	if [ "$sub_h" != 0 ] || [ "$lists_h" != 0 ] || [ "$zt_days" != 0 ]; then
 		procd_open_instance updater
 		procd_set_param command /usr/bin/stella updater
 		procd_set_param respawn 3600 5 0
