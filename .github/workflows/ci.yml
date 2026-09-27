@@ -94,9 +94,9 @@ jobs:
   # Пакет .apk из SDK. В предложении это проверка сборки, в main — то, что уедет
   # в релиз. Версия поднимается ДО сборки: пакет должен называться той версией,
   # под которой выйдет, а коммит с ней делает `release`, когда собрано всё.
+  # Идёт параллельно с check: выпуск всё равно ждёт обе задачи.
   package:
     name: package
-    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
@@ -124,21 +124,39 @@ jobs:
       # SDK ищет пакеты в подкаталогах фида, а у нас пакет — корень репозитория.
       # Поэтому фид собирается рядом: каталог с Makefile, root/ и htdocs/.
       #
-      # Фиды packages и luci нужны не для сборки (пакет не компилируется), а для
-      # зависимостей: без xray-core, curl и luci-base в дереве SDK молча выкинул
-      # бы пакет из сборки как неудовлетворимый.
+      # Без зависимостей в дереве SDK молча выкинул бы пакет как неудовлетворимый,
+      # но собирает он их все, прежде чем взяться за наш: xray-core тянет за собой
+      # сборку Go, curl — mbedtls, и это ~20 минут ради пакета без единого бинарника.
+      # Поэтому xray-core и curl здесь — пустые заглушки с теми же именами: в .apk
+      # попадают только имена зависимостей. Что настоящие пакеты есть в фиде
+      # packages этой версии, проверяется отдельно. luci-base и ucode — настоящие:
+      # luci.mk нужны инструменты luci-base.
       - name: build .apk
         run: |
           set -e
           mkdir -p feed/luci-app-stella out
           cp -r Makefile root htdocs feed/luci-app-stella/
+          for p in xray-core curl; do
+            mkdir -p "feed/$p"
+            printf '%s\n' \
+              'include $(TOPDIR)/rules.mk' \
+              "PKG_NAME:=$p" 'PKG_VERSION:=0' 'PKG_RELEASE:=1' \
+              'include $(INCLUDE_DIR)/package.mk' \
+              "define Package/$p" '  TITLE:=stub' 'endef' \
+              'define Build/Compile' 'endef' \
+              "define Package/$p/install" '	$(INSTALL_DIR) $(1)/usr' 'endef' \
+              "\$(eval \$(call BuildPackage,$p))" > "feed/$p/Makefile"
+          done
           chmod -R a+rwX feed out
           docker run --rm -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "$SDK_IMAGE" bash -ec '
             [ -x ./scripts/feeds ] || ./setup.sh
             echo "src-link stella /feed" >> feeds.conf.default
             ./scripts/feeds update base packages luci stella >/dev/null
-            ./scripts/feeds install -p stella luci-app-stella
-            ./scripts/feeds install luci-base xray-core curl ucode ucode-mod-fs ucode-mod-uci >/dev/null
+            for p in xray-core curl; do
+              ./scripts/feeds list -r packages | sed "s/[[:space:]].*//" | grep -qx "$p" || { echo "в фиде packages нет $p"; exit 1; }
+            done
+            ./scripts/feeds install -p stella xray-core curl luci-app-stella
+            ./scripts/feeds install luci-base ucode ucode-mod-fs ucode-mod-uci >/dev/null
             make defconfig >/dev/null
             make package/luci-app-stella/compile -j"$(nproc)" V=s
             find bin -name "luci-app-stella*.apk" -exec cp {} /out/ \;
@@ -155,7 +173,7 @@ jobs:
 
   release:
     name: release
-    needs: package
+    needs: [check, package]
     if: needs.package.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
