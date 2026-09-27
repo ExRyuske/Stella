@@ -10,7 +10,7 @@ dir="$(mktemp -d)"
 tmp="$dir/view.js"
 trap 'rm -rf "$dir"' EXIT
 
-for f in htdocs/luci-static/resources/view/stella/*.js; do
+for f in htdocs/luci-static/resources/view/stella/*.js htdocs/luci-static/resources/stella/*.js; do
 	{ echo '(function(){'; cat "$f"; echo '})'; } > "$tmp"
 	node --check "$tmp" || { echo "FAIL: $f"; exit 1; }
 done
