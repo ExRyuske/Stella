@@ -185,8 +185,10 @@ return view.extend({
 				this.zProgress.textContent = p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…');
 			else
 				this.renderAll();
-			if (wasTesting && !zc.testing && zc.progress && zc.progress.message)
+			if ((wasTesting || this.zStarted) && !zc.testing && zc.progress && zc.progress.message)
 				ui.addNotification(null, E('p', {}, _('Автоподбор: %s').format(zc.progress.message)), 'info');
+			if (zc.testing || !this.zStarted || (zc.progress && zc.progress.message))
+				this.zStarted = false;
 			const busy = d.updating || zc.testing || zc.updating || zi.installing;
 			if (busy && !this.polling) {
 				this.polling = () => this.refresh();
@@ -438,7 +440,7 @@ return view.extend({
 		else
 			test = [
 				E('button', { 'class': 'btn cbi-button-action', 'disabled': zc.strategies.length ? null : '',
-					'click': ui.createHandlerFn(this, () => this.call(callZTest('all', auto.checked))) }, _('Подобрать')),
+					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest('all', auto.checked)); }) }, _('Подобрать')),
 				E('label', { 'class': 'st-dim' }, [ auto, ' ', _('применить лучшую') ])
 			];
 
@@ -459,7 +461,9 @@ return view.extend({
 				return E('tr', { 'class': isCur(n, r) ? 'st-cur' : '' }, [
 					E('td', {}, n),
 					E('td', { 'class': 'st-dim' }, FAMILIES[r.family] || r.family),
-					E('td', { 'style': 'white-space:nowrap' }, [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ]),
+					// У ошибки — причина: nfqws не принял ключи, нет файла и т. п.
+					r.ok >= 0 ? E('td', { 'style': 'white-space:nowrap' }, [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ])
+						: E('td', { 'class': 'st-bad' }, r.error ? _('ошибка: %s').format(r.error) : _('ошибка')),
 					E('td', { 'class': 'st-act' }, isCur(n, r) ? _('текущая') :
 						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => apply(n, r)) }, _('Применить')))
 				]);

@@ -724,13 +724,22 @@ function zt_nft(on) {
 	return system(`nft -f ${RUN_DIR}/ztest.nft`);
 }
 
+// Открытые цели или { error: почему nfqws не запустился }.
 function zt_run(bin, args, hosts) {
-	let all = [ `--qnum=${ZT_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...localize(args, zapret_paths()) ];
-	system(`${shq(bin)} ${join(' ', map(all, shq))} >/dev/null 2>&1 & echo $! >${RUN_DIR}/ztest.nfqws.pid`);
+	args = localize(args, zapret_paths());
+	let missing = missing_files(args, (f) => stat(f) != null);
+	if (length(missing))
+		return { error: `нет файлов: ${join(', ', missing)}` };
+	let all = [ `--qnum=${ZT_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...args ];
+	let log = `${RUN_DIR}/ztest.nfqws.log`;
+	system(`${shq(bin)} ${join(' ', map(all, shq))} >${log} 2>&1 & echo $! >${RUN_DIR}/ztest.nfqws.pid`);
 	let pid = trim(readfile(`${RUN_DIR}/ztest.nfqws.pid`) || '');
 	sleep(400);
-	if (!pid || system(`kill -0 ${pid} 2>/dev/null`) != 0)
-		return null;     // nfqws не принял ключи
+	if (!pid || system(`kill -0 ${pid} 2>/dev/null`) != 0) {
+		// Последняя строка вывода nfqws обычно и есть причина.
+		let lines = filter(split(trim(readfile(log) || ''), '\n'), (l) => trim(l) != '');
+		return { error: length(lines) ? `nfqws: ${trim(lines[length(lines) - 1])}` : 'nfqws не запустился' };
+	}
 	let ok = zt_probe(hosts);
 	system(`kill ${pid} 2>/dev/null`);
 	sleep(200);
@@ -756,23 +765,27 @@ function cmd_zapret_test(...argv) {
 	// Discord и игры проверить запросами curl нельзя — они в автоподбор не входят.
 	let testable = filter(catalog, (s) => s.family in [ 'v', 'fs', 'yv' ]);
 	let list = (scope == 'all') ? testable : filter(testable, (s) => s.family == scope || s.name == scope);
-	if (!length(list)) {
-		warn('нет стратегий для проверки — обновите каталог\n');
-		return 1;
-	}
-
 	system(`mkdir -p ${RUN_DIR} ${shq(ZAPRET_DIR)}`);
 	let progress = `${RUN_DIR}/ztest.json`;
+	// Без nfqws проверять нечего: каждая стратегия записалась бы «ошибкой».
+	let fail = (msg) => {
+		writefile(progress, sprintf('%J', { state: 'done', done: 0, total: 0, message: msg }));
+		warn(msg + '\n');
+		return 1;
+	};
+	if (!length(list))
+		return fail('нет стратегий для проверки — обновите каталог');
+	if (!stat(bin))
+		return fail(`nfqws не найден (${bin}) — установите zapret`);
+
 	let stopf = `${RUN_DIR}/ztest.stop`;
 	unlink(stopf);
 	let res_path = `${ZAPRET_DIR}/results.json`;
 	let res = json(readfile(res_path) || 'null') || { items: {} };
 	res.items ??= {};
 
-	if (zt_nft(true) != 0) {
-		warn('nft не принял правила проверки\n');
-		return 1;
-	}
+	if (zt_nft(true) != 0)
+		return fail('nft не принял правила проверки — нужен модуль ядра kmod-nft-queue');
 
 	// Контроль без обхода — по каждому набору целей.
 	let baseline = {};
@@ -797,7 +810,9 @@ function cmd_zapret_test(...argv) {
 		let fam = (st.family == 'yv') ? 'yv' : 'general';
 		let hosts = zt_targets(fam);
 		let ok = zt_run(bin, st.args, hosts);
-		res.items[st.name] = { family: st.family, ok: ok ? length(ok) : -1, total: length(hosts), at: time() };
+		res.items[st.name] = (type(ok) == 'array')
+			? { family: st.family, ok: length(ok), total: length(hosts), at: time() }
+			: { family: st.family, ok: -1, total: length(hosts), at: time(), error: ok.error };
 	}
 	zt_nft(false);
 	res.at = time();
@@ -974,7 +989,7 @@ function cmd_upgrade(what) {
 		if (system(`rm -rf ${d} && mkdir -p ${d}/old && apk update >/dev/null 2>&1 && ` +
 		           `apk fetch -R -o ${d} dnsmasq-full && apk fetch -o ${d}/old dnsmasq`) != 0) {
 			warn('не удалось скачать dnsmasq-full\n');
-			system(`rm -rf ${d}`);
+			system(`rm -rf ${d}; /etc/init.d/stella reload >/dev/null 2>&1`);
 			return 1;
 		}
 		system(`cp /etc/config/dhcp ${d}/dhcp`);
@@ -985,6 +1000,7 @@ function cmd_upgrade(what) {
 		system(`cp ${d}/dhcp /etc/config/dhcp; rm -f /etc/config/dhcp.apk-new; rm -rf ${d}; /etc/init.d/dnsmasq enable; /etc/init.d/dnsmasq restart`);
 		if (rc != 0) {
 			warn('dnsmasq-full не установился, возвращён прежний dnsmasq\n');
+			system('/etc/init.d/stella reload >/dev/null 2>&1');
 			return 1;
 		}
 	}

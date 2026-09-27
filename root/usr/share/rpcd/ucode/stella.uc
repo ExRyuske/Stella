@@ -165,9 +165,10 @@ const methods = {
 			return {
 				enabled: uci.get('stella', 'main', 'enabled') == '1',
 				running: running(),
-				// Правила перехвата на месте (nft мог их не принять) и умеет ли dnsmasq
-				// класть IP доменов в сеты — без этого списки сайтов не работают.
-				intercept: system('nft list table inet stella >/dev/null 2>&1') == 0,
+				// Перехват на месте: правила nft (могли быть не приняты) и маршрут в xray
+				// (без ip-full не добавляется) — без любого из них трафик идёт напрямую.
+				intercept: system('nft list table inet stella >/dev/null 2>&1') == 0 &&
+					match(cmd_output('ip rule 2>/dev/null') || '', /lookup 1127/) != null,
 				node_id: sel,
 				node,
 				updating: busy('update'),
@@ -676,7 +677,8 @@ const methods = {
 				service_enabled: system('/etc/init.d/zapret enabled 2>/dev/null') == 0,
 				service_running: zapret_foreign_nfqws(),
 				leftover_tables: system('nft list table inet zapret >/dev/null 2>&1 || nft list table inet zapret2 >/dev/null 2>&1') == 0,
-				stella_nfqws: system("pgrep -f 'nfqws --qnum=202' >/dev/null") == 0,
+				// «[n]» — чтобы pgrep не нашёл собственную оболочку с этим же текстом.
+				stella_nfqws: system("pgrep -f '[n]fqws --qnum=202' >/dev/null") == 0,
 				import_opts: z.get('zapret', 'config', 'NFQWS_OPT'),
 				import_tcp: z.get('zapret', 'config', 'NFQWS_PORTS_TCP'),
 				import_udp: z.get('zapret', 'config', 'NFQWS_PORTS_UDP')
