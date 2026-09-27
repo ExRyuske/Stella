@@ -6,7 +6,8 @@ UCODE="${UCODE:-ucode}"
 XRAY="${XRAY:-xray}"
 UCODE_LIB="${UCODE_LIB:-$(dirname "$(command -v "$UCODE")")}"
 T="$(mktemp -d)"
-trap 'kill $HTTP_PID 2>/dev/null; wait $HTTP_PID 2>/dev/null; rm -rf "$T"' EXIT
+# Код остановленного сервера (143) не должен стать кодом всего скрипта.
+trap 'rc=$?; kill $HTTP_PID 2>/dev/null; wait $HTTP_PID 2>/dev/null || true; rm -rf "$T"; exit $rc' EXIT
 
 UUID=48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d
 PBK=VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY
