@@ -1,0 +1,1102 @@
+#!/usr/bin/ucode -S
+// stella — управление подписками и генерация конфига xray.
+
+'use strict';
+
+import { cursor } from 'uci';
+import { readfile, writefile, rename, unlink, glob, popen, stat } from 'fs';
+import { parse } from 'stella.uri';
+import { decode } from 'stella.subscription';
+import { build_config, outbound } from 'stella.xray';
+import { fnv1a } from 'stella.util';
+import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
+import { parse_list } from 'stella.lists';
+import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, HOSTLISTS } from 'stella.zapret';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+
+const DEFAULT_UA = 'v2rayN/7.0';
+const PING_URL = 'https://www.gstatic.com/generate_204';
+const PING_PORT = 21000;
+const PING_CHUNK = 50;
+const TPROXY_PORT = 10812;
+const DNS_PORT = 10853;
+const CONF_DIR = '/var/etc/stella';
+const ZAPRET_QNUM = 202;
+const ZAPRET_BIN = '/opt/zapret/nfq/nfqws';
+const ZAPRET_DIR = getenv('STELLA_ZAPRET_DIR') || '/etc/stella/zapret';
+const ZMS_RAW = 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main';
+const FLOWSEAL_TGZ = 'https://codeload.github.com/Flowseal/zapret-discord-youtube/tar.gz/refs/heads/main';
+const DPI_SUITE = 'https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/main/ru/tcp-16-20/suite.v2.json';
+// Автоподбор: своя очередь и диапазон исходящих портов ниже эфемерного (32768+) —
+// в очередь теста попадает только его собственный трафик.
+const ZT_QNUM = 205;
+const ZT_PORTS = '20000-20999';
+const ZT_PARALLEL = 4;
+const YT_TARGETS = [ 'www.youtube.com', 'i.ytimg.com', 'yt3.ggpht.com', 'redirector.googlevideo.com', 'youtubei.googleapis.com', 'play.google.com' ];
+
+const uci = cursor();
+
+function opt(sec, name, def) {
+	return uci.get('stella', sec, name) ?? def;
+}
+
+function shq(s) {
+	return "'" + replace(s, "'", "'\\''") + "'";
+}
+
+function usage() {
+	warn('Использование: stella <команда>\n' +
+		'  update [подписка]  обновить подписки\n' +
+		'  nodes              список узлов (* — выбранный)\n' +
+		'  gen [файл|-]       сгенерировать конфиг xray\n' +
+		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
+		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
+		'  lists [id]         обновить списки сайтов\n' +
+		'  upgrade check|stella|xray|zapret  проверить или установить обновления\n' +
+		'  migrate            переименовать анонимные секции в постоянные\n' +
+		'  parse <ссылка>     разобрать ссылку\n');
+	return 2;
+}
+
+// Уникальное имя временного файла: скачивания из разных процессов (обновление подписок,
+// списков, каталога) могут совпасть по времени.
+let fetch_seq = 0;
+
+function fetch(url, ua, proxy) {
+	let tmp = `/tmp/stella-fetch.${time()}.${fnv1a(url)}.${fetch_seq++}`;
+	let cmd = sprintf('curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 -A %s %s-o %s %s',
+		shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(tmp), shq(url));
+	let rc = system(cmd);
+	let body = (rc == 0) ? readfile(tmp) : null;
+	unlink(tmp);
+	return body;
+}
+
+// Обновление подписок. При неудаче остаётся прежний список (последний удачный).
+function cmd_update(only) {
+	let failed = 0;
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+
+	system(`mkdir -p ${shq(CACHE_DIR)}`);
+
+	uci.foreach('stella', 'subscription', (s) => {
+		if ((only && s['.name'] != only) || s.enabled == '0' || !s.url)
+			return;
+
+		let ua = s.user_agent || DEFAULT_UA;
+		let body = fetch(s.url, ua, null);
+		if (body == null) {
+			warn(`${sub_label(s)}: напрямую недоступна, пробую через прокси\n`);
+			body = fetch(s.url, ua, proxy);
+		}
+		if (body == null) {
+			warn(`${sub_label(s)}: не удалось скачать, оставляю прежний список\n`);
+			failed++;
+			return;
+		}
+
+		let res = decode(body, s['.name']);
+		for (let e in res.errors)
+			warn(`${sub_label(s)}: пропущено "${e.line}": ${e.error}\n`);
+		if (!length(res.nodes)) {
+			warn(`${sub_label(s)}: не найдено ни одного узла, оставляю прежний список\n`);
+			failed++;
+			return;
+		}
+
+		// Панели (например, Remnawave) при каждом запросе выдают случайный shortId из
+		// разрешённых. Если кроме него узел не изменился, оставляем прежний — иначе каждое
+		// обновление перезапускало бы xray и писало на флеш.
+		let path = `${CACHE_DIR}/${s['.name']}.json`;
+		let old = {};
+		for (let n in json(readfile(path) || '[]'))
+			old[n.id] = n;
+		for (let n in res.nodes) {
+			let o = old[n.id];
+			if (o && o.sid != n.sid && sprintf('%J', { ...n, sid: o.sid }) == sprintf('%J', o))
+				n.sid = o.sid;
+		}
+
+		// Пишем на флеш только при изменениях.
+		let data = sprintf('%J', res.nodes);
+		if (readfile(path) != data) {
+			writefile(`${path}.tmp`, data);
+			rename(`${path}.tmp`, path);
+		}
+		print(`${sub_label(s)}: узлов ${length(res.nodes)}, пропущено ${length(res.errors)}\n`);
+	});
+
+	// Кэш удалённых подписок.
+	let known = {};
+	uci.foreach('stella', 'subscription', (s) => { known[`${CACHE_DIR}/${s['.name']}.json`] = true; });
+	for (let f in glob(`${CACHE_DIR}/*.json`) || [])
+		if (!known[f])
+			unlink(f);
+
+	return failed ? 1 : 0;
+}
+
+function load_nodes() {
+	let errors = [];
+	let nodes = store_load_nodes(uci, errors);
+	for (let e in errors)
+		warn(`узел ${e.name}: ${e.error}\n`);
+	return nodes;
+}
+
+function cmd_nodes() {
+	let sel = opt('main', 'node');
+	for (let n in load_nodes())
+		printf('%s %-24s %-11s %-16s %s\n', (n.id == sel) ? '*' : ' ',
+			n.id, n.protocol, substr(n.source, 0, 16), n.name);
+	return 0;
+}
+
+function lan_ifnames() {
+	let v = opt('main', 'lan_ifname', ['br-lan']);
+	return (type(v) == 'array') ? v : split(v, /[ ,]+/);
+}
+
+function dnsmasq_confs() {
+	return map(glob('/tmp/dnsmasq*.d') || [], (d) => `${d}/stella.conf`);
+}
+
+function fw_down() {
+	system('nft delete table inet stella 2>/dev/null');
+	system(sprintf('while ip rule del fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done', FW_MARK, FW_MARK, ROUTE_TABLE));
+	system(`ip route flush table ${ROUTE_TABLE} 2>/dev/null`);
+
+	let changed = false;
+	for (let f in dnsmasq_confs())
+		if (readfile(f) != null) {
+			unlink(f);
+			changed = true;
+		}
+	if (changed)
+		system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
+	return 0;
+}
+
+function enabled_lists() {
+	return filter(load_lists(uci), (l) => l.enabled);
+}
+
+// Используется ли действие zapret хоть где-то — тогда нужен nfqws и очередь.
+function zapret_used(lists) {
+	if (opt('main', 'default_action', 'vpn') == 'zapret')
+		return true;
+	for (let l in lists)
+		if (l.action == 'zapret')
+			return true;
+	return false;
+}
+
+function strategy_lines(text) {
+	let res = [];
+	for (let line in split(text || '', /\r?\n/)) {
+		line = trim(line);
+		if (line != '' && substr(line, 0, 1) != '#')
+			push(res, ...filter(split(line, /[ \t]+/), (a) => a != ''));
+	}
+	return res;
+}
+
+// Пути к файлам пакета zapret → свои копии хостлистов, если они есть.
+function zapret_paths() {
+	let res = {};
+	for (let name, h in HOSTLISTS) {
+		let own = `${ZAPRET_DIR}/hosts-${name}.txt`;
+		if (stat(own)?.size > 0)
+			res[h.pkg] = own;
+		else if (h.fallback)
+			res[h.pkg] = h.fallback;
+	}
+	return res;
+}
+
+// Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
+// Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
+function zapret_parts() {
+	let cat = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	let pick = (key, family) => {
+		let v = opt('main', key, '');
+		if (v == '' || v == '0')
+			return null;
+		for (let st in cat)
+			if (st.family == family && (st.name == v || v == '1'))
+				return st;
+		return null;
+	};
+	let z = compose({
+		main: strategy_lines(opt('main', 'zapret_opts', '')),
+		yt: pick('zapret_yt', 'yv'),
+		discord: pick('zapret_discord', 'dv'),
+		games: pick('zapret_games', 'gv'),
+		games_fake: opt('main', 'zapret_games_fake', null),
+		discord_fake: opt('main', 'zapret_discord_fake', null),
+		tcp_ports: opt('main', 'zapret_tcp_ports', '80,443'),
+		udp_ports: opt('main', 'zapret_udp_ports', '443')
+	});
+	z.args = localize(z.args, zapret_paths());
+	return z;
+}
+
+function zapret_ports() {
+	let z = zapret_parts();
+	return { tcp_ports: z.tcp_ports, udp_ports: z.udp_ports };
+}
+
+// Домены исключений Zapret — те, что у основной стратегии: у Flowseal свои, у остальных —
+// список Zapret Manager. Своя копия, иначе файл пакета zapret.
+function zapret_exclude_domains() {
+	let name = index(opt('main', 'zapret_opts', ''), HOSTLISTS.exclude_fs.pkg) >= 0 ? 'exclude_fs' : 'exclude';
+	for (let f in [ `${ZAPRET_DIR}/hosts-${name}.txt`, HOSTLISTS.exclude.pkg ]) {
+		let text = readfile(f);
+		if (text)
+			return parse_list(text).domains;
+	}
+	return [];
+}
+
+function routing_opts() {
+	let lists = enabled_lists();
+	let zapret = zapret_used(lists);
+	let hijack = opt('main', 'dns_hijack', '1') == '1';
+	let block_doh = hijack && opt('main', 'block_doh', '1') == '1';
+	return {
+		lists,
+		nft: {
+			lan_ifnames: lan_ifnames(),
+			tproxy_port: TPROXY_PORT,
+			default_action: opt('main', 'default_action', 'vpn'),
+			dns_hijack: hijack,
+			block_doh,
+			lists: map(lists, (l) => ({ id: l.id, action: l.action, cidrs: l.cidrs, devices_mode: l.devices_mode, macs: l.macs })),
+			devices: load_devices(uci),
+			zapret: zapret ? { qnum: ZAPRET_QNUM, ...zapret_ports() } : null
+		},
+		dnsmasq: { dns_port: DNS_PORT, block_doh, lists: [
+			...map(lists, (l) => ({ id: l.id, domains: l.domains })),
+			...(zapret ? [ { id: 'zapret_excl', domains: zapret_exclude_domains() } ] : [])
+		] }
+	};
+}
+
+// Одиночные IP из сетов списков текущей таблицы (подсети из конфига и так вернутся).
+function saved_set_ips() {
+	let p = popen('nft -j list table inet stella 2>/dev/null', 'r');
+	let j = p ? json(p.read('all') || 'null') : null;
+	p?.close();
+	let res = {};
+	for (let o in j?.nftables || [])
+		if (o.set && match(o.set.name, /^(list_|zapret_excl$)/))
+			res[o.set.name] = filter(o.set.elem || [], (e) => type(e) == 'string' && match(e, /^[0-9.]+$/));
+	return res;
+}
+
+// Идемпотентно: повторный вызов пересоздаёт таблицу и не плодит ip rule.
+function fw_up() {
+	let o = routing_opts();
+	system(`mkdir -p ${CONF_DIR}`);
+
+	// IP, которые dnsmasq уже положил в сеты: таблица пересоздаётся, а устройства
+	// не спросят DNS повторно, пока не истечёт их кэш — без этого сайты временно
+	// шли бы не по тому правилу.
+	let saved = saved_set_ips();
+
+	let nft = `${CONF_DIR}/fw.nft`;
+	writefile(nft, nft_script(o.nft));
+	if (system(`nft -f ${nft}`) != 0) {
+		warn('nft не принял правила, перехват не включён\n');
+		fw_down();
+		return 1;
+	}
+
+	let restore = [];
+	for (let id in [ ...map(o.lists, (l) => l.id), ...(o.nft.zapret ? [ 'zapret_excl' ] : []) ])
+		if (length(saved[id]))
+			push(restore, `add element inet stella ${id} { ${join(', ', saved[id])} }`);
+	if (length(restore)) {
+		writefile(`${CONF_DIR}/fw-restore.nft`, join('\n', restore) + '\n');
+		system(`nft -f ${CONF_DIR}/fw-restore.nft 2>/dev/null`);
+	}
+
+	system(sprintf('while ip rule del fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done', FW_MARK, FW_MARK, ROUTE_TABLE));
+	system(sprintf('ip rule add fwmark 0x%x/0x%x table %d priority %d', FW_MARK, FW_MARK, ROUTE_TABLE, ROUTE_TABLE));
+	system(`ip route replace local 0.0.0.0/0 dev lo table ${ROUTE_TABLE}`);
+
+	let conf = dnsmasq_conf(o.dnsmasq);
+	let changed = false;
+	for (let f in dnsmasq_confs())
+		if (readfile(f) != conf) {
+			writefile(f, conf);
+			changed = true;
+		}
+	if (changed)
+		system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
+
+	// Сайты, добавленные вручную, резолвим сразу: их IP попадут в сеты ещё до того,
+	// как устройство спросит — меньше шансов, что первый заход пойдёт мимо правила.
+	let manual = [];
+	for (let l in o.lists)
+		for (let e in parse_list(join('\n', l.entries)).domains)
+			if (length(manual) < 300)
+				push(manual, e);
+	if (length(manual))
+		system(`( for d in ${join(' ', manual)}; do nslookup $d 127.0.0.1 >/dev/null 2>&1; done ) </dev/null >/dev/null 2>&1 &`);
+	return 0;
+}
+
+// Обновление списков по URL. Неудача — остаётся прежнее содержимое.
+function cmd_lists(only) {
+	let failed = 0;
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	system(`mkdir -p ${shq(LISTS_DIR)}`);
+
+	uci.foreach('stella', 'list', (s) => {
+		let urls = (type(s.url) == 'array') ? s.url : (s.url ? [ s.url ] : []);
+		if ((only && s['.name'] != only) || !length(urls))
+			return;
+
+		let text = [];
+		for (let u in urls) {
+			let body = fetch(u, 'stella', null) ?? fetch(u, 'stella', proxy);
+			if (body == null) {
+				warn(`${s.name}: не удалось скачать ${u}\n`);
+				failed++;
+				return;
+			}
+			push(text, body);
+		}
+
+		let res = parse_list(join('\n', text));
+		if (!length(res.domains) && !length(res.cidrs)) {
+			warn(`${s.name}: список пуст, оставляю прежний\n`);
+			failed++;
+			return;
+		}
+		let path = `${LISTS_DIR}/${s['.name']}.json`;
+		let data = sprintf('%J', res);
+		if (readfile(path) != data) {
+			writefile(`${path}.tmp`, data);
+			rename(`${path}.tmp`, path);
+		}
+		print(`${s.name}: доменов ${length(res.domains)}, подсетей ${length(res.cidrs)}\n`);
+	});
+
+	let known = {};
+	uci.foreach('stella', 'list', (s) => { known[`${LISTS_DIR}/${s['.name']}.json`] = true; });
+	for (let f in glob(`${LISTS_DIR}/*.json`) || [])
+		if (!known[f])
+			unlink(f);
+
+	return failed ? 1 : 0;
+}
+
+// Команда запуска nfqws для init (по строке на аргумент); пусто — zapret не используется.
+function cmd_zapret_cmd() {
+	if (!zapret_used(enabled_lists()))
+		return 1;
+	let z = zapret_parts();
+	if (!length(z.args))
+		return 1;
+	// Без нужного файла nfqws не стартует и молча перезапускается procd по кругу — лучше не
+	// запускать вовсе и показать в интерфейсе, чего не хватает.
+	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
+	let missing = missing_files(z.args, (f) => stat(f) != null);
+	if (!stat(bin))
+		unshift(missing, bin);
+	system(`mkdir -p ${RUN_DIR}`);
+	if (length(missing)) {
+		writefile(`${RUN_DIR}/zapret-missing.json`, sprintf('%J', missing));
+		warn(`nfqws не запущен: нет файлов ${join(', ', missing)}\n`);
+		return 1;
+	}
+	unlink(`${RUN_DIR}/zapret-missing.json`);
+	let args = [ bin, `--qnum=${ZAPRET_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...z.args ];
+	print(join('\n', args), '\n');
+	return 0;
+}
+
+function cmd_fw(action) {
+	if (action == 'up')
+		return fw_up();
+	if (action == 'down')
+		return fw_down();
+	if (action == 'show') {
+		let o = routing_opts();
+		print(nft_script(o.nft), '\n', dnsmasq_conf(o.dnsmasq));
+		return 0;
+	}
+	return usage();
+}
+
+const AUTO_MAX = 30;
+
+// Конфиг xray для текущих настроек; null — выбранного узла нет (init оставит прежний).
+function current_config() {
+	let nodes = load_nodes();
+	let by_id = {};
+	for (let n in nodes)
+		by_id[n.id] = n;
+
+	let node_id = opt('main', 'node');
+	let node = node_id ? by_id[node_id] : null;
+	// Не подменяем прокси на direct молча — пусть init оставит прежний конфиг.
+	if (node_id && !node) {
+		warn(`выбранный узел ${node_id} не найден\n`);
+		return null;
+	}
+
+	let auto_nodes = [];
+	if (opt('main', 'select_mode', 'single') == 'auto') {
+		let ids = opt('main', 'auto_node', []);
+		for (let id in (type(ids) == 'array') ? ids : [ ids ])
+			if (by_id[id] && length(auto_nodes) < AUTO_MAX)
+				push(auto_nodes, by_id[id]);
+	}
+
+	for (let n in [ node, ...auto_nodes ])
+		for (let w in n?.warnings || [])
+			warn(`${n.name}: ${w}\n`);
+
+	return build_config({
+		node,
+		auto_nodes,
+		log_level: opt('main', 'log_level', 'warning'),
+		socks_port: +opt('main', 'socks_port', '10808'),
+		intercept: true,
+		tproxy_port: TPROXY_PORT,
+		dns_port: DNS_PORT,
+		dns_remote: opt('main', 'dns_remote', 'https://1.1.1.1/dns-query'),
+		dns_direct: opt('main', 'dns_direct', 'https://77.88.8.8/dns-query')
+	});
+}
+
+function cmd_gen(out) {
+	let cfg = current_config();
+	if (!cfg)
+		return 1;
+
+	let data = sprintf('%.J\n', cfg);
+	if (!out || out == '-')
+		print(data);
+	else if (!writefile(out, data)) {
+		warn(`не удалось записать ${out}\n`);
+		return 1;
+	}
+	return 0;
+}
+
+// Реальная задержка: временный xray с отдельным socks-входом на каждый узел,
+// через каждый параллельно идёт запрос к generate_204. Результат (мс, -1 — ошибка)
+// дописывается в $RUN_DIR/ping.json.
+function ping_chunk(nodes, results) {
+	let cfg_path = `${RUN_DIR}/ping.json.cfg.json`;
+	let cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [], routing: { rules: [] } };
+
+	for (let i, n in nodes) {
+		push(cfg.inbounds, { tag: `in${i}`, listen: '127.0.0.1', port: PING_PORT + i, protocol: 'socks' });
+		push(cfg.outbounds, outbound(n, `out${i}`));
+		push(cfg.routing.rules, { inboundTag: [ `in${i}` ], outboundTag: `out${i}` });
+	}
+	writefile(cfg_path, sprintf('%J', cfg));
+
+	system(`xray run -c ${shq(cfg_path)} >/dev/null 2>&1 & echo $! > ${shq(RUN_DIR)}/ping.xray.pid`);
+	let pid = trim(readfile(`${RUN_DIR}/ping.xray.pid`) || '');
+	sleep(1000);
+
+	if (system(`kill -0 ${pid} 2>/dev/null`) != 0) {
+		// xray не принял конфиг целиком — помечаем пачку, но не останавливаемся.
+		for (let n in nodes)
+			results[n.id] = -2;
+		unlink(cfg_path);
+		return;
+	}
+
+	let cmd = '';
+	for (let i = 0; i < length(nodes); i++) {
+		let port = PING_PORT + i;
+		cmd += sprintf("curl -s -o /dev/null --max-time 6 -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
+			port, PING_URL, shq(RUN_DIR), port);
+	}
+	system(cmd + 'wait');
+	system(`kill ${pid} 2>/dev/null`);
+
+	for (let i, n in nodes) {
+		let out = `${RUN_DIR}/ping.${PING_PORT + i}`;
+		let m = match(readfile(out) || '', /^(200|204) ([0-9.]+)/);
+		results[n.id] = m ? int(+m[2] * 1000) : -1;
+		unlink(out);
+	}
+	unlink(cfg_path);
+}
+
+function cmd_ping(...ids) {
+	let nodes = load_nodes();
+	if (length(ids))
+		nodes = filter(nodes, (n) => n.id in ids);
+
+	system(`mkdir -p ${shq(RUN_DIR)}`);
+	let path = `${RUN_DIR}/ping.json`;
+	let results = json(readfile(path) || '{}');
+
+	for (let i = 0; i < length(nodes); i += PING_CHUNK) {
+		ping_chunk(slice(nodes, i, i + PING_CHUNK), results);
+		writefile(`${path}.tmp`, sprintf('%J', results));
+		rename(`${path}.tmp`, path);
+	}
+
+	for (let n in nodes)
+		printf('%6s  %s\n', (results[n.id] >= 0) ? `${results[n.id]}ms` : 'fail', n.name);
+	return 0;
+}
+
+// Анонимные секции (cfgXXXX, например после ручного `uci add`) переименовываются
+// в постоянные: иначе их имя меняется при удалении соседних секций, а вместе с ним
+// id узлов, файл кэша и выбранный узел.
+function cmd_migrate() {
+	let renames = [];
+	for (let t in [ [ 'subscription', 'sub', 'url' ], [ 'node', 'node', 'link' ] ])
+		uci.foreach('stella', t[0], (s) => {
+			if (s['.anonymous'])
+				push(renames, [ s['.name'], `${t[1]}_${fnv1a(s[t[2]] || s['.name'])}` ]);
+		});
+	if (!length(renames))
+		return 0;
+
+	let sel = opt('main', 'node');
+	for (let r in renames) {
+		let from = r[0], to = r[1];
+		while (uci.get('stella', to))
+			to += 'x';
+		uci.rename('stella', from, to);
+
+		let cache = json(readfile(`${CACHE_DIR}/${from}.json`) || 'null');
+		if (cache) {
+			for (let n in cache)
+				n.id = to + substr(n.id, length(from));
+			writefile(`${CACHE_DIR}/${to}.json`, sprintf('%J', cache));
+			unlink(`${CACHE_DIR}/${from}.json`);
+		}
+		if (sel == from || index(sel, `${from}_`) == 0)
+			uci.set('stella', 'main', 'node', to + substr(sel, length(from)));
+		print(`${from} -> ${to}\n`);
+	}
+	uci.commit('stella');
+	return 0;
+}
+
+/* ---- Zapret: каталог стратегий, автоподбор, применение ---- */
+
+function fetch_any(url, proxy) {
+	return fetch(url, 'Mozilla/5.0', null) ?? fetch(url, 'Mozilla/5.0', proxy);
+}
+
+// Каталог из трёх источников. Не скачался источник — остаётся его часть из прежнего
+// каталога: обеднять рабочий каталог из-за сбоя сети незачем.
+function cmd_zapret_catalog() {
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	let old = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	let keep = (family) => filter(old, (s) => s.family == family);
+	system(`mkdir -p ${shq(ZAPRET_DIR)}/fake`);
+
+	let zms = fetch_any(`${ZMS_RAW}/Zapret-Manager.sh`, proxy);
+	let v = zms_strategies(zms);
+	if (!length(v)) { warn('ZMS: стратегии v не получены, оставляю прежние\n'); v = keep('v'); }
+	let dv = zms_discord(zms);
+	if (!length(dv)) dv = keep('dv');
+	let gv = game_strategies(zms_game_ports(zms));
+
+	let yv = block_strategies(fetch_any(`${ZMS_RAW}/files/StrYoutube`, proxy), 'yv');
+	if (!length(yv)) { warn('ZMS: стратегии YouTube не получены, оставляю прежние\n'); yv = keep('yv'); }
+
+	let fs = [];
+	let tgz = '/tmp/stella-flowseal.tgz', dir = '/tmp/stella-flowseal';
+	let body = fetch_any(FLOWSEAL_TGZ, proxy);
+	if (body != null && writefile(tgz, body) &&
+	    system(`rm -rf ${dir} && mkdir -p ${dir} && tar -xzf ${tgz} -C ${dir} 2>/dev/null`) == 0) {
+		for (let f in glob(`${dir}/*/bin/*.bin`) || [])
+			system(`cp -f ${shq(f)} ${shq(ZAPRET_DIR)}/fake/`);
+		for (let f in sort(glob(`${dir}/*/general*.bat`) || [])) {
+			let name = replace(replace(f, /^.*\//, ''), /\.bat$/, '');
+			let st = flowseal_strategy(readfile(f), name, `${ZAPRET_DIR}/fake`);
+			if (st)
+				push(fs, st);
+		}
+	}
+	system(`rm -rf ${dir} ${tgz}`);
+	if (!length(fs)) { warn('Flowseal: стратегии не получены, оставляю прежние\n'); fs = keep('fs'); }
+
+	// Свои копии хостлистов (YouTube/Google и исключения). Не скачался — остаётся прежний.
+	for (let name, h in HOSTLISTS) {
+		let body = fetch_any(h.url, proxy);
+		let lines = filter(map(split(body || '', /\r?\n/), (l) => trim(l)), (l) => l != '' && substr(l, 0, 1) != '#');
+		if (length(lines) < 10) {
+			warn(`хостлист ${name}: не получен, оставляю прежний\n`);
+			continue;
+		}
+		for (let d in h.extra)
+			if (!(d in lines))
+				push(lines, d);
+		let path = `${ZAPRET_DIR}/hosts-${name}.txt`, data = join('\n', lines) + '\n';
+		if (readfile(path) != data)
+			writefile(path, data);
+	}
+
+	// Набор целей для проверки — тоже с сети, с запасным встроенным.
+	let suite = fetch_any(DPI_SUITE, proxy);
+	if (suite && type(json(suite)) == 'array')
+		writefile(`${ZAPRET_DIR}/suite.json`, suite);
+
+	let all = [ ...v, ...yv, ...fs, ...dv, ...gv ];
+	let data = sprintf('%J', all);
+	if (length(all) && readfile(`${ZAPRET_DIR}/catalog.json`) != data)
+		writefile(`${ZAPRET_DIR}/catalog.json`, data);
+	writefile(`${ZAPRET_DIR}/catalog.updated`, `${time()}`);
+	printf('Каталог: v %d, YouTube %d, Flowseal %d, Discord %d, игры %d\n', length(v), length(yv), length(fs), length(dv), length(gv));
+	return length(all) ? 0 : 1;
+}
+
+function zapret_catalog() {
+	return json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+}
+
+// Цели проверки: для YouTube-стратегий — домены YouTube, для остальных — хосты за
+// зарубежными CDN (набор dpi-checkers: обрыв на 16–20 КБ) плюс YouTube.
+function zt_targets(family) {
+	if (family == 'yv')
+		return YT_TARGETS;
+	let suite = json(readfile(`${ZAPRET_DIR}/suite.json`) || 'null');
+	let hosts = [];
+	for (let s in (type(suite) == 'array') ? suite : [])
+		if (s.host && !match(s.id || '', /GH-HPRN/) && length(hosts) < 12)
+			push(hosts, s.host);
+	if (!length(hosts))
+		hosts = [ 'cdn.apple-mapkit.com', 'amplifon.com', 'cdn.eso.org', 'go.coveo.com' ];
+	return [ ...hosts, 'www.youtube.com', 'i.ytimg.com' ];
+}
+
+// Сколько целей открылось: успех — ответ получен целиком или скачано больше 24 КБ
+// (обрыв DPI случается на 16–20 КБ).
+function zt_probe(hosts) {
+	let cmd = '';
+	for (let i, h in hosts) {
+		cmd += sprintf("(curl -s -o /dev/null --local-port %s --connect-timeout 3 --max-time 6 -r 0-65535 -w '%%{size_download}' https://%s/ >%s/zt.%d 2>/dev/null; echo \" $?\" >>%s/zt.%d) & ",
+			ZT_PORTS, h, RUN_DIR, i, RUN_DIR, i);
+		if ((i + 1) % ZT_PARALLEL == 0)
+			cmd += 'wait; ';
+	}
+	system(cmd + 'wait');
+	let ok = [];
+	for (let i, h in hosts) {
+		let m = match(readfile(`${RUN_DIR}/zt.${i}`) || '', /^([0-9]+) +([0-9]+)/);
+		unlink(`${RUN_DIR}/zt.${i}`);
+		if (m && (+m[2] == 0 || +m[1] >= 24576))
+			push(ok, h);
+	}
+	return ok;
+}
+
+function zt_nft(on) {
+	if (!on)
+		return system('nft delete table inet stella_ztest 2>/dev/null');
+	let script = join('\n', [
+		'table inet stella_ztest',
+		'delete table inet stella_ztest',
+		'table inet stella_ztest {',
+		'	chain out {',
+		'		type filter hook output priority mangle; policy accept;',
+		sprintf('		meta mark & 0x%x != 0 return', NFQWS_DESYNC_MARK),
+		`		tcp sport ${ZT_PORTS} ct original packets 1-9 queue flags bypass to ${ZT_QNUM}`,
+		`		udp sport ${ZT_PORTS} ct original packets 1-9 queue flags bypass to ${ZT_QNUM}`,
+		'	}',
+		'	chain in {',
+		'		type filter hook prerouting priority filter; policy accept;',
+		`		tcp dport ${ZT_PORTS} ct reply packets 1-3 queue flags bypass to ${ZT_QNUM}`,
+		'	}',
+		'}', ''
+	]);
+	writefile(`${RUN_DIR}/ztest.nft`, script);
+	return system(`nft -f ${RUN_DIR}/ztest.nft`);
+}
+
+function zt_run(bin, args, hosts) {
+	let all = [ `--qnum=${ZT_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...localize(args, zapret_paths()) ];
+	system(`${shq(bin)} ${join(' ', map(all, shq))} >/dev/null 2>&1 & echo $! >${RUN_DIR}/ztest.nfqws.pid`);
+	let pid = trim(readfile(`${RUN_DIR}/ztest.nfqws.pid`) || '');
+	sleep(400);
+	if (!pid || system(`kill -0 ${pid} 2>/dev/null`) != 0)
+		return null;     // nfqws не принял ключи
+	let ok = zt_probe(hosts);
+	system(`kill ${pid} 2>/dev/null`);
+	sleep(200);
+	system(`kill -9 ${pid} 2>/dev/null`);
+	return ok;
+}
+
+function zapret_apply(st) {
+	uci.set('stella', 'main', 'zapret_strategy', st.name);
+	uci.set('stella', 'main', 'zapret_opts', strategy_text(st));
+	uci.commit('stella');
+	if (opt('main', 'enabled', '0') == '1')
+		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+}
+
+// Автоподбор: scope — all | v | yv | fs | имя стратегии; --apply — применить лучшую,
+// если она открывает больше текущей (менять работающее на равное незачем).
+function cmd_zapret_test(...argv) {
+	let apply = ('--apply' in argv);
+	let scope = filter(argv, (a) => a != '--apply')[0] || 'all';
+	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
+	let catalog = zapret_catalog();
+	// Discord и игры проверить запросами curl нельзя — они в автоподбор не входят.
+	let testable = filter(catalog, (s) => s.family in [ 'v', 'fs', 'yv' ]);
+	let list = (scope == 'all') ? testable : filter(testable, (s) => s.family == scope || s.name == scope);
+	if (!length(list)) {
+		warn('нет стратегий для проверки — обновите каталог\n');
+		return 1;
+	}
+
+	system(`mkdir -p ${RUN_DIR} ${shq(ZAPRET_DIR)}`);
+	let progress = `${RUN_DIR}/ztest.json`;
+	let stopf = `${RUN_DIR}/ztest.stop`;
+	unlink(stopf);
+	let res_path = `${ZAPRET_DIR}/results.json`;
+	let res = json(readfile(res_path) || 'null') || { items: {} };
+	res.items ??= {};
+
+	if (zt_nft(true) != 0) {
+		warn('nft не принял правила проверки\n');
+		return 1;
+	}
+
+	// Контроль без обхода — по каждому набору целей.
+	let baseline = {};
+	for (let fam in uniq(map(list, (s) => (s.family == 'yv') ? 'yv' : 'general'))) {
+		let hosts = zt_targets(fam == 'yv' ? 'yv' : 'general');
+		baseline[fam] = { ok: length(zt_probe(hosts)), total: length(hosts) };
+	}
+	res.baseline = baseline;
+
+	// Текущая стратегия проверяется наравне с каталогом — с ней и сравнивается лучшая.
+	let cur_lines = map(split(opt('main', 'zapret_opts', ''), /\r?\n/), (l) => trim(l));
+	let cur_args = filter(cur_lines, (l) => l != '' && substr(l, 0, 1) != '#');
+	// Имя — из настроек, а у импортированной из zapret — из первой строки «#v7».
+	let cur_name = opt('main', 'zapret_strategy', '') || match(cur_lines[0] || '', /^#([A-Za-z0-9 ()._-]+)$/)?.[1] || '';
+	if (length(cur_args) && !length(filter(list, (s) => s.name == cur_name)))
+		push(list, { name: cur_name || 'текущая', family: 'current', args: cur_args });
+
+	for (let i, st in list) {
+		if (readfile(stopf) != null)
+			break;
+		writefile(progress, sprintf('%J', { state: 'running', done: i, total: length(list), current: st.name }));
+		let fam = (st.family == 'yv') ? 'yv' : 'general';
+		let hosts = zt_targets(fam);
+		let ok = zt_run(bin, st.args, hosts);
+		res.items[st.name] = { family: st.family, ok: ok ? length(ok) : -1, total: length(hosts), at: time() };
+	}
+	zt_nft(false);
+	res.at = time();
+	writefile(res_path, sprintf('%J', res));
+
+	let msg = 'Проверка закончена';
+	if (apply && readfile(stopf) == null) {
+		let msgs = [];
+		// Основная и YouTube выбираются раздельно: лучшая Yv идёт в поле YouTube, а не
+		// в основную. Меняется, только если лучшая открывает больше текущей (для YouTube
+		// без своей стратегии — больше, чем без обхода).
+		for (let yt in [ false, true ]) {
+			let best = null;
+			for (let st in list)
+				if (st.family != 'current' && (st.family == 'yv') == yt && res.items[st.name]?.ok >= 0 &&
+				    (!best || res.items[st.name].ok > res.items[best.name].ok))
+					best = st;
+			if (!best)
+				continue;
+			let cur_key = yt ? opt('main', 'zapret_yt', '') : (cur_name || 'текущая');
+			let cur = res.items[cur_key]?.ok ?? (yt ? (res.baseline?.yv?.ok ?? -1) : -1);
+			let got = res.items[best.name];
+			if (got.ok > cur) {
+				if (yt) {
+					uci.set('stella', 'main', 'zapret_yt', best.name);
+					uci.commit('stella');
+					if (opt('main', 'enabled', '0') == '1')
+						system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+				}
+				else
+					zapret_apply(best);
+				push(msgs, sprintf('%s: %s (%d из %d)', yt ? 'YouTube' : 'основная', best.name, got.ok, got.total));
+			}
+		}
+		msg = length(msgs) ? 'Применена ' + join(', ', msgs) : 'Текущие стратегии не хуже лучших из проверенных — оставлены';
+	}
+	writefile(progress, sprintf('%J', { state: readfile(stopf) != null ? 'stopped' : 'done', done: length(list), total: length(list), message: msg }));
+	unlink(stopf);
+	print(msg, '\n');
+	return 0;
+}
+
+function cmd_zapret_apply(name) {
+	for (let st in zapret_catalog())
+		if (st.name == name) {
+			zapret_apply(st);
+			return 0;
+		}
+	warn(`стратегии «${name}» нет в каталоге\n`);
+	return 1;
+}
+
+/* ---- обновления: сама Stella (релизы GitHub) и xray-core (репозиторий OpenWrt) ---- */
+
+const REPO = 'ExRyuske/Stella';
+
+function cmd_out(cmd) {
+	let p = popen(cmd, 'r');
+	let out = p ? p.read('all') : '';
+	p?.close();
+	return out || '';
+}
+
+function pkg_version(name, upgradable) {
+	let m = match(cmd_out(`apk list ${upgradable ? '-u' : '-I'} ${name} 2>/dev/null`), regexp(`${name}-([0-9][^ ]*)`));
+	return m ? m[1] : null;
+}
+
+// «0.1.2-r1» / «v0.1.2» → [0,1,2]; новее ли a, чем b.
+function newer(a, b) {
+	let va = map(split(match(a || '', /[0-9]+(\.[0-9]+)*/)?.[0] || '0', '.'), (x) => +x);
+	let vb = map(split(match(b || '', /[0-9]+(\.[0-9]+)*/)?.[0] || '0', '.'), (x) => +x);
+	for (let i = 0; i < max(length(va), length(vb)); i++)
+		if ((va[i] ?? 0) != (vb[i] ?? 0))
+			return (va[i] ?? 0) > (vb[i] ?? 0);
+	return false;
+}
+
+// Последний релиз на GitHub; asset — регулярка имени нужного файла.
+function github_release(repo, asset) {
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	let r = json(fetch_any(`https://api.github.com/repos/${repo}/releases/latest`, proxy) || 'null');
+	if (type(r) != 'object' || !r.tag_name)
+		return null;
+	let file = null;
+	for (let a in r.assets || [])
+		if (match(a.name || '', asset))
+			file = a.browser_download_url;
+	return { tag: r.tag_name, file, url: r.html_url, notes: r.body || '' };
+}
+
+function latest_release() {
+	let r = github_release(REPO, /^luci-app-stella.*\.apk$/);
+	if (r)
+		r.apk = r.file;
+	return r;
+}
+
+// Zapret — релизы remittor/zapret-openwrt: архив под архитектуру роутера с пакетами внутри.
+const ZAPRET_REPO = 'remittor/zapret-openwrt';
+
+function router_arch() {
+	return match(readfile('/etc/openwrt_release') || '', /DISTRIB_ARCH='([^']+)'/)?.[1];
+}
+
+function zapret_release() {
+	let arch = router_arch();
+	return arch ? github_release(ZAPRET_REPO, regexp(`^zapret_v[0-9.]+_${replace(arch, /[.]/g, '\\.')}\\.zip$`)) : null;
+}
+
+// check — записать сведения в $RUN_DIR/update.json; stella / xray — обновить.
+function cmd_upgrade(what) {
+	system(`mkdir -p ${RUN_DIR}`);
+	if (what == 'check' || !what) {
+		system('apk update >/dev/null 2>&1');
+		let rel = latest_release();
+		let cur = pkg_version('luci-app-stella');
+		let info = {
+			at: time(),
+			stella: {
+				installed: cur,
+				latest: rel?.tag,
+				url: rel?.url,
+				notes: rel?.notes,
+				available: !!(rel && rel.apk && (!cur || newer(rel.tag, cur))),
+				error: rel ? null : 'не удалось получить релизы с GitHub (нет сети или репозиторий закрыт)'
+			},
+			xray: { installed: pkg_version('xray-core'), latest: pkg_version('xray-core', true) }
+		};
+		info.xray.available = !!info.xray.latest;
+		// Zapret: Stella берёт из пакета nfqws и подделки; не установлен — предложим поставить.
+		let zcur = pkg_version('zapret');
+		let zr = zapret_release();
+		info.zapret = {
+			installed: zcur,
+			latest: zr ? replace(zr.tag, /^v/, '') : null,
+			url: zr?.url,
+			available: !!(zr && zr.file && (!zcur || newer(zr.tag, zcur))),
+			error: zr ? null : 'не удалось получить релизы zapret с GitHub'
+		};
+		writefile(`${RUN_DIR}/update.json`, sprintf('%J', info));
+		print(sprintf('%.J\n', info));
+		return 0;
+	}
+
+	if (what == 'stella') {
+		let rel = latest_release();
+		if (!rel?.apk) {
+			warn('в последнем релизе нет пакета\n');
+			return 1;
+		}
+		let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+		let body = fetch_any(rel.apk, proxy);
+		if (body == null || !writefile('/tmp/luci-app-stella.apk', body)) {
+			warn('не удалось скачать пакет\n');
+			return 1;
+		}
+		let rc = system('apk add --allow-untrusted /tmp/luci-app-stella.apk');
+		unlink('/tmp/luci-app-stella.apk');
+		if (rc != 0)
+			return 1;
+	}
+	else if (what == 'xray') {
+		if (system('apk update >/dev/null 2>&1; apk upgrade xray-core') != 0)
+			return 1;
+	}
+	else if (what == 'zapret') {
+		let zr = zapret_release();
+		if (!zr?.file) {
+			warn('в последнем релизе zapret нет архива для этого роутера\n');
+			return 1;
+		}
+		let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+		let body = fetch_any(zr.file, proxy);
+		let dir = '/tmp/stella-zapret-upgrade';
+		if (body == null || system(`rm -rf ${dir} && mkdir -p ${dir}`) != 0 || !writefile(`${dir}/zapret.zip`, body) ||
+		    system(`unzip -oq ${dir}/zapret.zip -d ${dir}`) != 0) {
+			warn('не удалось скачать или распаковать архив zapret\n');
+			system(`rm -rf ${dir}`);
+			return 1;
+		}
+		// Отдельная служба zapret мешает Zapret в Stella: если она была остановлена и
+		// выключена, после обновления такой и остаётся (пакет может её запустить).
+		let was_enabled = system('/etc/init.d/zapret enabled 2>/dev/null') == 0;
+		let was_running = system('nft list table inet zapret >/dev/null 2>&1') == 0;
+		// Только сам пакет zapret: luci-app-zapret не нужен, Zapret настраивает Stella.
+		let pkgs = filter(split(trim(cmd_out(`find ${dir} -name '*.apk'`)), '\n'), (f) => match(f, /\/zapret-[0-9][^\/]*\.apk$/));
+		// apk update — чтобы при первой установке подтянулись зависимости (kmod-nft-queue и др.).
+		let rc = length(pkgs) ? system(`apk update >/dev/null 2>&1; apk add --allow-untrusted ${join(' ', map(pkgs, shq))}`) : 1;
+		system(`rm -rf ${dir}`);
+		if (!was_running)
+			system('/etc/init.d/zapret stop >/dev/null 2>&1; nft delete table inet zapret 2>/dev/null; nft delete table inet zapret2 2>/dev/null');
+		if (!was_enabled)
+			system('/etc/init.d/zapret disable >/dev/null 2>&1');
+		if (rc != 0) {
+			warn(length(pkgs) ? 'apk не установил пакеты zapret\n' : 'в архиве нет пакетов .apk\n');
+			return 1;
+		}
+	}
+	else
+		return usage();
+
+	// Новые файлы интерфейса и плагина rpcd, новый xray — подхватываем.
+	system('rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache; /etc/init.d/rpcd restart; ' +
+		(what == 'xray' ? '/etc/init.d/stella restart' : '/etc/init.d/stella reload') + ' >/dev/null 2>&1');
+	// Новый бинарник nfqws: гасим наш экземпляр, procd сразу поднимет его заново.
+	// (pgrep -f не годится — он находит и саму оболочку с этой строкой.)
+	if (what == 'zapret')
+		for (let pid in split(trim(cmd_out('pidof nfqws')), ' '))
+			if (index(readfile(`/proc/${pid}/cmdline`) || '', `--qnum=${ZAPRET_QNUM}`) >= 0)
+				system(`kill ${+pid}`);
+	unlink(`${RUN_DIR}/update.json`);
+	print('обновлено\n');
+	return 0;
+}
+
+// Обновление по расписанию. Флаги *.running и логи — те же, что у кнопок в интерфейсе.
+function run_locked(name, cmd) {
+	if (task_busy(name))
+		return false;
+	system(`sh ${task_script(name, cmd)} </dev/null`);
+	return true;
+}
+
+function newest_mtime(pattern) {
+	let t = 0;
+	for (let f in glob(pattern) || [])
+		t = max(t, stat(f)?.mtime ?? 0);
+	return t;
+}
+
+function cmd_tick() {
+	system(`mkdir -p ${RUN_DIR}`);
+	let state_path = `${RUN_DIR}/updater.json`;
+	let st = json(readfile(state_path) || 'null') || {};
+	let now = time();
+	let sub_h = +opt('main', 'sub_interval', '12');
+	let lists_h = +opt('main', 'lists_interval', '24');
+	// После загрузки состояния нет — отсчитываем от последнего изменения кэша.
+	st.sub ??= newest_mtime(`${CACHE_DIR}/*.json`);
+	st.lists ??= newest_mtime(`${LISTS_DIR}/*.json`);
+
+	// После обновлений — reload: init передаёт procd контрольную сумму конфига xray, и тот
+	// перезапускается, только если конфиг изменился (например, у узла сменились ключи).
+	let action = null;
+	if (sub_h > 0 && now - st.sub >= sub_h * 3600 && run_locked('update', '/usr/bin/stella update')) {
+		st.sub = now;
+		action = 'reload';
+	}
+	if (lists_h > 0 && now - st.lists >= lists_h * 3600 && run_locked('lists', '/usr/bin/stella lists')) {
+		st.lists = now;
+		action = 'reload';
+	}
+	// Автоподбор Zapret — ночью (3–5 ч), раз в zapret_test_interval дней, только если
+	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей.
+	let zt_days = +opt('main', 'zapret_test_interval', '0');
+	let hour = +trim(cmd_out('date +%H') || '12');
+	st.ztest ??= +(json(readfile(`${ZAPRET_DIR}/results.json`) || 'null')?.at || now);
+	if (zt_days > 0 && hour >= 3 && hour < 5 && now - st.ztest >= zt_days * 86400 - 3600 &&
+	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply')) {
+		st.ztest = now;
+	}
+
+	writefile(state_path, sprintf('%J', st));
+
+	// Отвязанно: при restart procd останавливает и этот процесс (он — часть службы).
+	if (action && opt('main', 'enabled', '0') == '1')
+		system(`setsid /etc/init.d/stella ${action} </dev/null >/dev/null 2>&1 &`);
+	return 0;
+}
+
+function cmd_updater() {
+	while (true) {
+		sleep(600 * 1000);
+		cmd_tick();
+	}
+}
+
+function cmd_parse(link) {
+	let n = parse(link);
+	print(sprintf('%.J\n', n));
+	return n.error ? 1 : 0;
+}
+
+
+const CMDS = {
+	update: cmd_update,
+	nodes: cmd_nodes,
+	gen: cmd_gen,
+	ping: cmd_ping,
+	fw: cmd_fw,
+	migrate: cmd_migrate,
+	lists: cmd_lists,
+	tick: cmd_tick,
+	'zapret-catalog': cmd_zapret_catalog,
+	'zapret-test': cmd_zapret_test,
+	'zapret-apply': cmd_zapret_apply,
+	upgrade: cmd_upgrade,
+	updater: cmd_updater,
+	'zapret-cmd': cmd_zapret_cmd,
+	parse: (link) => link ? cmd_parse(link) : usage()
+};
+
+let cmd = CMDS[ARGV[0]];
+exit(cmd ? cmd(...slice(ARGV, 1)) : usage());

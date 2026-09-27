@@ -1,0 +1,12 @@
+
+config stella 'main'
+	option enabled '0'
+	option default_action 'vpn'
+	option dns_hijack '1'
+	option block_doh '1'
+	option node ''
+	option dns_remote 'https://1.1.1.1/dns-query'
+	option dns_direct 'https://77.88.8.8/dns-query'
+	option log_level 'warning'
+	option socks_port '10808'
+	list lan_ifname 'br-lan'

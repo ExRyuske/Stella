@@ -1,0 +1,58 @@
+{
+	"luci-app-stella": {
+		"description": "Grant access to Stella",
+		"read": {
+			"ubus": {
+				"stella": [
+					"status",
+					"nodes",
+					"log",
+					"lists",
+					"devices",
+					"zapret_info",
+					"settings",
+					"zapret_catalog",
+					"update_info"
+				]
+			},
+			"uci": [
+				"stella"
+			]
+		},
+		"write": {
+			"ubus": {
+				"stella": [
+					"select",
+					"update",
+					"ping",
+					"restart",
+					"check",
+					"add",
+					"edit",
+					"remove",
+					"set_enabled",
+					"list_add",
+					"list_edit",
+					"list_remove",
+					"list_move",
+					"lists_update",
+					"set_default_action",
+					"device_set",
+					"device_remove",
+					"zapret_service_off",
+					"auto_set",
+					"settings_set",
+					"zapret_apply",
+					"zapret_catalog_update",
+					"zapret_test",
+					"zapret_test_stop",
+					"update_check",
+					"update_install"
+				]
+			},
+			"uci": [
+				"stella"
+			]
+		}
+	}
+}

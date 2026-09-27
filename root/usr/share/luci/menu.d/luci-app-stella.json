@@ -1,0 +1,49 @@
+{
+	"admin/services/stella": {
+		"title": "Stella",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-stella"
+			],
+			"uci": {
+				"stella": true
+			}
+		}
+	},
+	"admin/services/stella/overview": {
+		"title": "Обзор",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "stella/overview"
+		}
+	},
+	"admin/services/stella/servers": {
+		"title": "Серверы",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "stella/servers"
+		}
+	},
+	"admin/services/stella/lists": {
+		"title": "Списки",
+		"order": 22,
+		"action": {
+			"type": "view",
+			"path": "stella/lists"
+		}
+	},
+	"admin/services/stella/devices": {
+		"title": "Устройства",
+		"order": 24,
+		"action": {
+			"type": "view",
+			"path": "stella/devices"
+		}
+	}
+}

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Переименование анонимных секций от старых версий и ручного `uci add`.
+/usr/bin/stella migrate >/dev/null 2>&1
+exit 0
