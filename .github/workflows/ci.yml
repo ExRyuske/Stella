@@ -134,7 +134,8 @@ jobs:
       # Без зависимостей в дереве SDK молча выкинул бы пакет как неудовлетворимый,
       # но собирает он их все, прежде чем взяться за наш: xray-core тянет за собой
       # сборку Go, curl — mbedtls, и это ~20 минут ради пакета без единого бинарника.
-      # Поэтому xray-core и curl здесь — пустые заглушки с теми же именами: в .apk
+      # Поэтому xray-core, curl и модули ядра (их SDK собирал бы из исходников ядра)
+      # здесь — пустые заглушки с теми же именами: в .apk
       # попадают только имена зависимостей. Что настоящие пакеты есть в фиде
       # packages этой версии, проверяется отдельно. luci-base и ucode — настоящие:
       # luci.mk нужны инструменты luci-base.
@@ -143,7 +144,7 @@ jobs:
           set -e
           mkdir -p feed/luci-app-stella out
           cp -r Makefile root htdocs feed/luci-app-stella/
-          for p in xray-core curl; do
+          for p in xray-core curl kmod-nft-tproxy kmod-nft-queue; do
             mkdir -p "feed/$p"
             printf '%s\n' \
               'include $(TOPDIR)/rules.mk' \
@@ -166,7 +167,7 @@ jobs:
             for p in xray-core curl; do
               ./scripts/feeds list -r packages | sed "s/[[:space:]].*//" | grep -qx "$p" || { echo "в фиде packages нет $p"; exit 1; }
             done
-            ./scripts/feeds install -p stella xray-core curl luci-app-stella
+            ./scripts/feeds install -p stella xray-core curl kmod-nft-tproxy kmod-nft-queue luci-app-stella
             ./scripts/feeds install luci-base ucode ucode-mod-fs ucode-mod-uci >/dev/null
             make defconfig >/dev/null
             make package/luci-app-stella/compile -j"$(nproc)" V=s

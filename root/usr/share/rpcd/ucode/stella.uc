@@ -165,6 +165,11 @@ const methods = {
 			return {
 				enabled: uci.get('stella', 'main', 'enabled') == '1',
 				running: running(),
+				// Правила перехвата на месте (nft мог их не принять) и умеет ли dnsmasq
+				// класть IP доменов в сеты — без этого списки сайтов не работают.
+				intercept: system('nft list table inet stella >/dev/null 2>&1') == 0,
+				dnsmasq_nftset: match(cmd_output('dnsmasq --version 2>/dev/null') || '', /[ \t]nftset/) != null,
+				installing: busy('upgrade'),
 				node_id: sel,
 				node,
 				updating: busy('update'),
@@ -668,8 +673,8 @@ const methods = {
 		args: { what: 'what' },
 		call: function(req) {
 			let what = req.args?.what;
-			if (!(what in [ 'stella', 'xray', 'zapret' ]))
-				return { error: 'нужно stella, xray или zapret' };
+			if (!(what in [ 'stella', 'xray', 'zapret', 'dnsmasq' ]))
+				return { error: 'нужно stella, xray, zapret или dnsmasq' };
 			return { started: spawn('upgrade', `/usr/bin/stella upgrade ${what}`) };
 		}
 	},

@@ -54,9 +54,9 @@ return view.extend({
 			btn = E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'));
 		}
 		else {
-			state = st.running ?
-				E('span', { 'class': 'st-state st-ok' }, _('Работает')) :
-				E('span', { 'class': 'st-state st-bad' }, _('Не запущено — см. лог'));
+			state = !st.running ? E('span', { 'class': 'st-state st-bad' }, _('Не запущено — см. лог')) :
+				!st.intercept ? E('span', { 'class': 'st-state st-bad' }, _('Перехват не включён — трафик идёт напрямую, см. лог')) :
+				E('span', { 'class': 'st-state st-ok' }, _('Работает'));
 			btn = E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleEnable', false) }, _('Выключить'));
 		}
 
@@ -69,8 +69,16 @@ return view.extend({
 		else
 			node = [ E('span', { 'class': 'st-bad' }, _('не выбран')) ];
 
+		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
+		const dnsWarn = (st.enabled && !st.dnsmasq_nftset) ? E('div', { 'class': 'st-head' }, [
+			E('span', { 'class': 'st-bad' }, _('dnsmasq без поддержки nftset — списки сайтов не работают.')),
+			st.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
+			E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleDnsmasq') }, _('Установить dnsmasq-full'))
+		]) : '';
+
 		dom.content(this.statusBox, [
 			E('div', { 'class': 'st-head' }, [ state, btn ]),
+			dnsWarn,
 			E('div', { 'class': 'st-card' }, [
 				E('span', { 'class': 'st-k' }, _('Узел')),
 				E('span', {}, [ ...node, ' ', E('a', { 'href': L.url('admin/services/stella/servers') }, _('сменить')) ]),
@@ -205,6 +213,20 @@ return view.extend({
 
 	handleUpdateCheck() {
 		return callUpdateCheck().then(() => this.pollUpdates());
+	},
+
+	handleDnsmasq() {
+		if (!confirm(_('Заменить dnsmasq на dnsmasq-full? Настройки DHCP и DNS сохранятся, DNS на роутере пропадёт на несколько секунд.')))
+			return;
+		return callUpdateInstall('dnsmasq').then(() => this.pollStatus());
+	},
+
+	pollStatus() {
+		return callStatus().then((st) => {
+			this.renderStatus(st);
+			if (st.installing)
+				window.setTimeout(() => this.pollStatus(), 2000);
+		});
 	},
 
 	handleInstall(what) {

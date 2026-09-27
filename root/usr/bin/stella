@@ -52,7 +52,7 @@ function usage() {
 		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
-		'  upgrade check|stella|xray|zapret  проверить или установить обновления\n' +
+		'  upgrade check|stella|xray|zapret|dnsmasq  проверить или установить обновления\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
 		'  parse <ссылка>     разобрать ссылку\n');
 	return 2;
@@ -960,6 +960,27 @@ function cmd_upgrade(what) {
 	else if (what == 'xray') {
 		if (system('apk update >/dev/null 2>&1; apk upgrade xray-core') != 0)
 			return 1;
+	}
+	else if (what == 'dnsmasq') {
+		// dnsmasq-full вместо dnsmasq: только в нём есть nftset. Всё скачивается заранее —
+		// после удаления dnsmasq DNS на роутере нет, — а не встанет новый, возвращается старый.
+		let d = '/tmp/stella-dnsmasq';
+		if (system(`rm -rf ${d} && mkdir -p ${d}/old && apk update >/dev/null 2>&1 && ` +
+		           `apk fetch -R -o ${d} dnsmasq-full && apk fetch -o ${d}/old dnsmasq`) != 0) {
+			warn('не удалось скачать dnsmasq-full\n');
+			system(`rm -rf ${d}`);
+			return 1;
+		}
+		system(`cp /etc/config/dhcp ${d}/dhcp`);
+		let rc = system(`apk del dnsmasq && apk add --allow-untrusted ${d}/*.apk`);
+		if (rc != 0)
+			system(`apk add --allow-untrusted ${d}/old/*.apk`);
+		// Настройки DHCP и DNS — прежние, а не из нового пакета.
+		system(`cp ${d}/dhcp /etc/config/dhcp; rm -f /etc/config/dhcp.apk-new; rm -rf ${d}; /etc/init.d/dnsmasq enable; /etc/init.d/dnsmasq restart`);
+		if (rc != 0) {
+			warn('dnsmasq-full не установился, возвращён прежний dnsmasq\n');
+			return 1;
+		}
 	}
 	else if (what == 'zapret') {
 		let zr = zapret_release();
