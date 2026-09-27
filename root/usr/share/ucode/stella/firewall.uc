@@ -60,6 +60,9 @@ export function nft_script(opts) {
 		'	}'
 	];
 
+	if (opts.zapret)
+		push(out, '', '	set zapret_excl {', '		type ipv4_addr', '		flags interval', '		auto-merge', '	}');
+
 	for (let l in opts.lists || []) {
 		push(out, '', `	set ${l.id} {`, '		type ipv4_addr', '		flags interval', '		auto-merge');
 		if (length(l.cidrs))
@@ -114,6 +117,9 @@ export function nft_script(opts) {
 		'	}',
 		'',
 		'	chain act_zapret {',
+		// Исключения Zapret (российские сайты и сервисы, которые ломаются от обхода) —
+		// всегда напрямую, без искажений; сет наполняет dnsmasq.
+		...(opts.zapret ? [ '		ip daddr @zapret_excl accept' ] : []),
 		`		ct mark set ct mark | ${hex(ZAPRET_MARK)} accept`,
 		'	}');
 

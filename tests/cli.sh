@@ -29,7 +29,7 @@ cat > "$T/uci.json" <<EOF
 EOF
 
 run() {
-	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" "$UCODE" -S \
+	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
 		root/usr/bin/stella "$@"
 }
@@ -79,12 +79,27 @@ cat > "$T/uci.json" <<EOF
 }
 EOF
 run lists >/dev/null
+mkdir -p "$T/zapret" && printf 'ru\nsberbank.com\n' > "$T/zapret/hosts-exclude.txt"
 OUT=$(run fw show)
 for want in 'set list_yt' 'elements = { 91.108.4.0/22 }' 'ip daddr @list_yt goto act_zapret' 'goto act_direct' \
-	'nftset=/googlevideo.com/4#inet#stella#list_yt' 'nftset=/ytimg.com/4#inet#stella#list_yt' 'queue flags bypass to 202'; do
+	'nftset=/googlevideo.com/4#inet#stella#list_yt' 'nftset=/ytimg.com/4#inet#stella#list_yt' 'queue flags bypass to 202' \
+	'nftset=/sberbank.com/4#inet#stella#zapret_excl' 'ip daddr @zapret_excl accept'; do
 	echo "$OUT" | grep -qF "$want" || { echo "FAIL: fw show без «$want»"; exit 1; }
 done
 if echo "$OUT" | grep -q 'list_off'; then echo "FAIL: выключенный список попал в правила"; exit 1; fi
+
+# У стратегии Flowseal — свои исключения.
+printf 'steampowered.com\ntwitch.tv\n' > "$T/zapret/hosts-exclude_fs.txt"
+python3 - "$T/uci.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d['main']['zapret_bin'] = '/bin/sh'; d['main']['zapret_opts'] = '--filter-tcp=443 --hostlist-exclude=/opt/zapret/ipset/zapret-hosts-flowseal-exclude.txt --dpi-desync=fake'
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+OUT=$(run fw show)
+echo "$OUT" | grep -qF 'nftset=/twitch.tv/4#inet#stella#zapret_excl' || { echo "FAIL: нет исключений Flowseal"; exit 1; }
+if echo "$OUT" | grep -qF 'nftset=/sberbank.com/4#inet#stella#zapret_excl'; then echo "FAIL: исключения ZMS у стратегии Flowseal"; exit 1; fi
+ARGS=$(run zapret-cmd 2>/dev/null || true)
+case "$ARGS" in *hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил свой файл исключений Flowseal: $ARGS"; exit 1 ;; esac
 
 # migrate: анонимная подписка переименовывается, кэш и выбранный узел следуют за ней.
 cat > "$T/uci.json" <<EOF

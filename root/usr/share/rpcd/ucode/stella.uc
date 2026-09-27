@@ -4,7 +4,7 @@
 'use strict';
 
 import { cursor as uci_cursor } from 'uci';
-import { readfile, writefile, popen, stat, unlink } from 'fs';
+import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
 import { RUN_DIR, CACHE_DIR, LISTS_DIR, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a } from 'stella.util';
@@ -28,6 +28,10 @@ function new_section(uci, type, prefix, seed) {
 
 const XRAY_CONF = '/var/etc/stella/config.json';
 const ZAPRET_DIR = getenv('STELLA_ZAPRET_DIR') || '/etc/stella/zapret';
+// Подделки для UDP (голос Discord, игры) — набор из Zapret Manager; stun.bin — по умолчанию.
+const UDP_FAKES = [ 'stun2.bin', 'quic_initial_www_google_com.bin', 'quic_initial_4pda_to.bin',
+	'quic_initial_tencent_com.bin', 'quic_initial_steamcommunity_com.bin', 'quic_initial_5ka_ru.bin',
+	'quic_initial_rutube_ru.bin', 'tls_clienthello_sochi_park.bin' ];
 
 function shq(s) {
 	return "'" + replace(`${s}`, "'", "'\\''") + "'";
@@ -80,6 +84,8 @@ const SETTINGS = {
 	zapret_yt: { title: 'Стратегия для YouTube', def: '', apply: 'reload' },
 	zapret_discord: { title: 'Стратегия для Discord', def: '', apply: 'reload' },
 	zapret_games: { title: 'Стратегия для игр', def: '', apply: 'reload' },
+	zapret_games_fake: { title: 'Подделка для игр', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
+	zapret_discord_fake: { title: 'Подделка для Discord', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
 	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
 	zapret_tcp_ports: { title: 'Порты TCP', def: '80,443', apply: 'reload', check: PORTS },
 	zapret_udp_ports: { title: 'Порты UDP', def: '443', apply: 'reload', check: PORTS }
@@ -628,6 +634,7 @@ const methods = {
 			let bins = filter([ '/opt/zapret/nfq/nfqws', '/opt/zapret2/nfq2/nfqws2', '/usr/bin/nfqws', '/usr/bin/nfqws2' ], (b) => stat(b) != null);
 			return {
 				binaries: bins,
+				installing: busy('upgrade'),
 				service_enabled: system('/etc/init.d/zapret enabled 2>/dev/null') == 0,
 				service_running: zapret_foreign_nfqws(),
 				leftover_tables: system('nft list table inet zapret >/dev/null 2>&1 || nft list table inet zapret2 >/dev/null 2>&1') == 0,
@@ -661,8 +668,8 @@ const methods = {
 		args: { what: 'what' },
 		call: function(req) {
 			let what = req.args?.what;
-			if (!(what in [ 'stella', 'xray' ]))
-				return { error: 'нужно stella или xray' };
+			if (!(what in [ 'stella', 'xray', 'zapret' ]))
+				return { error: 'нужно stella, xray или zapret' };
 			return { started: spawn('upgrade', `/usr/bin/stella upgrade ${what}`) };
 		}
 	},
@@ -677,12 +684,25 @@ const methods = {
 			// такого имени в каталоге нет.
 			let current = uci.get('stella', 'main', 'zapret_strategy') || match(trim(lines[0] || ''), /^#(.+)$/)?.[1] || null;
 			let in_catalog = length(filter(cat, (s) => s.name == current)) > 0;
+			let fs_excl = index(uci.get('stella', 'main', 'zapret_opts') || '', 'zapret-hosts-flowseal-exclude.txt') >= 0;
 			return {
 				strategies: map(cat, (s) => ({ name: s.name, family: s.family })),
 				updated: +(readfile(`${ZAPRET_DIR}/catalog.updated`) || 0) || null,
 				current,
 				custom: !!uci.get('stella', 'main', 'zapret_opts') && !in_catalog,
 				results: json(readfile(`${ZAPRET_DIR}/results.json`) || 'null'),
+				// Подделки, которые есть на роутере (из пакета zapret или копии Flowseal), и чего не хватило nfqws.
+				fakes: filter(map(UDP_FAKES, (f) => stat(`/opt/zapret/files/fake/${f}`) ? `/opt/zapret/files/fake/${f}` :
+					stat(`${ZAPRET_DIR}/fake/${f}`) ? `${ZAPRET_DIR}/fake/${f}` : null), (f) => f != null),
+				missing: json(readfile(`${RUN_DIR}/zapret-missing.json`) || '[]'),
+				hostlists: map([ 'google', 'exclude', 'exclude_fs' ], (n) => {
+					let st = stat(`${ZAPRET_DIR}/hosts-${n}.txt`);
+					return { name: n, own: !!st, updated: st?.mtime };
+				}),
+				// Исключения основной стратегии (у Flowseal свои) — всегда идут мимо Zapret.
+				excluded_by: fs_excl ? 'Flowseal' : 'Zapret Manager',
+				excluded: length(filter(split(readfile(`${ZAPRET_DIR}/hosts-${fs_excl ? 'exclude_fs' : 'exclude'}.txt`) || readfile('/opt/zapret/ipset/zapret-hosts-user-exclude.txt') || '', '\n'),
+					(l) => trim(l) != '' && substr(trim(l), 0, 1) != '#')),
 				progress: json(readfile(`${RUN_DIR}/ztest.json`) || 'null'),
 				testing: busy('ztest'),
 				updating: busy('zcatalog')

@@ -35,6 +35,8 @@ function args_of_line(line) {
 	return filter(map(split(replace(line, /--/g, '\n--'), '\n'), (a) => trim(a)), (a) => a != '');
 }
 
+const FS_EXCLUDE = '/opt/zapret/ipset/zapret-hosts-flowseal-exclude.txt';
+
 // .bat Flowseal → стратегия. fake_dir — куда положены его файлы-подделки (*.bin).
 export function flowseal_strategy(bat, name, fake_dir) {
 	let args = [];
@@ -55,7 +57,7 @@ export function flowseal_strategy(bat, name, fake_dir) {
 		if (a in FS_DROP)
 			continue;
 		a = replace(a, /"%BIN%([^"]+)"/g, (m, f) => `${fake_dir}/${f}`);
-		a = replace(a, '"%LISTS%list-exclude.txt"', '/opt/zapret/ipset/zapret-hosts-user-exclude.txt');
+		a = replace(a, '"%LISTS%list-exclude.txt"', FS_EXCLUDE);
 		a = replace(a, '"%LISTS%list-google.txt"', '/opt/zapret/ipset/zapret-hosts-google.txt');
 		a = replace(a, /%GameFilter(TCP|UDP)%/g, FS_GAME_OFF);
 		a = replace(a, '^!', `${fake_dir}/tls_clienthello_www_google_com.bin`);
@@ -156,6 +158,53 @@ export function game_strategies(ports) {
 	return res;
 };
 
+// Свои копии хостлистов вместо файлов пакета zapret: те устаревают вместе с пакетом, а без
+// пакета стратегий с ними не запустить. Источники — те же, что у Zapret Manager.
+export const HOSTLISTS = {
+	google: {
+		pkg: '/opt/zapret/ipset/zapret-hosts-google.txt',
+		url: 'https://raw.githubusercontent.com/remittor/zapret-openwrt/zap1/zapret/ipset/zapret-hosts-google.txt',
+		// Домены Google Play, которые Zapret Manager дописывает к этому списку.
+		extra: [ 'gvt1.com', 'googleplay.com', 'play.google.com', 'beacons.gvt2.com', 'play.googleapis.com',
+			'play-fe.googleapis.com', 'lh3.googleusercontent.com', 'android.clients.google.com',
+			'connectivitycheck.gstatic.com', 'play-lh.googleusercontent.com', 'play-games.googleusercontent.com',
+			'prod-lt-playstoregatewayadapter-pa.googleapis.com', 'youtubei.youtube.com' ]
+	},
+	exclude: {
+		pkg: '/opt/zapret/ipset/zapret-hosts-user-exclude.txt',
+		url: 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main/zapret-hosts-user-exclude.txt',
+		extra: []
+	},
+	// Свои исключения у стратегий Flowseal (Steam, Epic, Microsoft, VK, банки…). В пакете zapret
+	// такого файла нет: путь условный, его заменяет своя копия, а без неё — список ZMS.
+	exclude_fs: {
+		pkg: FS_EXCLUDE,
+		url: 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/lists/list-exclude.txt',
+		fallback: '/opt/zapret/ipset/zapret-hosts-user-exclude.txt',
+		extra: []
+	}
+};
+
+// Замена путей в ключах: { старый путь: новый }.
+export function localize(args, paths) {
+	return map(args, (a) => {
+		for (let from, to in paths)
+			a = replace(a, from, to);
+		return a;
+	});
+};
+
+// Файлы, на которые ссылаются ключи (--x=/путь.bin, --hostlist=/путь.txt), но которых нет.
+export function missing_files(args, exists) {
+	let res = {};
+	for (let a in args) {
+		let m = match(a, /^--[a-z0-9-]+=(\/[^,]+\.(bin|txt))$/);
+		if (m && !exists(m[1]))
+			res[m[1]] = true;
+	}
+	return keys(res);
+};
+
 // «80,443,1000-2000,1500-3000» → слитые непересекающиеся диапазоны по возрастанию.
 export function merge_ports(list) {
 	let iv = [];
@@ -179,13 +228,24 @@ export function merge_ports(list) {
 // Итоговые ключи nfqws и порты очереди. YouTube — первым: nfqws берёт первый подходящий
 // профиль, а Yv ограничены доменами YouTube и остальному не мешают.
 // opts: { main: [ключи], yt: стратегия | null, discord: стратегия | null,
-//         games: стратегия | null, tcp_ports, udp_ports }
+//         games: стратегия | null, games_fake: путь | null, discord_fake: путь | null,
+//         tcp_ports, udp_ports }
 export function compose(opts) {
 	let blocks = [ opts.yt?.args, opts.main ];
-	if (opts.discord)
-		push(blocks, DISCORD_VOICE, opts.discord.args);
-	if (opts.games)
-		push(blocks, opts.games.args);
+	if (opts.discord) {
+		// Своя подделка для голоса Discord — как смена fake в Zapret Manager.
+		let voice = opts.discord_fake
+			? map(DISCORD_VOICE, (a) => match(a, /^--dpi-desync-fake-(discord|stun)=/) ? replace(a, /=.*$/, `=${opts.discord_fake}`) : a)
+			: DISCORD_VOICE;
+		push(blocks, voice, opts.discord.args);
+	}
+	if (opts.games) {
+		// Своя подделка для игр — как пункт «сменить fake» в Zapret Manager.
+		let g = opts.games.args;
+		if (opts.games_fake)
+			g = map(g, (a) => (substr(a, 0, 30) == '--dpi-desync-fake-unknown-udp=') ? `--dpi-desync-fake-unknown-udp=${opts.games_fake}` : a);
+		push(blocks, g);
+	}
 
 	let args = [];
 	for (let b in filter(blocks, (b) => length(b))) {

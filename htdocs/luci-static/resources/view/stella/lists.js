@@ -23,11 +23,13 @@ const callZApply = rpc.declare({ object: 'stella', method: 'zapret_apply', param
 const callZCatalogUpdate = rpc.declare({ object: 'stella', method: 'zapret_catalog_update' });
 const callZTest = rpc.declare({ object: 'stella', method: 'zapret_test', params: [ 'scope', 'apply' ] });
 const callZTestStop = rpc.declare({ object: 'stella', method: 'zapret_test_stop' });
+const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
 
 const FAMILIES = { v: 'Zapret Manager', yv: 'YouTube', fs: 'Flowseal', dv: 'Discord', gv: _('игры'), current: _('текущая') };
 
 const ITD = 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/';
 const META = 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/';
+const ZMS_EXCLUDE = 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main/zapret-hosts-user-exclude.txt';
 
 // Готовые списки itdoginfo/allow-domains; у сервисов с известными подсетями — оба файла.
 const CATALOG = [
@@ -101,6 +103,12 @@ const CSS = `
 .st-inline { display:inline-flex; gap:.4em; align-items:center; white-space:nowrap }
 .st-zrow { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:.45em 0 }
 .st-zrow select { width:auto; max-width:22em }
+.st-zgrid { display:grid; grid-template-columns:max-content 1fr; gap:.4em 1em; align-items:center; margin:.6em 0 }
+.st-zgrid > b { font-weight:600 }
+.st-zgrid > div { display:flex; flex-wrap:wrap; gap:.5em; align-items:center }
+.st-zgrid select { width:auto; max-width:22em }
+.st-zfoot { font-size:90%; margin-top:.5em; display:flex; flex-wrap:wrap; gap:.3em 1.2em; align-items:center }
+@media (max-width:600px) { .st-zgrid { grid-template-columns:1fr } }
 .st-zres { max-height:18em; overflow-y:auto; margin-top:.4em; border:1px solid rgba(128,128,128,.2); border-radius:4px }
 .st-zres table { width:100%; border-collapse:collapse }
 .st-zres td { padding:.2em .6em; border-bottom:1px solid rgba(128,128,128,.1) }
@@ -131,6 +139,8 @@ function sourceLabel(l) {
 		return 'itdoginfo';
 	if (u.indexOf(META) == 0)
 		return 'meta-rules-dat';
+	if (u == ZMS_EXCLUDE)
+		return 'Zapret Manager';
 	const m = u.match(/^https?:\/\/([^\/]+)/);
 	return m ? m[1] : u;
 }
@@ -177,7 +187,7 @@ return view.extend({
 				this.renderAll();
 			if (wasTesting && !zc.testing && zc.progress && zc.progress.message)
 				ui.addNotification(null, E('p', {}, _('Автоподбор: %s').format(zc.progress.message)), 'info');
-			const busy = d.updating || zc.testing || zc.updating;
+			const busy = d.updating || zc.testing || zc.updating || zi.installing;
 			if (busy && !this.polling) {
 				this.polling = () => this.refresh();
 				poll.add(this.polling, 2);
@@ -213,12 +223,14 @@ return view.extend({
 
 		// Каталог itdoginfo — и при создании, и при изменении: уже входящие в список пункты
 		// отмечены, а их ссылки не дублируются в поле ниже.
+		let action = l.action;
+		const actSel = actionSelect(action, (v) => action = v);
 		const catUrls = {};
 		const checks = [];
 		const cat = E('div', { 'class': 'st-cat' }, CATALOG.map((g) => E('div', {}, [
 			E('h5', {}, g[0]),
 			E('div', { 'class': 'st-cols' }, g[1].map((it) => {
-				const urls = it[1].map((f) => ITD + f);
+				const urls = it[1].map((f) => /^https?:/.test(f) ? f : ITD + f);
 				urls.forEach((u) => catUrls[u] = true);
 				const cb = E('input', { 'type': 'checkbox', 'checked': (!isNew && urls.every((u) => l.urls.indexOf(u) >= 0)) ? '' : null });
 				checks.push([ cb, it, urls ]);
@@ -226,7 +238,6 @@ return view.extend({
 			}))
 		])));
 
-		let action = l.action;
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('например, Видео и соцсети') : '' });
 		const text = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4,
 			'placeholder': 'mysite.ru\n203.0.113.0/24\nhttps://example.com/list.lst' },
@@ -283,8 +294,8 @@ return view.extend({
 		ui.showModal(isNew ? _('Новый список') : _('Список «%s»').format(l.name), [
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name,
 				isNew ? E('small', { 'class': 'st-dim' }, _('Если не указать — по выбранному, например «YouTube, Discord».')) : '' ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Что делать с этими сайтами')), actionSelect(action, (v) => action = v) ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Готовые списки (itdoginfo)')), cat ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Что делать с этими сайтами')), actSel ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Готовые списки')), cat ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Свои сайты, подсети или ссылки на списки — по одному в строке')), text,
 				E('small', { 'class': 'st-dim' }, _('Сайт включает все поддомены. Ссылка на файл списка (например, из meta-rules-dat) загружается и обновляется сама.')) ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Для каких устройств')), mode, devList ]),
@@ -381,6 +392,12 @@ return view.extend({
 			]);
 		};
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
+		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
+		const fakeSel = (key) => [ E('span', { 'class': 'st-dim' }, _('подделка')), E('select', { 'class': 'cbi-input-select',
+			'change': (ev) => this.saveSetting({ [key]: ev.target.value }).then(() => { cfg[key] = ev.target.value; return this.refresh(); }) }, [
+			E('option', { 'value': '', 'selected': cfg[key] ? null : '' }, _('stun (по умолчанию)')),
+			...(zc.fakes || []).map((f) => E('option', { 'value': f, 'selected': f == cfg[key] ? '' : null }, fakeName(f)))
+		]) ];
 		const sched = sui.combo(cfg.zapret_test_interval || '0',
 			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
 			(v) => this.saveSetting({ zapret_test_interval: v }).then(() => { cfg.zapret_test_interval = v; }), { custom_placeholder: _('дней…') });
@@ -404,7 +421,9 @@ return view.extend({
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
 		else
-			state = E('span', { 'class': 'st-bad' }, _('не запущен — стратегия не подходит к nfqws'));
+			state = E('span', { 'class': 'st-bad' }, (zc.missing && zc.missing.length)
+				? _('не запущен — нет файлов: %s').format(zc.missing.join(', '))
+				: _('не запущен — стратегия не подходит к nfqws'));
 
 		// Автоподбор.
 		const p = zc.progress || {};
@@ -419,9 +438,7 @@ return view.extend({
 			test = [
 				E('button', { 'class': 'btn cbi-button-action', 'disabled': zc.strategies.length ? null : '',
 					'click': ui.createHandlerFn(this, () => this.call(callZTest('all', auto.checked))) }, _('Подобрать')),
-				E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.length ? null : '',
-					'click': ui.createHandlerFn(this, () => this.call(callZTest('yv', auto.checked))) }, _('только YouTube')),
-				E('label', { 'class': 'st-dim' }, [ auto, ' ', _('применить лучшую, если она лучше текущей') ])
+				E('label', { 'class': 'st-dim' }, [ auto, ' ', _('применить лучшую') ])
 			];
 
 		// Результаты: лучшие сверху, с кнопкой «Применить».
@@ -449,8 +466,8 @@ return view.extend({
 		]) : '';
 
 		const svcBad = zi.service_running || zi.service_enabled || zi.leftover_tables;
-		const svc = E('div', { 'class': 'st-zrow st-dim' }, [
-			_('Отдельная служба zapret:') + ' ',
+		const svc = E('span', { 'class': 'st-inline' }, [
+			_('служба zapret:') + ' ',
 			zi.service_running ? E('span', { 'class': 'st-bad' }, _('работает — будет мешать')) :
 			zi.service_enabled ? E('span', { 'class': 'st-bad' }, _('включена в автозапуск')) :
 			zi.leftover_tables ? _('остановлена, остались её правила') : _('остановлена'),
@@ -464,29 +481,42 @@ return view.extend({
 			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила')) : ''
 		]);
 
+		const hl = (zc.hostlists || []).every((h) => h.own);
+		if (!zi.binaries.length)
+			return dom.content(this.zapretBox, [
+				E('h3', { 'style': 'margin-top:0' }, 'Zapret'),
+				E('div', { 'class': 'st-zrow' }, [ E('span', { 'class': 'st-dim' }, _('Пакет zapret не установлен — без него обход без VPN недоступен.')),
+					zi.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
+					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, () => callUpdateInstall('zapret').then(() => this.refresh())) }, _('Установить')) ])
+			]);
 		dom.content(this.zapretBox, [
 			E('div', { 'style': 'display:flex;align-items:baseline;gap:1em;flex-wrap:wrap' }, [
 				E('h3', { 'style': 'margin:0' }, 'Zapret'),
+				E('span', {}, state),
 				E('span', { 'class': 'st-dim' }, [
 					zc.strategies.length ? _('каталог: %d стратегий').format(zc.strategies.length) : _('каталог не загружен'),
 					zc.updated ? ' · ' + new Date(zc.updated * 1000).toLocaleDateString('ru-RU') : '', ' ',
 					zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю…')) : E('a', { 'href': '#', 'click': (ev) => { ev.preventDefault(); this.call(callZCatalogUpdate()); } }, _('обновить'))
 				])
 			]),
-			E('div', { 'class': 'st-dim', 'style': 'margin:.3em 0 .5em' }, _('Обход блокировок без VPN для списков с действием «Zapret». Стратегии — как в Zapret Manager: основная и отдельные для YouTube, Discord и игр.')),
-			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Стратегия')), sel,
-				(zc.current && res[zc.current]) ? E('span', { 'class': 'st-dim' }, score(zc.current)) : '',
-				E('span', { 'class': 'st-dim' }, [ '· ', state ]) ]),
-			E('div', { 'class': 'st-zrow' }, [ E('b', {}, 'YouTube'), ytSel,
-				E('b', {}, 'Discord'), dvSel, E('b', {}, _('Игры')), gvSel ]),
+			E('div', { 'class': 'st-zgrid' }, [
+				E('b', {}, _('Основная')), E('div', {}, [ sel ]),
+				E('b', {}, 'YouTube'), E('div', {}, [ ytSel ]),
+				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
+				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
+				E('b', {}, _('Автоподбор')), E('div', {}, [ ...test, E('span', { 'class': 'st-dim' }, _('по расписанию:')), sched ])
+			]),
 			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
-				_('Игровые серверы и голос Discord ходят по IP, которых нет в списках: чтобы Zapret их касался, выберите вверху «Всё, что не попало в списки: через Zapret» или добавьте их адреса в список с действием «Zapret».')) : '',
-			E('div', { 'class': 'st-zrow' }, [ E('b', {}, _('Автоподбор')), ...test ]),
-			E('div', { 'class': 'st-zrow' }, [ _('по расписанию:'), sched,
-				E('details', { 'style': 'display:inline-block' }, [ E('summary', { 'style': 'cursor:pointer', 'class': 'st-dim' }, _('как проверяется')),
-					E('div', { 'class': 'st-dim', 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей; по расписанию — всегда так.')) ]) ]),
+				_('Игры и голос Discord ходят по IP вне списков — Zapret их коснётся, только если вверху выбрано «Всё, что не попало в списки: через Zapret».')) : '',
 			results,
-			svc
+			E('div', { 'class': 'st-zfoot st-dim' }, [
+				E('span', { 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret. Список — от источника основной стратегии.') },
+					zc.excluded ? _('исключения %s: %d %s, всегда напрямую').format(zc.excluded_by, zc.excluded, sui.plural(zc.excluded, _('домен'), _('домена'), _('доменов'))) : _('исключения: нет списка — обновите каталог')),
+				E('span', {}, hl ? _('хостлисты: свои') : _('хостлисты: из пакета zapret')),
+				svc,
+				E('details', {}, [ E('summary', { 'style': 'cursor:pointer' }, _('как проверяются стратегии')),
+					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей; по расписанию — всегда так.')) ])
+			])
 		]);
 	},
 

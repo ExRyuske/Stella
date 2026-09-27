@@ -9,7 +9,7 @@ import { decode } from 'stella.subscription';
 import { build_config, dns_server_ip } from 'stella.xray';
 import { parse_list } from 'stella.lists';
 import { nft_script, dnsmasq_conf } from 'stella.firewall';
-import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
@@ -273,7 +273,8 @@ let fs = flowseal_strategy(readfile('tests/fixtures/flowseal-general-alt3.bat'),
 let fsj = fs ? join(' ', fs.args) : '';
 if (fs && fs.args[0] == '--filter-udp=19294-19344,50000-50100' && index(fsj, '%') < 0 && index(fsj, '"') < 0 &&
     index(fsj, '/etc/stella/zapret/fake/') >= 0 && index(fsj, '--hostlist=/opt/zapret/ipset/zapret-hosts-google.txt') >= 0 &&
-    index(fsj, 'list-general') < 0 && index(fsj, '--filter-tcp=12') >= 0 && fs.args[length(fs.args) - 1] != '--new' &&
+    index(fsj, 'list-general') < 0 && index(fsj, '--hostlist-exclude=/opt/zapret/ipset/zapret-hosts-flowseal-exclude.txt') >= 0 &&
+    index(fsj, '--filter-tcp=12') >= 0 && fs.args[length(fs.args) - 1] != '--new' &&
     index(fsj, '--new --new') < 0 && index(fsj, 'winws') < 0)
 	passed++;
 else
@@ -317,6 +318,33 @@ if (sprintf('%J', compose({ main: [ '--a' ] })) == '{ "args": [ "--a" ], "tcp_po
 	passed++;
 else
 	fail('compose без наборов');
+
+// Своя подделка для игр, подмена путей хостлистов, поиск отсутствующих файлов.
+let zg = compose({ main: [ '--a' ], games: gv[0], games_fake: '/f/stun2.bin' });
+let lz = localize([ '--hostlist=/opt/zapret/ipset/zapret-hosts-google.txt', '--x=1' ], { '/opt/zapret/ipset/zapret-hosts-google.txt': '/etc/stella/zapret/hosts-google.txt' });
+let mf = missing_files([ '--dpi-desync-fake-tls=/a.bin', '--hostlist=/b.txt', '--filter-tcp=443', '--dpi-desync-fake-tls=/a.bin', '--x=/c.bin,/d.bin' ], (f) => f == '/b.txt');
+if (index(join(' ', zg.args), '--dpi-desync-fake-unknown-udp=/f/stun2.bin') > 0 && index(join(' ', zg.args), '--dpi-desync-fake-unknown-udp=/opt/') < 0 &&
+    lz[0] == '--hostlist=/etc/stella/zapret/hosts-google.txt' && lz[1] == '--x=1' &&
+    sprintf('%J', mf) == '[ "/a.bin" ]')
+	passed++;
+else
+	fail(`games_fake/localize/missing_files: ${sprintf('%J', { zg: zg.args, lz, mf })}`);
+
+// Исключения Zapret: свой сет и проверка до пометки соединения.
+let nz = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'zapret', lists: [], devices: [],
+	zapret: { qnum: 202, tcp_ports: '443', udp_ports: '443' } });
+let nn = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'direct', lists: [], devices: [], zapret: null });
+if (index(nz, 'set zapret_excl {') > 0 && index(nz, 'ip daddr @zapret_excl accept\n\t\tct mark set') > 0 && index(nn, 'zapret_excl') < 0)
+	passed++;
+else
+	fail(`исключения zapret:\n${nz}`);
+
+// Подделка для голоса Discord заменяет оба файла голосового блока.
+let zd = join(' ', compose({ main: [ '--a' ], discord: dv[0], discord_fake: '/f/x.bin' }).args);
+if (index(zd, '--dpi-desync-fake-discord=/f/x.bin') > 0 && index(zd, '--dpi-desync-fake-stun=/f/x.bin') > 0 && index(zd, 'stun.bin --dpi-desync-repeats=6') < 0)
+	passed++;
+else
+	fail(`discord_fake: ${zd}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

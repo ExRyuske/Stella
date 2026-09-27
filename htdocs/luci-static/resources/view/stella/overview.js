@@ -152,6 +152,21 @@ return view.extend({
 			xrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
 		rows.push(...line('xray-core', xr ? (xr.installed || '—') : '—', xrExtra));
 
+		const zr = info && info.zapret;
+		if (zr) {
+			let zrExtra = [];
+			if (zr.available && !zr.installed)
+				zrExtra = [ btn('zapret', _('Установить %s').format(zr.latest)) ];
+			else if (zr.available)
+				zrExtra = [ btn('zapret', _('Обновить до %s').format(zr.latest)), ' ',
+					zr.url ? E('a', { 'href': zr.url, 'target': '_blank' }, _('что нового')) : '' ];
+			else if (zr.error)
+				zrExtra = [ E('span', { 'class': 'st-dim' }, zr.error) ];
+			else
+				zrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
+			rows.push(...line('zapret', zr.installed || _('не установлен'), zrExtra));
+		}
+
 		let action;
 		if (u.installing)
 			action = E('em', { 'class': 'spinning' }, _('устанавливаю… страница обновится сама'));
@@ -193,7 +208,7 @@ return view.extend({
 	},
 
 	handleInstall(what) {
-		if (!confirm(what == 'xray' ? _('Обновить xray-core? Служба перезапустится.') : _('Установить новую версию Stella?')))
+		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret? Zapret в Stella перезапустится.') }[what] || _('Установить новую версию Stella?')))
 			return;
 		return callUpdateInstall(what).then(() => this.pollUpdates());
 	},
