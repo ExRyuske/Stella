@@ -168,8 +168,6 @@ const methods = {
 				// Правила перехвата на месте (nft мог их не принять) и умеет ли dnsmasq
 				// класть IP доменов в сеты — без этого списки сайтов не работают.
 				intercept: system('nft list table inet stella >/dev/null 2>&1') == 0,
-				dnsmasq_nftset: match(cmd_output('dnsmasq --version 2>/dev/null') || '', /[ \t]nftset/) != null,
-				installing: busy('upgrade'),
 				node_id: sel,
 				node,
 				updating: busy('update'),
@@ -381,18 +379,53 @@ const methods = {
 	},
 
 	// Выходной IP через socks-вход xray: показывает, что трафик реально идёт через узел.
+	// Проверка по шагам всей цепочки, которой идёт трафик устройства: сервер VPN отвечает,
+	// правила перехвата и маршрут на месте, DNS отвечает, а IP сайта из списка попал в сет.
 	check: {
 		call: function() {
-			if (!running())
-				return { error: 'служба не запущена' };
-			let port = +(cursor().get('stella', 'main', 'socks_port') || 10808);
+			let uci = cursor();
+			let steps = [];
+			let step = (name, ok, detail) => push(steps, { name, ok, detail });
+			if (!running()) {
+				step('xray', false, 'служба не запущена — см. лог');
+				return { steps };
+			}
+
+			let port = +(uci.get('stella', 'main', 'socks_port') || 10808);
 			let out = cmd_output(`curl -s --max-time 8 -w '\\n%{time_total}' --socks5-hostname 127.0.0.1:${port} https://ipinfo.io/json`);
 			let lines = split(trim(out || ''), '\n');
 			let t = +pop(lines);
 			let info = json(join('\n', lines) || 'null');
-			if (type(info) != 'object' || !info.ip)
-				return { error: 'нет ответа через прокси' };
-			return { ip: info.ip, country: info.country, org: info.org, ms: int(t * 1000) };
+			if (type(info) == 'object' && info.ip)
+				step('Сервер VPN', true, `выход через ${info.ip} — ${info.country || '?'}, ${info.org || ''} (${int(t * 1000)} мс)`);
+			else
+				step('Сервер VPN', false, 'нет ответа через сервер — смените узел или проверьте подписку');
+
+			let nft = system('nft list table inet stella >/dev/null 2>&1') == 0;
+			step('Перехват', nft, nft ? 'правила nftables на месте' : 'nft не принял правила — см. лог');
+
+			let route = match(cmd_output('ip rule 2>&1') || '', /lookup 1127/) && match(cmd_output('ip route show table 1127 2>&1') || '', /local/);
+			step('Маршрут', !!route, route ? 'перехваченный трафик уходит в xray' : 'нет правила маршрутизации — нужен пакет ip-full (ip из busybox не умеет таблицу 1127)');
+
+			let nftset = match(cmd_output('dnsmasq --version 2>/dev/null') || '', /[ \t]nftset/) != null;
+			if (!nftset)
+				step('dnsmasq', false, 'без поддержки nftset — установите dnsmasq-full в «Обновлениях»');
+
+			// Сайт из первого включённого списка «VPN»: резолвим через dnsmasq роутера и
+			// смотрим, попал ли его IP в сет списка.
+			let vpn = filter(load_lists(uci), (l) => l.enabled && l.action == 'vpn' && length(l.domains));
+			let d = length(vpn) ? vpn[0].domains[0] : 'google.com';
+			let ips = filter(map(match(cmd_output(`nslookup ${shq(d)} 127.0.0.1 2>&1`) || '', /Address:?[ \t]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/g) || [],
+				(m) => m[1]), (ip) => substr(ip, 0, 4) != '127.');
+			step('DNS', length(ips) > 0, length(ips) ? `${d} → ${ips[0]}` : `${d} не резолвится — DNS через VPN не отвечает`);
+
+			if (length(vpn) && length(ips) && nftset && nft) {
+				let l = vpn[0];
+				let inset = system(`nft get element inet stella ${l.id} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
+				step(`Список «${l.name}»`, inset, inset ? `${d} идёт через VPN` :
+					`IP ${d} не попал в правила — откройте сайт ещё раз или перезапустите Stella`);
+			}
+			return { steps };
 		}
 	},
 
@@ -658,6 +691,8 @@ const methods = {
 				info: json(readfile(`${RUN_DIR}/update.json`) || 'null'),
 				checking: busy('upcheck'),
 				installing: busy('upgrade'),
+				// Умеет ли dnsmasq класть IP доменов в сеты — без этого списки сайтов не работают.
+				dnsmasq_nftset: match(cmd_output('dnsmasq --version 2>/dev/null') || '', /[ \t]nftset/) != null,
 				log: readfile(`${RUN_DIR}/upgrade.log`) || ''
 			};
 		}

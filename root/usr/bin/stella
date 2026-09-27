@@ -322,8 +322,11 @@ function fw_up() {
 	}
 
 	system(sprintf('while ip rule del fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done', FW_MARK, FW_MARK, ROUTE_TABLE));
-	system(sprintf('ip rule add fwmark 0x%x/0x%x table %d priority %d', FW_MARK, FW_MARK, ROUTE_TABLE, ROUTE_TABLE));
-	system(`ip route replace local 0.0.0.0/0 dev lo table ${ROUTE_TABLE}`);
+	// Без этого маршрута перехваченный трафик VPN никуда не уходит — молчать нельзя.
+	// (ip из busybox не принимает таблицы больше 255, поэтому в зависимостях ip-full.)
+	if (system(sprintf('ip rule add fwmark 0x%x/0x%x table %d priority %d', FW_MARK, FW_MARK, ROUTE_TABLE, ROUTE_TABLE)) != 0 ||
+	    system(`ip route replace local 0.0.0.0/0 dev lo table ${ROUTE_TABLE}`) != 0)
+		warn('не удалось добавить маршрут для VPN (нужен пакет ip-full) — трафик списков VPN не пойдёт\n');
 
 	let conf = dnsmasq_conf(o.dnsmasq);
 	let changed = false;
@@ -965,6 +968,9 @@ function cmd_upgrade(what) {
 		// dnsmasq-full вместо dnsmasq: только в нём есть nftset. Всё скачивается заранее —
 		// после удаления dnsmasq DNS на роутере нет, — а не встанет новый, возвращается старый.
 		let d = '/tmp/stella-dnsmasq';
+		// Перехват снимаем: пока он есть, DNS роутера идёт через xray, и скачивание зависит
+		// от VPN. Вернёт его reload в конце.
+		fw_down();
 		if (system(`rm -rf ${d} && mkdir -p ${d}/old && apk update >/dev/null 2>&1 && ` +
 		           `apk fetch -R -o ${d} dnsmasq-full && apk fetch -o ${d}/old dnsmasq`) != 0) {
 			warn('не удалось скачать dnsmasq-full\n');

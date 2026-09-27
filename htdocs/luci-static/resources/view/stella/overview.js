@@ -69,20 +69,12 @@ return view.extend({
 		else
 			node = [ E('span', { 'class': 'st-bad' }, _('не выбран')) ];
 
-		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
-		const dnsWarn = (st.enabled && !st.dnsmasq_nftset) ? E('div', { 'class': 'st-head' }, [
-			E('span', { 'class': 'st-bad' }, _('dnsmasq без поддержки nftset — списки сайтов не работают.')),
-			st.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
-			E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleDnsmasq') }, _('Установить dnsmasq-full'))
-		]) : '';
-
 		dom.content(this.statusBox, [
 			E('div', { 'class': 'st-head' }, [ state, btn ]),
-			dnsWarn,
 			E('div', { 'class': 'st-card' }, [
 				E('span', { 'class': 'st-k' }, _('Узел')),
 				E('span', {}, [ ...node, ' ', E('a', { 'href': L.url('admin/services/stella/servers') }, _('сменить')) ]),
-				E('span', { 'class': 'st-k' }, _('Выход в интернет')),
+				E('span', { 'class': 'st-k' }, _('Проверка')),
 				E('span', {}, this.checkBox),
 				E('span', {}, ''),
 				E('span', {}, st.enabled ? E('button', {
@@ -175,6 +167,11 @@ return view.extend({
 			rows.push(...line('zapret', zr.installed || _('не установлен'), zrExtra));
 		}
 
+		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
+		rows.push(...line('dnsmasq', u.dnsmasq_nftset ? 'full' : _('без nftset'), u.dnsmasq_nftset ?
+			[ E('span', { 'class': 'st-ok' }, _('списки сайтов работают')) ] :
+			[ btn('dnsmasq', _('Установить dnsmasq-full')), ' ', E('span', { 'class': 'st-bad' }, _('без него списки сайтов не работают')) ]));
+
 		let action;
 		if (u.installing)
 			action = E('em', { 'class': 'spinning' }, _('устанавливаю… страница обновится сама'));
@@ -215,22 +212,9 @@ return view.extend({
 		return callUpdateCheck().then(() => this.pollUpdates());
 	},
 
-	handleDnsmasq() {
-		if (!confirm(_('Заменить dnsmasq на dnsmasq-full? Настройки DHCP и DNS сохранятся, DNS на роутере пропадёт на несколько секунд.')))
-			return;
-		return callUpdateInstall('dnsmasq').then(() => this.pollStatus());
-	},
-
-	pollStatus() {
-		return callStatus().then((st) => {
-			this.renderStatus(st);
-			if (st.installing)
-				window.setTimeout(() => this.pollStatus(), 2000);
-		});
-	},
-
 	handleInstall(what) {
-		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret? Zapret в Stella перезапустится.') }[what] || _('Установить новую версию Stella?')))
+		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret? Zapret в Stella перезапустится.'),
+			dnsmasq: _('Заменить dnsmasq на dnsmasq-full? Настройки DHCP и DNS сохранятся, на время замены перехват снимается, а DNS на роутере пропадёт на несколько секунд.') }[what] || _('Установить новую версию Stella?')))
 			return;
 		return callUpdateInstall(what).then(() => this.pollUpdates());
 	},
@@ -247,9 +231,11 @@ return view.extend({
 		dom.content(this.checkBox, E('em', { 'class': 'spinning' }, _('проверяю…')));
 		const again = E('a', { 'href': '#', 'click': (ev) => { ev.preventDefault(); this.handleCheck(); } }, _('ещё раз'));
 		return callCheck().then((r) => {
-			dom.content(this.checkBox, r.error ? [ E('span', { 'class': 'st-bad' }, r.error), ' ', again ] : [
-				E('strong', {}, r.ip), ' — ', r.country || '?', ', ', r.org || '', ' ',
-				E('span', { 'class': 'st-dim' }, '(%d мс)'.format(r.ms)), ' ', again
+			dom.content(this.checkBox, [
+				...(r.steps || []).map((s) => E('div', {}, [
+					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, s.name), ' — ', s.detail
+				])),
+				again
 			]);
 		}).catch((e) => dom.content(this.checkBox, [ E('span', { 'class': 'st-bad' }, e.message), ' ', again ]));
 	},
