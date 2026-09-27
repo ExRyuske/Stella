@@ -43,6 +43,8 @@ env:
   # SDK под архитектуру OpenWrt One. Пакет noarch, но собирать его в SDK целевой
   # системы — значит проверить заодно, что его зависимости там существуют.
   SDK_IMAGE: ghcr.io/openwrt/sdk:aarch64_cortex-a53-v25.12.5
+  # Ревизия LuCI из этого SDK: её jsmin сжимает виды при сборке пакета.
+  LUCI_REV: 128a7812f4be233c5dd7f7466f534fd888785caf
 
 jobs:
   # Тесты разбора ссылок, генерации конфигов и правил, смоук плагина rpcd, сквозной
@@ -89,7 +91,12 @@ jobs:
 
       - run: UCODE="$PWD/ucode/build/ucode" tests/run.sh
       - run: UCODE="$PWD/ucode/build/ucode" tests/cli.sh
-      - run: scripts/check_web.sh
+      - name: web
+        run: |
+          set -e
+          curl -fsSL -o /tmp/jsmin.c "https://raw.githubusercontent.com/openwrt/luci/$LUCI_REV/modules/luci-base/src/jsmin.c"
+          cc -O2 -o /tmp/jsmin /tmp/jsmin.c
+          JSMIN=/tmp/jsmin scripts/check_web.sh
 
   # Пакет .apk из SDK. В предложении это проверка сборки, в main — то, что уедет
   # в релиз. Версия поднимается ДО сборки: пакет должен называться той версией,

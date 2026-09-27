@@ -230,7 +230,8 @@ return view.extend({
 		const cat = E('div', { 'class': 'st-cat' }, CATALOG.map((g) => E('div', {}, [
 			E('h5', {}, g[0]),
 			E('div', { 'class': 'st-cols' }, g[1].map((it) => {
-				const urls = it[1].map((f) => /^https?:/.test(f) ? f : ITD + f);
+				// Скобки вокруг регулярки нужны jsmin: после «=>» он принимает «/» за деление.
+				const urls = it[1].map((f) => (/^https?:/).test(f) ? f : ITD + f);
 				urls.forEach((u) => catUrls[u] = true);
 				const cb = E('input', { 'type': 'checkbox', 'checked': (!isNew && urls.every((u) => l.urls.indexOf(u) >= 0)) ? '' : null });
 				checks.push([ cb, it, urls ]);

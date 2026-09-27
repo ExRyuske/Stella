@@ -967,6 +967,11 @@ function cmd_upgrade(what) {
 			warn('в последнем релизе zapret нет архива для этого роутера\n');
 			return 1;
 		}
+		// Релиз — zip, а unzip в чистой прошивке нет: ставим его из репозитория OpenWrt.
+		if (system('command -v unzip >/dev/null || { apk update >/dev/null 2>&1; apk add unzip; }') != 0) {
+			warn('не удалось установить unzip — он нужен, чтобы распаковать архив zapret\n');
+			return 1;
+		}
 		let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
 		let body = fetch_any(zr.file, proxy);
 		let dir = '/tmp/stella-zapret-upgrade';
