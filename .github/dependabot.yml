@@ -1,0 +1,20 @@
+# Обновления зависимостей.
+#
+# Своих библиотек у пакета нет: ucode, xray и SDK закреплены версиями в ci.yml
+# нарочно — они должны совпадать с тем, что стоит на роутере с OpenWrt 25.12, и
+# обновляются руками вместе с ним. Остаются только действия GitHub Actions.
+#
+# Раз в месяц и одной группой: каждое предложение — это прогон CI. Префикс
+# `chore(deps)` — потому что заголовки попадают в список изменений релиза.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      actions:
+        patterns: ["*"]

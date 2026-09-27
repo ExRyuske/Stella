@@ -1,0 +1,198 @@
+name: CI
+
+# Один workflow на всё: проверка веток-предложений, сборка пакета и выпуск версии.
+#
+# Push в `main` выпускает версию сам: поднимает patch, собирает .apk и публикует
+# релиз с тегом. Не запускать прогон вовсе можно строкой `[skip ci]` в сообщении
+# коммита, её понимает сам GitHub; правки одной документации не запускают ничего и
+# без пометок. `minor` и `major` — Actions → CI → Run workflow.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Как повысить версию перед выпуском.
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
+# По умолчанию токену дано только чтение; задачи поднимают права себе сами.
+permissions:
+  contents: read
+
+# Ветку-предложение дописывают на ходу, и старый прогон уже никому не нужен.
+# Выпуск дорабатывает до конца, а прогоны main выстраиваются в очередь: второй
+# должен увидеть коммит выпуска от первого.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Ревизия ucode — та же, что в OpenWrt 25.12 на роутере. Свежий ucode прощает
+  # то, на чём роутерный падает (например, `export function` без `;`), и тесты
+  # на нём пропустили бы ошибку, которая всплыла бы только на железе.
+  UCODE_REV: 85922056
+  # xray — та же версия, что в пакете xray-core OpenWrt 25.12: тесты прогоняют
+  # каждый сгенерированный конфиг через `xray run -test`.
+  XRAY_VERSION: 26.3.27
+  # SDK под архитектуру OpenWrt One. Пакет noarch, но собирать его в SDK целевой
+  # системы — значит проверить заодно, что его зависимости там существуют.
+  SDK_IMAGE: ghcr.io/openwrt/sdk:aarch64_cortex-a53-v25.12.5
+
+jobs:
+  # Тесты разбора ссылок, генерации конфигов и правил, смоук плагина rpcd, сквозной
+  # сценарий CLI и синтаксис веб-части.
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ucode cache
+        id: ucode-cache
+        uses: actions/cache@v6
+        with:
+          path: ucode/build
+          key: ucode-${{ env.UCODE_REV }}-${{ runner.os }}
+
+      # Модули, которых нет в роутерной сборке по умолчанию или которые не нужны
+      # тестам (ubus, uci, uloop…), выключены: uci заменяет заглушка tests/mock.
+      - name: build ucode
+        if: steps.ucode-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libjson-c-dev
+          git clone -q https://github.com/jow-/ucode.git ucode
+          git -C ucode checkout -q "$UCODE_REV"
+          cmake -S ucode -B ucode/build -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
+            -DDEBUG_SUPPORT=OFF -DRTNL_SUPPORT=OFF -DNL80211_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
+            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF >/dev/null
+          cmake --build ucode/build -j"$(nproc)"
+
+      # Из кэша приезжает только сборка, а библиотека json-c нужна и ей.
+      - name: runtime deps
+        if: steps.ucode-cache.outputs.cache-hit == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjson-c5
+
+      - name: xray
+        run: |
+          set -e
+          curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v$XRAY_VERSION/Xray-linux-64.zip"
+          sudo unzip -o -q /tmp/xray.zip xray -d /usr/local/bin
+          xray version | head -1
+
+      - run: UCODE="$PWD/ucode/build/ucode" tests/run.sh
+      - run: UCODE="$PWD/ucode/build/ucode" tests/cli.sh
+      - run: scripts/check_web.sh
+
+  # Пакет .apk из SDK. В предложении это проверка сборки, в main — то, что уедет
+  # в релиз. Версия поднимается ДО сборки: пакет должен называться той версией,
+  # под которой выйдет, а коммит с ней делает `release`, когда собрано всё.
+  package:
+    name: package
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+      sha: ${{ steps.head.outputs.sha }}
+    env:
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      # На main берём вершину ветки, а не коммит события: прогоны стоят в очереди,
+      # и коммит выпуска от предыдущего уже должен быть под нами.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name != 'pull_request' && 'main' || '' }}
+      - id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - if: env.PUBLISH == 'true'
+        id: bump
+        run: |
+          set -e
+          tag="$(python3 scripts/release.py bump --part '${{ inputs.bump || 'patch' }}' | sed -n 's/.*-> \(v[0-9][0-9.]*\)$/\1/p')"
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # SDK ищет пакеты в подкаталогах фида, а у нас пакет — корень репозитория.
+      # Поэтому фид собирается рядом: каталог с Makefile, root/ и htdocs/.
+      #
+      # Фиды packages и luci нужны не для сборки (пакет не компилируется), а для
+      # зависимостей: без xray-core, curl и luci-base в дереве SDK молча выкинул
+      # бы пакет из сборки как неудовлетворимый.
+      - name: build .apk
+        run: |
+          set -e
+          mkdir -p feed/luci-app-stella out
+          cp -r Makefile root htdocs feed/luci-app-stella/
+          chmod -R a+rwX feed out
+          docker run --rm -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "$SDK_IMAGE" bash -ec '
+            [ -x ./scripts/feeds ] || ./setup.sh
+            echo "src-link stella /feed" >> feeds.conf.default
+            ./scripts/feeds update base packages luci stella >/dev/null
+            ./scripts/feeds install -p stella luci-app-stella
+            ./scripts/feeds install luci-base xray-core curl ucode ucode-mod-fs ucode-mod-uci >/dev/null
+            make defconfig >/dev/null
+            make package/luci-app-stella/compile -j"$(nproc)" V=s
+            find bin -name "luci-app-stella*.apk" -exec cp {} /out/ \;
+          '
+          ls -la out
+          test -n "$(ls out/*.apk)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: luci-app-stella
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: ${{ env.PUBLISH == 'true' && 1 || 7 }}
+
+  release:
+    name: release
+    needs: package
+    if: needs.package.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.package.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.package.outputs.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: luci-app-stella
+          path: dist
+
+      # Пакет собран — теперь версию можно закреплять в истории. Коммит и тег уходят
+      # под токеном GitHub Actions, а его push не запускает workflow заново — иначе
+      # выпуск выпускал бы сам себя по кругу. Если за время сборки в main что-то
+      # приехало, push упрётся в разошедшиеся истории и задача упадёт — это лучше,
+      # чем тег на дереве, которого никто не собирал.
+      - run: |
+          set -e
+          got="$(python3 scripts/release.py bump --part '${{ inputs.bump || 'patch' }}' | sed -n 's/.*-> \(v[0-9][0-9.]*\)$/\1/p')"
+          test "$got" = "$TAG"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Makefile
+          git commit -m "chore(release): $TAG"
+          git tag --annotate "$TAG" --message "Release $TAG"
+          git push origin HEAD:main "$TAG"
+
+      # Публикуем сразу, без черновика; список изменений GitHub соберёт по коммитам.
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: false
+          make_latest: true
+          generate_release_notes: true
+          files: dist/*.apk
