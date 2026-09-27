@@ -73,6 +73,13 @@ export function flowseal_strategy(bat, name, fake_dir) {
 	return length(out) ? { name, family: 'fs', args: out } : null;
 };
 
+// «--ключ значение» через пробел (встречается в каталоге ZMS, например у Yv06) — nfqws
+// такого ключа не узнаёт; zapret разбил бы строку по словам, а здесь нужен «--ключ=значение».
+function norm_arg(a) {
+	let m = match(a, /^(--[a-z0-9-]+)[ \t]+([^ \t-][^ \t]*)$/);
+	return m ? `${m[1]}=${m[2]}` : a;
+}
+
 // Zapret-Manager.sh: strategy_vN() { printf '%s\n' "#vN" "--ключ" …; }
 export function zms_strategies(script) {
 	let res = [];
@@ -82,7 +89,7 @@ export function zms_strategies(script) {
 		let items = map(match(line, /"[^"]*"/g) || [], (m) => substr(m[0], 1, length(m[0]) - 2));
 		if (length(items) < 2 || substr(items[0], 0, 1) != '#')
 			continue;
-		push(res, { name: substr(items[0], 1), family: 'v', args: slice(items, 1) });
+		push(res, { name: substr(items[0], 1), family: 'v', args: map(slice(items, 1), norm_arg) });
 	}
 	return res;
 };
@@ -99,7 +106,7 @@ export function block_strategies(text, family) {
 			push(res, cur);
 		}
 		else if (cur && substr(line, 0, 2) == '--')
-			push(cur.args, line);
+			push(cur.args, norm_arg(line));
 	}
 	return filter(res, (s) => length(s.args));
 };

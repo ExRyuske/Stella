@@ -214,6 +214,12 @@ function zapret_paths() {
 	return res;
 }
 
+// nfqws сбрасывает права root и читает хостлисты уже после этого: файлы должны читаться
+// всеми, а в /etc/stella — входить (прежние версии создавали их только для root).
+function zapret_readable() {
+	system(`chmod a+x ${shq(replace(ZAPRET_DIR, /\/[^\/]+\/?$/, '') || '/')} 2>/dev/null; chmod -R a+rX ${shq(ZAPRET_DIR)} 2>/dev/null`);
+}
+
 // Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
 // Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
 function zapret_parts() {
@@ -410,6 +416,7 @@ function cmd_zapret_cmd() {
 	if (!stat(bin))
 		unshift(missing, bin);
 	system(`mkdir -p ${RUN_DIR}`);
+	zapret_readable();
 	if (length(missing)) {
 		writefile(`${RUN_DIR}/zapret-missing.json`, sprintf('%J', missing));
 		warn(`nfqws не запущен: нет файлов ${join(', ', missing)}\n`);
@@ -652,6 +659,8 @@ function cmd_zapret_catalog() {
 	if (suite && type(json(suite)) == 'array')
 		writefile(`${ZAPRET_DIR}/suite.json`, suite);
 
+	zapret_readable();
+
 	let all = [ ...v, ...yv, ...fs, ...dv, ...gv ];
 	let data = sprintf('%J', all);
 	if (length(all) && readfile(`${ZAPRET_DIR}/catalog.json`) != data)
@@ -777,6 +786,7 @@ function cmd_zapret_test(...argv) {
 		return fail('нет стратегий для проверки — обновите каталог');
 	if (!stat(bin))
 		return fail(`nfqws не найден (${bin}) — установите zapret`);
+	zapret_readable();
 
 	let stopf = `${RUN_DIR}/ztest.stop`;
 	unlink(stopf);

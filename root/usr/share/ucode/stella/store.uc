@@ -114,6 +114,8 @@ export function task_script(name, cmd) {
 	system(`mkdir -p ${RUN_DIR}`);
 	writefile(run, 'starting');
 	let script = `${RUN_DIR}/${name}.sh`;
-	writefile(script, `echo $$ >${run}\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrm -f ${run}\n`);
+	// umask — как у обычной оболочки: у rpcd она строже, и созданные задачей файлы (хостлисты
+	// Zapret) не мог бы прочитать nfqws, который работает не от root.
+	writefile(script, `echo $$ >${run}\numask 022\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrm -f ${run}\n`);
 	return script;
 };

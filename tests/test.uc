@@ -346,5 +346,12 @@ if (index(zd, '--dpi-desync-fake-discord=/f/x.bin') > 0 && index(zd, '--dpi-desy
 else
 	fail(`discord_fake: ${zd}`);
 
+// «--ключ значение» через пробел (Yv06 в каталоге ZMS) → «--ключ=значение».
+let ya = block_strategies('#Yx\n--dpi-desync=fake\n--dpi-desync-autottl 2:2-12\n--new\n', 'yv')[0]?.args || [];
+if (ya[1] == '--dpi-desync-autottl=2:2-12' && ya[0] == '--dpi-desync=fake' && ya[2] == '--new')
+	passed++;
+else
+	fail(`norm_arg: ${join(' ', ya)}`);
+
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);
