@@ -202,7 +202,10 @@ export function build_config(opts) {
 	}];
 
 	let rules = [];
-	let cfg = { log: { loglevel: opts.log_level || 'warning' } };
+	// Журнал подключений (строка на каждое соединение) — только при подробном логе: на слабом
+	// роутере он заметно ест процессор и вытесняет из лога всё остальное.
+	let level = opts.log_level || 'warning';
+	let cfg = { log: { loglevel: level, access: (level in [ 'info', 'debug' ]) ? '' : 'none' } };
 
 	if (opts.intercept) {
 		push(inbounds, {

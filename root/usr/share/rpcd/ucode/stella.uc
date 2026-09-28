@@ -146,6 +146,31 @@ function sources(uci, nodes) {
 	return res;
 }
 
+// Выбранный узел без разбора всех подписок (статус запрашивается каждые 5 с): отдельная
+// ссылка — это секция UCI, узел подписки — «<секция подписки>_<хеш>».
+function find_node(uci, id) {
+	if (!id)
+		return null;
+	if (uci.get('stella', id) == 'node') {
+		let n = parse(uci.get('stella', id, 'link'));
+		return n.error ? null : { id, name: uci.get('stella', id, 'name') || n.name, protocol: n.protocol, source: 'manual' };
+	}
+	let found = null;
+	uci.foreach('stella', 'subscription', (s) => {
+		if (found || s.enabled == '0' || index(id, `${s['.name']}_`) != 0)
+			return;
+		for (let n in json(readfile(`${CACHE_DIR}/${s['.name']}.json`) || '[]'))
+			if (n.id == id)
+				found = { id, name: n.name, protocol: n.protocol, source: sub_label(s) };
+	});
+	return found;
+}
+
+// Таблица Stella на месте: список одной цепочки, а не всей таблицы с тысячами адресов в сетах.
+function nft_up() {
+	return system('nft list chain inet stella prerouting >/dev/null 2>&1') == 0;
+}
+
 function host_of(url) {
 	let m = match(url, /^https?:\/\/([^\/:?#]+)/);
 	return m ? m[1] : url;
@@ -156,18 +181,14 @@ const methods = {
 		call: function() {
 			let uci = cursor();
 			let sel = uci.get('stella', 'main', 'node');
-			let node = null;
-			if (sel)
-				for (let n in load_nodes(uci))
-					if (n.id == sel)
-						node = { id: n.id, name: n.name, protocol: n.protocol, source: n.source };
+			let node = find_node(uci, sel);
 
 			return {
 				enabled: uci.get('stella', 'main', 'enabled') == '1',
 				running: running(),
 				// Перехват на месте: правила nft (могли быть не приняты) и маршрут в xray
 				// (без ip-full не добавляется) — без любого из них трафик идёт напрямую.
-				intercept: system('nft list table inet stella >/dev/null 2>&1') == 0 &&
+				intercept: nft_up() &&
 					match(cmd_output('ip rule 2>/dev/null') || '', /lookup 1127/) != null,
 				node_id: sel,
 				node,
@@ -402,7 +423,7 @@ const methods = {
 			else
 				step('Сервер VPN', false, 'нет ответа через сервер — смените узел или проверьте подписку');
 
-			let nft = system('nft list table inet stella >/dev/null 2>&1') == 0;
+			let nft = nft_up();
 			step('Перехват', nft, nft ? 'правила nftables на месте' : 'nft не принял правила — см. лог');
 
 			let route = match(cmd_output('ip rule 2>&1') || '', /lookup 1127/) && match(cmd_output('ip route show table 1127 2>&1') || '', /local/);
@@ -689,8 +710,16 @@ const methods = {
 	// Обновления: проверка и установка идут в фоне (apk update и скачивание — долго).
 	update_info: {
 		call: function() {
+			// Установленные версии — локально, без сети: видны и до первой проверки обновлений.
+			let installed = {};
+			for (let l in split(cmd_output('apk list -I luci-app-stella xray-core zapret 2>/dev/null') || '', '\n')) {
+				let m = match(l, /^(luci-app-stella|xray-core|zapret)-([0-9][^ ]*)/);
+				if (m)
+					installed[m[1]] = m[2];
+			}
 			return {
 				info: json(readfile(`${RUN_DIR}/update.json`) || 'null'),
+				installed,
 				checking: busy('upcheck'),
 				installing: busy('upgrade'),
 				// Умеет ли dnsmasq класть IP доменов в сеты — без этого списки сайтов не работают.

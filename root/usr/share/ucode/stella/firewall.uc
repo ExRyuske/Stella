@@ -177,7 +177,9 @@ export function dnsmasq_conf(opts) {
 			push(sets[d], `4#inet#stella#${l.id}`);
 		}
 
-	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}` ];
+	// max-ttl: устройства переспрашивают не реже раза в минуту — новый список начинает
+	// действовать через минуту, а не когда истечёт TTL сайта. Кэш dnsmasq держит настоящий TTL.
+	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}`, 'max-ttl=60' ];
 	// «Канарейки»: по NXDOMAIN Firefox отключает свой DoH, Apple — iCloud Private Relay.
 	if (opts.block_doh)
 		push(out, 'address=/use-application-dns.net/', 'address=/mask.icloud.com/', 'address=/mask-h2.icloud.com/');

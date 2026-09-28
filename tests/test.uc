@@ -263,7 +263,8 @@ else
 
 // dnsmasq: домен из двух списков — одна строка с двумя сетами.
 let dm = dnsmasq_conf({ dns_port: 10853, lists: [ { id: 'list_a', domains: [ 'x.com', 'y.com' ] }, { id: 'list_b', domains: [ 'x.com' ] } ] });
-if (index(dm, 'nftset=/x.com/4#inet#stella#list_a,4#inet#stella#list_b\n') >= 0 && index(dm, 'nftset=/y.com/4#inet#stella#list_a\n') >= 0)
+if (index(dm, 'nftset=/x.com/4#inet#stella#list_a,4#inet#stella#list_b\n') >= 0 && index(dm, 'nftset=/y.com/4#inet#stella#list_a\n') >= 0 &&
+    index(dm, 'max-ttl=60\n') >= 0)
 	passed++;
 else
 	fail(`dnsmasq_conf:\n${dm}`);

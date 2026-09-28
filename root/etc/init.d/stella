@@ -38,7 +38,12 @@ start_service() {
 	# Контрольная сумма конфига: при reload procd перезапустит xray, только если конфиг
 	# действительно изменился (узел, ключи после обновления подписки, DNS…), и не тронет
 	# соединения, если поменялись одни списки.
-	procd_set_param env STELLA_CONF_SUM="$(md5sum <"$CONF" | cut -d' ' -f1)"
+	# GOMEMLIMIT — мягкий предел памяти для Go (треть ОЗУ): без него xray держит память с
+	# большим запасом, и на роутере со 128–256 МБ до нехватки памяти недалеко.
+	local mem_kb
+	mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+	procd_set_param env STELLA_CONF_SUM="$(md5sum <"$CONF" | cut -d' ' -f1)" \
+		${mem_kb:+GOMEMLIMIT=$((mem_kb / 3 / 1024))MiB}
 	procd_set_param respawn 3600 5 0
 	procd_set_param limits nofile="65535 65535"
 	procd_set_param stdout 1

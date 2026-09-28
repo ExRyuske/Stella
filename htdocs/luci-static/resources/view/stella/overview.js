@@ -129,7 +129,11 @@ return view.extend({
 	renderUpdates(u) {
 		const info = u.info;
 		const rows = [];
-		const st = info && info.stella, xr = info && info.xray;
+		// До первой проверки — только установленные версии (их rpcd знает и без сети).
+		const inst = u.installed || {};
+		const st = info ? info.stella : { installed: inst['luci-app-stella'] };
+		const xr = info ? info.xray : { installed: inst['xray-core'] };
+		const zr = info ? info.zapret : { installed: inst.zapret, available: !inst.zapret };
 
 		const line = (label, cur, extra) => [ E('span', { 'class': 'st-k' }, label), E('span', {}, [ cur, ' ', ...extra ]) ];
 		const btn = (what, text) => E('button', { 'class': 'btn cbi-button-positive', 'disabled': u.installing ? '' : null,
@@ -141,28 +145,28 @@ return view.extend({
 				st.url ? E('a', { 'href': st.url, 'target': '_blank' }, _('что нового')) : '' ];
 		else if (st && st.error)
 			stExtra = [ E('span', { 'class': 'st-dim' }, st.error) ];
-		else if (st)
+		else if (info)
 			stExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
 		rows.push(...line('Stella', st ? (st.installed || _('установлена не пакетом')) : '—', stExtra));
 
 		let xrExtra = [];
 		if (xr && xr.available)
 			xrExtra = [ btn('xray', _('Обновить до %s').format(xr.latest)) ];
-		else if (xr && xr.installed)
+		else if (info && xr.installed)
 			xrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
 		rows.push(...line('xray-core', xr ? (xr.installed || '—') : '—', xrExtra));
 
-		const zr = info && info.zapret;
 		if (zr) {
 			let zrExtra = [];
+			// Установить можно и без проверки: версию из последнего релиза узнает сама установка.
 			if (zr.available && !zr.installed)
-				zrExtra = [ btn('zapret', _('Установить %s').format(zr.latest)) ];
+				zrExtra = [ btn('zapret', zr.latest ? _('Установить %s').format(zr.latest) : _('Установить')) ];
 			else if (zr.available)
 				zrExtra = [ btn('zapret', _('Обновить до %s').format(zr.latest)), ' ',
 					zr.url ? E('a', { 'href': zr.url, 'target': '_blank' }, _('что нового')) : '' ];
 			else if (zr.error)
 				zrExtra = [ E('span', { 'class': 'st-dim' }, zr.error) ];
-			else
+			else if (info)
 				zrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
 			rows.push(...line('zapret', zr.installed || _('не установлен'), zrExtra));
 		}
@@ -257,7 +261,11 @@ return view.extend({
 		this.updBox = E('div');
 		this.upd = upd;
 		this.renderUpdates(upd);
-		if (upd.checking || upd.installing)
+		// Сведения об обновлениях лежат в /var/run и после загрузки роутера пропадают —
+		// первый заход на страницу проверяет сам.
+		if (!upd.info && !upd.checking && !upd.installing)
+			this.handleUpdateCheck();
+		else if (upd.checking || upd.installing)
 			this.pollUpdates();
 		this.checkBox = E('span', {}, E('button', {
 			'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleCheck')
