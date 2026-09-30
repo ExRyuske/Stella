@@ -260,7 +260,13 @@ export function compose(opts) {
 			push(args, '--new');
 		push(args, ...b);
 	}
-	let tcp = [ opts.tcp_ports || '80,443' ], udp = [ opts.udp_ports || '443' ];
+	// Порты основной и YouTube — только если они включены: иначе в очередь шёл бы весь
+	// веб-трафик, которого ни один профиль не коснётся.
+	let tcp = [], udp = [];
+	if (length(opts.main) || opts.yt) {
+		push(tcp, opts.tcp_ports || '80,443');
+		push(udp, opts.udp_ports || '443');
+	}
 	if (opts.discord) {
 		push(tcp, DISCORD_TCP);
 		push(udp, DISCORD_UDP);

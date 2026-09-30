@@ -86,6 +86,7 @@ const SETTINGS = {
 	zapret_games: { title: 'Стратегия для игр', def: '', apply: 'reload' },
 	zapret_games_fake: { title: 'Подделка для игр', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
 	zapret_discord_fake: { title: 'Подделка для Discord', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
+	zapret_exclude: { title: 'Исключения Zapret', def: '', apply: 'reload', check: (v) => v in [ '', 'zms', 'fs', 'all' ] },
 	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
 	zapret_tcp_ports: { title: 'Порты TCP', def: '80,443', apply: 'reload', check: PORTS },
 	zapret_udp_ports: { title: 'Порты UDP', def: '443', apply: 'reload', check: PORTS }
@@ -756,6 +757,14 @@ const methods = {
 			let current = uci.get('stella', 'main', 'zapret_strategy') || match(trim(lines[0] || ''), /^#(.+)$/)?.[1] || null;
 			let in_catalog = length(filter(cat, (s) => s.name == current)) > 0;
 			let fs_excl = index(uci.get('stella', 'main', 'zapret_opts') || '', 'zapret-hosts-flowseal-exclude.txt') >= 0;
+			// Домены списков исключений: своя копия, иначе файл пакета zapret.
+			let excl = {};
+			for (let n in [ 'exclude', 'exclude_fs' ]) {
+				excl[n] = {};
+				for (let l in split(readfile(`${ZAPRET_DIR}/hosts-${n}.txt`) || readfile('/opt/zapret/ipset/zapret-hosts-user-exclude.txt') || '', '\n'))
+					if (trim(l) != '' && substr(trim(l), 0, 1) != '#')
+						excl[n][trim(l)] = true;
+			}
 			return {
 				strategies: map(cat, (s) => ({ name: s.name, family: s.family })),
 				updated: +(readfile(`${ZAPRET_DIR}/catalog.updated`) || 0) || null,
@@ -770,10 +779,13 @@ const methods = {
 					let st = stat(`${ZAPRET_DIR}/hosts-${n}.txt`);
 					return { name: n, own: !!st, updated: st?.mtime };
 				}),
-				// Исключения основной стратегии (у Flowseal свои) — всегда идут мимо Zapret.
-				excluded_by: fs_excl ? 'Flowseal' : 'Zapret Manager',
-				excluded: length(filter(split(readfile(`${ZAPRET_DIR}/hosts-${fs_excl ? 'exclude_fs' : 'exclude'}.txt`) || readfile('/opt/zapret/ipset/zapret-hosts-user-exclude.txt') || '', '\n'),
-					(l) => trim(l) != '' && substr(trim(l), 0, 1) != '#')),
+				// Исключения — всегда идут мимо Zapret. Без выбора — от основной стратегии (у Flowseal свои).
+				exclude_auto: fs_excl ? 'fs' : 'zms',
+				excluded: {
+					zms: length(excl.exclude),
+					fs: length(excl.exclude_fs),
+					all: length(keys({ ...excl.exclude, ...excl.exclude_fs }))
+				},
 				progress: json(readfile(`${RUN_DIR}/ztest.json`) || 'null'),
 				testing: busy('ztest'),
 				updating: busy('zcatalog')

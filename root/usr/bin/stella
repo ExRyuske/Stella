@@ -220,6 +220,46 @@ function zapret_readable() {
 	system(`chmod a+x ${shq(replace(ZAPRET_DIR, /\/[^\/]+\/?$/, '') || '/')} 2>/dev/null; chmod -R a+rX ${shq(ZAPRET_DIR)} 2>/dev/null`);
 }
 
+// Исключения Zapret: выбранные в настройках (zms, fs, all), иначе — по основной стратегии
+// (у Flowseal свои, у остальных — список Zapret Manager).
+function zapret_exclude_names() {
+	let v = opt('main', 'zapret_exclude', '');
+	if (v == 'all')
+		return [ 'exclude', 'exclude_fs' ];
+	if (v in [ 'zms', 'fs' ])
+		return [ (v == 'fs') ? 'exclude_fs' : 'exclude' ];
+	return [ index(opt('main', 'zapret_opts', ''), HOSTLISTS.exclude_fs.pkg) >= 0 ? 'exclude_fs' : 'exclude' ];
+}
+
+// Файлы выбранных исключений: своя копия, иначе файл пакета zapret.
+function zapret_exclude_files() {
+	let res = [];
+	for (let n in zapret_exclude_names()) {
+		let own = `${ZAPRET_DIR}/hosts-${n}.txt`;
+		let f = (stat(own)?.size > 0) ? own : HOSTLISTS.exclude.pkg;
+		if (!(f in res))
+			push(res, f);
+	}
+	return res;
+}
+
+// Пути хостлистов → свои копии; при выбранных исключениях заложенные в стратегию
+// --hostlist-exclude заменяются ими (nfqws принимает этот ключ несколько раз).
+function zapret_localize(args) {
+	if (opt('main', 'zapret_exclude', '') != '') {
+		let own = map([ HOSTLISTS.exclude.pkg, HOSTLISTS.exclude_fs.pkg ], (f) => `--hostlist-exclude=${f}`);
+		let excl = map(zapret_exclude_files(), (f) => `--hostlist-exclude=${f}`);
+		let out = [];
+		for (let a in args)
+			if (a in own)
+				push(out, ...excl);
+			else
+				push(out, a);
+		args = out;
+	}
+	return localize(args, zapret_paths());
+}
+
 // Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
 // Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
 function zapret_parts() {
@@ -243,7 +283,7 @@ function zapret_parts() {
 		tcp_ports: opt('main', 'zapret_tcp_ports', '80,443'),
 		udp_ports: opt('main', 'zapret_udp_ports', '443')
 	});
-	z.args = localize(z.args, zapret_paths());
+	z.args = zapret_localize(z.args);
 	return z;
 }
 
@@ -252,16 +292,13 @@ function zapret_ports() {
 	return { tcp_ports: z.tcp_ports, udp_ports: z.udp_ports };
 }
 
-// Домены исключений Zapret — те, что у основной стратегии: у Flowseal свои, у остальных —
-// список Zapret Manager. Своя копия, иначе файл пакета zapret.
+// Домены выбранных исключений Zapret, без повторов.
 function zapret_exclude_domains() {
-	let name = index(opt('main', 'zapret_opts', ''), HOSTLISTS.exclude_fs.pkg) >= 0 ? 'exclude_fs' : 'exclude';
-	for (let f in [ `${ZAPRET_DIR}/hosts-${name}.txt`, HOSTLISTS.exclude.pkg ]) {
-		let text = readfile(f);
-		if (text)
-			return parse_list(text).domains;
-	}
-	return [];
+	let res = {};
+	for (let f in zapret_exclude_files())
+		for (let d in parse_list(readfile(f) || '').domains)
+			res[d] = true;
+	return keys(res);
 }
 
 function routing_opts() {
@@ -735,7 +772,7 @@ function zt_nft(on) {
 
 // Открытые цели или { error: почему nfqws не запустился }.
 function zt_run(bin, args, hosts) {
-	args = localize(args, zapret_paths());
+	args = zapret_localize(args);
 	let missing = missing_files(args, (f) => stat(f) != null);
 	if (length(missing))
 		return { error: `нет файлов: ${join(', ', missing)}` };

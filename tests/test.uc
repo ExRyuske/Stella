@@ -320,6 +320,14 @@ if (sprintf('%J', compose({ main: [ '--a' ] })) == '{ "args": [ "--a" ], "tcp_po
 else
 	fail('compose без наборов');
 
+// Без основной и YouTube — только порты Discord и игр, веб-трафик в очередь не идёт.
+let zo = compose({ main: [], discord: dv[0] }), zn = compose({ main: [] });
+if (zo.tcp_ports == '2053,2083,2087,2096,8443' && zo.udp_ports == '19294-19344,50000-50100' &&
+    index(join(' ', zo.args), 'discord.media') > 0 && !length(zn.args) && zn.tcp_ports == '' && zn.udp_ports == '')
+	passed++;
+else
+	fail(`compose без основной: ${sprintf('%J', { zo, zn })}`);
+
 // Своя подделка для игр, подмена путей хостлистов, поиск отсутствующих файлов.
 let zg = compose({ main: [ '--a' ], games: gv[0], games_fake: '/f/stun2.bin' });
 let lz = localize([ '--hostlist=/opt/zapret/ipset/zapret-hosts-google.txt', '--x=1' ], { '/opt/zapret/ipset/zapret-hosts-google.txt': '/etc/stella/zapret/hosts-google.txt' });

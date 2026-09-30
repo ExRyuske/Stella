@@ -73,7 +73,7 @@ N=$(python3 -c "import json,sys; d=json.load(open('$T/run/ping.json')); print(su
 printf 'youtube.com\n+.googlevideo.com\n91.108.4.0/22\n' > "$T/list.txt"
 cat > "$T/uci.json" <<EOF
 {
-	"main": { ".type": "stella", "mode": "all", "default_action": "direct" },
+	"main": { ".type": "stella", "mode": "all", "default_action": "direct", "zapret_opts": "--filter-tcp=443 --dpi-desync=fake" },
 	"list_yt": { ".type": "list", "name": "yt", "action": "zapret", "url": "http://127.0.0.1:18765/list.txt", "entry": [ "ytimg.com" ] },
 	"list_off": { ".type": "list", "name": "off", "action": "vpn", "enabled": "0", "entry": [ "x.com" ] }
 }
@@ -100,6 +100,31 @@ echo "$OUT" | grep -qF 'nftset=/twitch.tv/4#inet#stella#zapret_excl' || { echo "
 if echo "$OUT" | grep -qF 'nftset=/sberbank.com/4#inet#stella#zapret_excl'; then echo "FAIL: исключения ZMS у стратегии Flowseal"; exit 1; fi
 ARGS=$(run zapret-cmd 2>/dev/null || true)
 case "$ARGS" in *hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил свой файл исключений Flowseal: $ARGS"; exit 1 ;; esac
+
+# Выбранные исключения: «все вместе» — оба списка и в сете, и в ключах nfqws.
+python3 - "$T/uci.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d['main']['zapret_exclude'] = 'all'
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+OUT=$(run fw show)
+for want in 'nftset=/twitch.tv/4#inet#stella#zapret_excl' 'nftset=/sberbank.com/4#inet#stella#zapret_excl'; do
+	echo "$OUT" | grep -qF "$want" || { echo "FAIL: «все вместе» без «$want»"; exit 1; }
+done
+ARGS=$(run zapret-cmd 2>/dev/null || true)
+case "$ARGS" in *hosts-exclude.txt*hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил оба списка исключений: $ARGS"; exit 1 ;; esac
+
+# Только Zapret Manager — даже у стратегии Flowseal.
+python3 - "$T/uci.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d['main']['zapret_exclude'] = 'zms'
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+OUT=$(run fw show)
+echo "$OUT" | grep -qF 'nftset=/sberbank.com/4#inet#stella#zapret_excl' || { echo "FAIL: нет выбранных исключений ZMS"; exit 1; }
+if echo "$OUT" | grep -qF 'nftset=/twitch.tv/4#inet#stella#zapret_excl'; then echo "FAIL: исключения Flowseal при выборе ZMS"; exit 1; fi
+ARGS=$(run zapret-cmd 2>/dev/null || true)
+case "$ARGS" in *hosts-exclude_fs.txt*) echo "FAIL: nfqws получил исключения Flowseal при выборе ZMS: $ARGS"; exit 1 ;; *hosts-exclude.txt*) ;; *) echo "FAIL: nfqws без исключений ZMS: $ARGS"; exit 1 ;; esac
 
 # migrate: анонимная подписка переименовывается, кэш и выбранный узел следуют за ней.
 cat > "$T/uci.json" <<EOF

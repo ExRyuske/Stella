@@ -395,6 +395,17 @@ return view.extend({
 			]);
 		};
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
+		// Исключения: без выбора — список источника основной стратегии.
+		const exN = zc.excluded || {};
+		const exLabel = (k) => ({ zms: 'Zapret Manager', fs: 'Flowseal', all: _('все вместе') })[k] + ' — ' +
+			(exN[k] ? exN[k] + ' ' + sui.plural(exN[k], _('домен'), _('домена'), _('доменов')) : _('нет списка'));
+		const exSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_exclude: ev.target.value }).then(() => {
+			cfg.zapret_exclude = ev.target.value;
+			return this.refresh();
+		}) }, [
+			E('option', { 'value': '', 'selected': cfg.zapret_exclude ? null : '' }, _('как у основной: %s').format(exLabel(zc.exclude_auto))),
+			...[ 'zms', 'fs', 'all' ].map((k) => E('option', { 'value': k, 'selected': k == cfg.zapret_exclude ? '' : null }, exLabel(k)))
+		]);
 		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
 		const fakeSel = (key) => [ E('span', { 'class': 'st-dim' }, _('подделка')), E('select', { 'class': 'cbi-input-select',
 			'change': (ev) => this.saveSetting({ [key]: ev.target.value }).then(() => { cfg[key] = ev.target.value; return this.refresh(); }) }, [
@@ -407,9 +418,15 @@ return view.extend({
 		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
 			if (ev.target.value == '__custom')
 				return this.showZapret();
+			// Без основной работают только YouTube, Discord и игры.
+			if (ev.target.value == '')
+				return this.saveSetting({ zapret_opts: '', zapret_strategy: '' }).then(() => {
+					cfg.zapret_opts = cfg.zapret_strategy = '';
+					return this.refresh();
+				});
 			return this.call(callZApply(ev.target.value));
 		} }, [
-			(!zc.current && !zc.custom) ? E('option', { 'value': '', 'selected': '' }, _('— не выбрана —')) : '',
+			E('option', { 'value': '', 'selected': (!zc.current && !zc.custom) ? '' : null }, _('выключено')),
 			...Object.keys(groups).map((f) => E('optgroup', { 'label': FAMILIES[f] || f },
 				groups[f].map((st) => E('option', { 'value': st.name, 'selected': (!zc.custom && st.name == zc.current) ? '' : null },
 					st.name + (res[st.name] ? '  · ' + score(st.name) : ''))))),
@@ -419,8 +436,8 @@ return view.extend({
 		let state;
 		if (!used)
 			state = E('span', { 'class': 'st-dim' }, _('не используется — нигде не выбрано «Zapret»'));
-		else if (!cfg.zapret_opts && !cur('zapret_yt', 'yv'))
-			state = E('span', { 'class': 'st-bad' }, _('стратегия не выбрана'));
+		else if (!cfg.zapret_opts && !cur('zapret_yt', 'yv') && !cur('zapret_discord', 'dv') && !cur('zapret_games', 'gv'))
+			state = E('span', { 'class': 'st-bad' }, _('всё выключено — выберите стратегию'));
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
 		else
@@ -509,14 +526,14 @@ return view.extend({
 				E('b', {}, 'YouTube'), E('div', {}, [ ytSel ]),
 				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
+				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret.') },
+					(exN.zms || exN.fs) ? _('всегда напрямую') : _('обновите каталог')) ]),
 				E('b', {}, _('Автоподбор')), E('div', {}, [ ...test, E('span', { 'class': 'st-dim' }, _('по расписанию:')), sched ])
 			]),
 			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
 				_('Игры и голос Discord ходят по IP вне списков — Zapret их коснётся, только если вверху выбрано «Всё, что не попало в списки: через Zapret».')) : '',
 			results,
 			E('div', { 'class': 'st-zfoot st-dim' }, [
-				E('span', { 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret. Список — от источника основной стратегии.') },
-					zc.excluded ? _('исключения %s: %d %s, всегда напрямую').format(zc.excluded_by, zc.excluded, sui.plural(zc.excluded, _('домен'), _('домена'), _('доменов'))) : _('исключения: нет списка — обновите каталог')),
 				E('span', {}, hl ? _('хостлисты: свои') : _('хостлисты: из пакета zapret')),
 				svc,
 				E('details', {}, [ E('summary', { 'style': 'cursor:pointer' }, _('как проверяются стратегии')),

@@ -364,6 +364,7 @@ return view.extend({
 					(this.cells[n.id] = E('td', { 'class': 'st-ping' }, pingLabel(d.ping[n.id]))),
 					E('td', { 'class': 'st-act' }, [
 						sel ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
+						sui.iconButton('ping', _('Проверить задержку'), () => this.handlePing([ n.id ])),
 						isSub ? '' : sui.iconButton('close', _('Удалить'), () => this.handleRemove(n.id, n.name))
 					])
 				]);
