@@ -12,7 +12,6 @@ const callRestart = rpc.declare({ object: 'stella', method: 'restart' });
 const callSetEnabled = rpc.declare({ object: 'stella', method: 'set_enabled', params: [ 'enabled' ] });
 const callLog = rpc.declare({ object: 'stella', method: 'log', expect: { log: '' } });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 const callUpdateInfo = rpc.declare({ object: 'stella', method: 'update_info' });
 const callUpdateCheck = rpc.declare({ object: 'stella', method: 'update_check' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
@@ -89,12 +88,7 @@ return view.extend({
 	},
 
 	save(values) {
-		return callSettingsSet(values).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-			else
-				ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info');
-		});
+		return sui.saveSettings(values).then((ok) => ok && ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info'));
 	},
 
 	dnsField(key, value, choices) {

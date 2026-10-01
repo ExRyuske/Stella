@@ -12,7 +12,7 @@ import { fnv1a } from 'stella.util';
 import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
-import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
 const PING_URL = 'https://www.gstatic.com/generate_204';
@@ -43,6 +43,16 @@ function opt(sec, name, def) {
 
 function shq(s) {
 	return "'" + replace(s, "'", "'\\''") + "'";
+}
+
+// Записать настройки main и применить. reload перезапустит xray, только если изменился его
+// конфиг; отвязанно — иначе reload из службы мог бы остановить и этот процесс.
+function set_main(values) {
+	for (let k, v in values)
+		uci.set('stella', 'main', k, v);
+	uci.commit('stella');
+	if (opt('main', 'enabled', '0') == '1')
+		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
 }
 
 function usage() {
@@ -111,7 +121,7 @@ function cmd_update(only) {
 		// обновление перезапускало бы xray и писало на флеш.
 		let path = `${CACHE_DIR}/${s['.name']}.json`;
 		let old = {};
-		for (let n in json(readfile(path) || '[]'))
+		for (let n in read_json(path, []))
 			old[n.id] = n;
 		for (let n in res.nodes) {
 			let o = old[n.id];
@@ -265,7 +275,7 @@ function zapret_localize(args) {
 // Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
 // Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
 function zapret_parts() {
-	let cat = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	let cat = read_json(`${ZAPRET_DIR}/catalog.json`, []);
 	let pick = (key, family) => {
 		let v = opt('main', key, '');
 		if (v == '' || v == '0')
@@ -504,7 +514,7 @@ function current_config() {
 	// node_missing: stop — Stella не запускается (работающая остаётся на прежнем конфиге),
 	// best — лучший по проверке из всех.
 	if (node_id && !node && length(auto_nodes) < 2) {
-		let stab = json(readfile(STAB_PATH) || '{}') || {};
+		let stab = read_json(STAB_PATH, {});
 		node = best_node(starred, stab) || starred[0];
 		if (!node && opt('main', 'node_missing', 'stop') == 'best')
 			node = best_node(nodes, stab) || filter(nodes, (n) => index(node_id, `${n.source_id}_`) == 0)[0] || nodes[0];
@@ -612,7 +622,7 @@ function ping_chunk(nodes, results, rounds, stab) {
 function measure(nodes, rounds, stab) {
 	system(`mkdir -p ${shq(RUN_DIR)}`);
 	let path = `${RUN_DIR}/ping.json`;
-	let results = json(readfile(path) || '{}');
+	let results = read_json(path, {});
 	for (let i = 0; i < length(nodes); i += PING_CHUNK) {
 		ping_chunk(slice(nodes, i, i + PING_CHUNK), results, rounds, stab);
 		writefile(`${path}.tmp`, sprintf('%J', results));
@@ -649,7 +659,7 @@ function cmd_pick(...argv) {
 		return 1;
 	}
 	// Итоги узлов, которых больше нет, не копим.
-	let stab = json(readfile(STAB_PATH) || '{}') || {};
+	let stab = read_json(STAB_PATH, {});
 	let alive = {};
 	for (let n in all)
 		alive[n.id] = true;
@@ -671,12 +681,8 @@ function cmd_pick(...argv) {
 	}
 	let e = stab[best.id];
 	printf('Лучший узел: %s — ответил %d из %d, %d мс ±%d\n', best.name, e.ok, e.n, e.ms, e.jit);
-	if ('--apply' in argv) {
-		uci.set('stella', 'main', 'node', best.id);
-		uci.commit('stella');
-		if (opt('main', 'enabled', '0') == '1')
-			system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
-	}
+	if ('--apply' in argv)
+		set_main({ node: best.id });
 	return 0;
 }
 
@@ -701,7 +707,7 @@ function cmd_migrate() {
 		uci.rename('stella', from, to);
 		r[1] = to;
 
-		let cache = json(readfile(`${CACHE_DIR}/${from}.json`) || 'null');
+		let cache = read_json(`${CACHE_DIR}/${from}.json`, null);
 		if (cache) {
 			for (let n in cache)
 				n.id = to + substr(n.id, length(from));
@@ -735,7 +741,7 @@ function fetch_any(url, proxy) {
 // каталога: обеднять рабочий каталог из-за сбоя сети незачем.
 function cmd_zapret_catalog() {
 	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
-	let old = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	let old = read_json(`${ZAPRET_DIR}/catalog.json`, []);
 	let keep = (family) => filter(old, (s) => s.family == family);
 	system(`mkdir -p ${shq(ZAPRET_DIR)}/fake`);
 
@@ -799,7 +805,7 @@ function cmd_zapret_catalog() {
 }
 
 function zapret_catalog() {
-	return json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+	return read_json(`${ZAPRET_DIR}/catalog.json`, []);
 }
 
 // Цели проверки: для YouTube-стратегий — домены YouTube, для остальных — хосты за
@@ -807,7 +813,7 @@ function zapret_catalog() {
 function zt_targets(family) {
 	if (family == 'yv')
 		return YT_TARGETS;
-	let suite = json(readfile(`${ZAPRET_DIR}/suite.json`) || 'null');
+	let suite = read_json(`${ZAPRET_DIR}/suite.json`, null);
 	let hosts = [];
 	for (let s in (type(suite) == 'array') ? suite : [])
 		if (s.host && !match(s.id || '', /GH-HPRN/) && length(hosts) < 12)
@@ -884,12 +890,9 @@ function zt_run(bin, args, hosts) {
 	return ok;
 }
 
+// Стратегия YouTube — в своё поле, остальные — основной.
 function zapret_apply(st) {
-	uci.set('stella', 'main', 'zapret_strategy', st.name);
-	uci.set('stella', 'main', 'zapret_opts', strategy_text(st));
-	uci.commit('stella');
-	if (opt('main', 'enabled', '0') == '1')
-		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+	set_main((st.family == 'yv') ? { zapret_yt: st.name } : { zapret_strategy: st.name, zapret_opts: strategy_text(st) });
 }
 
 // Автоподбор: scope — all | main | v | yv | fs | имя стратегии; --apply — применить лучшую,
@@ -922,7 +925,7 @@ function cmd_zapret_test(...argv) {
 	let stopf = `${RUN_DIR}/ztest.stop`;
 	unlink(stopf);
 	let res_path = `${ZAPRET_DIR}/results.json`;
-	let res = json(readfile(res_path) || 'null') || { items: {} };
+	let res = read_json(res_path, { items: {} });
 	res.items ??= {};
 
 	if (zt_nft(true) != 0)
@@ -974,14 +977,7 @@ function cmd_zapret_test(...argv) {
 			let base = res.baseline?.[yt ? 'yv' : 'general']?.ok ?? -1;
 			let got = res.items[best.name];
 			if (got.ok > max(cur, base)) {
-				if (yt) {
-					uci.set('stella', 'main', 'zapret_yt', best.name);
-					uci.commit('stella');
-					if (opt('main', 'enabled', '0') == '1')
-						system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
-				}
-				else
-					zapret_apply(best);
+				zapret_apply(best);
 				push(msgs, sprintf('%s: %s (%d из %d)', yt ? 'YouTube' : 'основная', best.name, got.ok, got.total));
 			}
 		}
@@ -1215,52 +1211,41 @@ function newest_mtime(pattern) {
 function cmd_tick() {
 	system(`mkdir -p ${RUN_DIR}`);
 	let state_path = `${RUN_DIR}/updater.json`;
-	let st = json(readfile(state_path) || 'null') || {};
+	let st = read_json(state_path, {});
 	let now = time();
-	let sub_h = +opt('main', 'sub_interval', '12');
-	let lists_h = +opt('main', 'lists_interval', '24');
-	// После загрузки состояния нет — отсчитываем от последнего изменения кэша.
-	st.sub ??= newest_mtime(`${CACHE_DIR}/*.json`);
-	st.lists ??= newest_mtime(`${LISTS_DIR}/*.json`);
-
+	let hour = +trim(cmd_out('date +%H') || '12');
+	// Задачи по расписанию: every — период в секундах (0 и меньше — выключена); since — от
+	// чего отсчитывать, пока состояния нет (после загрузки); when — дополнительное условие.
+	let jobs = [
+		{ name: 'update', every: +opt('main', 'sub_interval', '12') * 3600,
+		  since: () => newest_mtime(`${CACHE_DIR}/*.json`), cmd: '/usr/bin/stella update', reload: true },
+		{ name: 'lists', every: +opt('main', 'lists_interval', '24') * 3600,
+		  since: () => newest_mtime(`${LISTS_DIR}/*.json`), cmd: '/usr/bin/stella lists', reload: true },
+		// Режим «лучший по проверке»; проверка задержки занимает те же порты — тогда позже.
+		{ name: 'pick', every: (opt('main', 'select_mode', 'single') == 'best') ? +opt('main', 'best_interval', '6') * 3600 : 0,
+		  since: () => stat(STAB_PATH)?.mtime ?? 0, when: () => !task_busy('ping'), cmd: '/usr/bin/stella pick --apply' },
+		// Автоподбор Zapret — ночью (3–5 ч), только если Zapret используется. Меняет стратегию,
+		// только если лучшая открывает больше текущей, и не включает выключенные.
+		{ name: 'ztest', every: +opt('main', 'zapret_test_interval', '0') * 86400 - 3600,
+		  since: () => +(read_json(`${ZAPRET_DIR}/results.json`, null)?.at || now),
+		  when: () => hour >= 3 && hour < 5 && zapret_used(enabled_lists()), cmd: '/usr/bin/stella zapret-test all --apply --scheduled' }
+	];
 	// После обновлений — reload: init передаёт procd контрольную сумму конфига xray, и тот
 	// перезапускается, только если конфиг изменился (например, у узла сменились ключи).
-	let action = null;
-	if (sub_h > 0 && now - st.sub >= sub_h * 3600 && run_locked('update', '/usr/bin/stella update')) {
-		st.sub = now;
-		action = 'reload';
+	let reload = false;
+	for (let j in jobs) {
+		st[j.name] ??= j.since();
+		if (j.every > 0 && now - st[j.name] >= j.every && (!j.when || j.when()) && run_locked(j.name, j.cmd)) {
+			st[j.name] = now;
+			if (j.reload)
+				reload = true;
+		}
 	}
-	if (lists_h > 0 && now - st.lists >= lists_h * 3600 && run_locked('lists', '/usr/bin/stella lists')) {
-		st.lists = now;
-		action = 'reload';
-	}
-	// Автоподбор Zapret — ночью (3–5 ч), раз в zapret_test_interval дней, только если
-	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей,
-	// и не включает выключенные основную и YouTube.
-	let zt_days = +opt('main', 'zapret_test_interval', '0');
-	let hour = +trim(cmd_out('date +%H') || '12');
-	st.ztest ??= +(json(readfile(`${ZAPRET_DIR}/results.json`) || 'null')?.at || now);
-	if (zt_days > 0 && hour >= 3 && hour < 5 && now - st.ztest >= zt_days * 86400 - 3600 &&
-	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply --scheduled')) {
-		st.ztest = now;
-	}
-
-	// Режим «лучший по проверке» — подбор узла раз в best_interval часов. Время отмечается
-	// до запуска: подбор перезапускает xray, и отметка не должна зависеть от того, успеет ли
-	// этот процесс дописать состояние.
-	let best_h = +opt('main', 'best_interval', '6');
-	st.pick ??= stat(STAB_PATH)?.mtime ?? 0;
-	if (opt('main', 'select_mode', 'single') == 'best' && best_h > 0 && now - st.pick >= best_h * 3600 && !task_busy('ping')) {
-		st.pick = now;
-		writefile(state_path, sprintf('%J', st));
-		run_locked('pick', '/usr/bin/stella pick --apply');
-	}
-
 	writefile(state_path, sprintf('%J', st));
 
 	// Отвязанно: при restart procd останавливает и этот процесс (он — часть службы).
-	if (action && opt('main', 'enabled', '0') == '1')
-		system(`setsid /etc/init.d/stella ${action} </dev/null >/dev/null 2>&1 &`);
+	if (reload && opt('main', 'enabled', '0') == '1')
+		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
 	return 0;
 }
 

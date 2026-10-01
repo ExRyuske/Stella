@@ -15,7 +15,6 @@ const callUpdate = rpc.declare({ object: 'stella', method: 'lists_update', param
 const callDefault = rpc.declare({ object: 'stella', method: 'set_default_action', params: [ 'action' ] });
 const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 const callZapretInfo = rpc.declare({ object: 'stella', method: 'zapret_info' });
 const callZapretOff = rpc.declare({ object: 'stella', method: 'zapret_service_off' });
 const callZCatalog = rpc.declare({ object: 'stella', method: 'zapret_catalog' });
@@ -205,11 +204,9 @@ return view.extend({
 		});
 	},
 
+	// Сохранить и перерисовать: refresh перечитывает и настройки.
 	saveSetting(values) {
-		return callSettingsSet(values).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-		});
+		return sui.saveSettings(values).then(() => this.refresh());
 	},
 
 	call(p) {
@@ -352,14 +349,14 @@ return view.extend({
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
 				E('button', {
 					'class': 'btn cbi-button-positive',
-					'click': ui.createHandlerFn(this, () => callSettingsSet({
+					'click': ui.createHandlerFn(this, () => sui.saveSettings({
 						zapret_bin: bin.value, zapret_opts: opts.value, zapret_strategy: '',
 						zapret_tcp_ports: tcp.value.trim(), zapret_udp_ports: udp.value.trim()
-					}).then((r) => {
-						if (r && r.error)
-							return ui.addNotification(null, E('p', {}, r.error), 'danger');
+					}).then((ok) => {
+						if (!ok)
+							return;
 						ui.hideModal();
-						return callSettings().then((c) => { this.cfg = c; return this.refresh(); });
+						return this.refresh();
 					}))
 				}, _('Сохранить'))
 			])
@@ -388,10 +385,7 @@ return view.extend({
 		const cur = (key, f) => (!cfg[key] || cfg[key] == '0') ? '' : (cfg[key] == '1' ? ((fam(f)[0] || {}).name || '') : cfg[key]);
 		const setSel = (key, f) => {
 			const v = cur(key, f);
-			return E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ [key]: ev.target.value }).then(() => {
-				cfg[key] = ev.target.value;
-				return this.refresh();
-			}) }, [
+			return E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ [key]: ev.target.value }) }, [
 				E('option', { 'value': '', 'selected': v ? null : '' }, _('выключено')),
 				...fam(f).map((st) => E('option', { 'value': st.name, 'selected': st.name == v ? '' : null }, st.name + (res[st.name] ? '  · ' + score(st.name) : '')))
 			]);
@@ -401,31 +395,25 @@ return view.extend({
 		const exN = zc.excluded || {};
 		const exLabel = (k) => ({ zms: 'Zapret Manager', fs: 'Flowseal', all: _('все вместе') })[k] + ' — ' +
 			(exN[k] ? exN[k] + ' ' + sui.plural(exN[k], _('домен'), _('домена'), _('доменов')) : _('нет списка'));
-		const exSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_exclude: ev.target.value }).then(() => {
-			cfg.zapret_exclude = ev.target.value;
-			return this.refresh();
-		}) }, [
+		const exSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_exclude: ev.target.value }) }, [
 			E('option', { 'value': '', 'selected': cfg.zapret_exclude ? null : '' }, _('как у основной: %s').format(exLabel(zc.exclude_auto))),
 			...[ 'zms', 'fs', 'all' ].map((k) => E('option', { 'value': k, 'selected': k == cfg.zapret_exclude ? '' : null }, exLabel(k)))
 		]);
 		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
 		const fakeSel = (key) => [ E('span', { 'class': 'st-dim' }, _('подделка')), E('select', { 'class': 'cbi-input-select',
-			'change': (ev) => this.saveSetting({ [key]: ev.target.value }).then(() => { cfg[key] = ev.target.value; return this.refresh(); }) }, [
+			'change': (ev) => this.saveSetting({ [key]: ev.target.value }) }, [
 			E('option', { 'value': '', 'selected': cfg[key] ? null : '' }, _('stun (по умолчанию)')),
 			...(zc.fakes || []).map((f) => E('option', { 'value': f, 'selected': f == cfg[key] ? '' : null }, fakeName(f)))
 		]) ];
 		const sched = sui.combo(cfg.zapret_test_interval || '0',
 			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
-			(v) => this.saveSetting({ zapret_test_interval: v }).then(() => { cfg.zapret_test_interval = v; }), { custom_placeholder: _('дней…') });
+			(v) => sui.saveSettings({ zapret_test_interval: v }), { custom_placeholder: _('дней…') });
 		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
 			if (ev.target.value == '__custom')
 				return this.showZapret();
 			// Без основной работают только YouTube, Discord и игры.
 			if (ev.target.value == '')
-				return this.saveSetting({ zapret_opts: '', zapret_strategy: '' }).then(() => {
-					cfg.zapret_opts = cfg.zapret_strategy = '';
-					return this.refresh();
-				});
+				return this.saveSetting({ zapret_opts: '', zapret_strategy: '' });
 			return this.call(callZApply(ev.target.value));
 		} }, [
 			E('option', { 'value': '', 'selected': (!zc.current && !zc.custom) ? '' : null }, _('выключено')),
@@ -472,9 +460,7 @@ return view.extend({
 		const base = zc.results && zc.results.baseline;
 		const baseText = base ? Object.keys(base).map((k) => (k == 'yv' ? _('YouTube') : _('общие')) + ' ' + base[k].ok + '/' + base[k].total).join(', ') : '';
 		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == zc.current && !zc.custom);
-		const apply = (n, r) => (r.family == 'yv')
-			? this.saveSetting({ zapret_yt: n }).then(() => { cfg.zapret_yt = n; return this.refresh(); })
-			: this.call(callZApply(n));
+		const apply = (n) => this.call(callZApply(n));
 		const results = names.length ? E('details', {}, [
 			E('summary', { 'style': 'cursor:pointer' }, _('Результаты проверки (%d)').format(names.length) +
 				(zc.results.at ? ' · ' + new Date(zc.results.at * 1000).toLocaleString('ru-RU') : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
@@ -488,7 +474,7 @@ return view.extend({
 					r.ok >= 0 ? E('td', { 'style': 'white-space:nowrap' }, [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ])
 						: E('td', { 'class': 'st-bad' }, r.error ? _('ошибка: %s').format(r.error) : _('ошибка')),
 					E('td', { 'class': 'st-act' }, isCur(n, r) ? _('текущая') :
-						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => apply(n, r)) }, _('Применить')))
+						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => apply(n)) }, _('Применить')))
 				]);
 			})))
 		]) : '';
@@ -622,7 +608,7 @@ return view.extend({
 				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showList(null) }, _('Добавить')),
 				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callUpdate(undefined))) }, _('Обновить все')),
 				E('span', { 'class': 'st-inline' }, [ _('автообновление'),
-					sui.combo(cfg.lists_interval, INTERVALS, (v) => this.saveSetting({ lists_interval: v }), { custom_placeholder: _('часов…') }) ])
+					sui.combo(cfg.lists_interval, INTERVALS, (v) => sui.saveSettings({ lists_interval: v }), { custom_placeholder: _('часов…') }) ])
 			]),
 			this.tableBox,
 			this.zapretBox

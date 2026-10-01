@@ -16,7 +16,6 @@ const callRemove = rpc.declare({ object: 'stella', method: 'remove', params: [ '
 const callAuto = rpc.declare({ object: 'stella', method: 'auto_set', params: [ 'mode', 'id', 'on' ] });
 const callPick = rpc.declare({ object: 'stella', method: 'node_pick' });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 
 const PICK_INTERVALS = [ [ '0', _('только вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ],
 	[ '6', _('каждые 6 ч') ], [ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ] ];
@@ -261,12 +260,7 @@ return view.extend({
 			node = [ E('span', { 'class': 'st-dim' }, _('Узел не выбран.')) ];
 
 		// Подбор по проверке: из каких узлов, как часто, и подобрать сейчас.
-		const cfg = this.cfg;
-		const set = (key) => (v) => callSettingsSet({ [key]: v }).then((r) => {
-			if (r && r.error)
-				return ui.addNotification(null, E('p', {}, r.error), 'danger');
-			cfg[key] = v;
-		});
+		const cfg = this.cfg, set = (key) => (v) => this.setting(key, v);
 		const subs = d.sources.filter((x) => x.kind == 'subscription');
 		const pick = best ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
 			_('из'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => set('best_from')(ev.target.value) }, [
@@ -292,23 +286,18 @@ return view.extend({
 		]);
 	},
 
+	// Сохранить настройку и запомнить её у себя.
+	setting(key, v) {
+		return sui.saveSettings({ [key]: v }).then((ok) => ok && (this.cfg[key] = v));
+	},
+
 	showOptions() {
 		const cfg = this.cfg;
 		ui.showModal(_('Серверы: настройки'), [
 			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Обновлять подписки')),
-				sui.combo(cfg.sub_interval, INTERVALS, (v) => callSettingsSet({ sub_interval: v }).then((r) => {
-					if (r && r.error)
-						ui.addNotification(null, E('p', {}, r.error), 'danger');
-					else
-						cfg.sub_interval = v;
-				}), { custom_placeholder: _('часов…') }) ]),
+				sui.combo(cfg.sub_interval, INTERVALS, (v) => this.setting('sub_interval', v), { custom_placeholder: _('часов…') }) ]),
 			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Если выбранный узел пропал из подписки')),
-				E('select', { 'class': 'cbi-input-select', 'change': (ev) => callSettingsSet({ node_missing: ev.target.value }).then((r) => {
-					if (r && r.error)
-						ui.addNotification(null, E('p', {}, r.error), 'danger');
-					else
-						cfg.node_missing = ev.target.value;
-				}) }, [
+				E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.setting('node_missing', ev.target.value) }, [
 					E('option', { 'value': 'stop', 'selected': cfg.node_missing != 'best' ? '' : null }, _('лучший из ★, без ★ — не запускать Stella')),
 					E('option', { 'value': 'best', 'selected': cfg.node_missing == 'best' ? '' : null }, _('лучший из ★, без ★ — лучший по проверке из всех'))
 				]),

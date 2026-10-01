@@ -10,7 +10,6 @@ const callLists = rpc.declare({ object: 'stella', method: 'lists' });
 const callSet = rpc.declare({ object: 'stella', method: 'device_set', params: [ 'mac', 'name', 'policy' ] });
 const callRemove = rpc.declare({ object: 'stella', method: 'device_remove', params: [ 'id' ] });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 
 const POLICIES = [
 	[ 'global', _('По спискам') ],
@@ -41,9 +40,9 @@ return view.extend({
 		const save = E('button', { 'class': 'btn cbi-button', 'style': 'display:none',
 			'click': ui.createHandlerFn(this, () => {
 				const list = input.value.split(/[\s,]+/).filter((x) => x);
-				return callSettingsSet({ lan_ifname: list }).then((r) => {
-					if (r && r.error)
-						return ui.addNotification(null, E('p', {}, r.error), 'danger');
+				return sui.saveSettings({ lan_ifname: list }).then((ok) => {
+					if (!ok)
+						return;
 					this.cfg.lan_ifname = list;
 					save.style.display = 'none';
 					ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info');

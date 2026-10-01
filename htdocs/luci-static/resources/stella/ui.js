@@ -1,8 +1,10 @@
 'use strict';
 'require baseclass';
+'require rpc';
 'require ui';
 
-// Общее для страниц Stella: иконки, выпадающий список с готовыми вариантами, склонение.
+// Общее для страниц Stella: иконки, выпадающий список с готовыми вариантами, склонение,
+// сохранение настроек.
 //
 // Иконки — свои SVG одного размера и цвета текста: символы Юникода (⏱ ⟳ ⚙) в каждом
 // шрифте рисуются по-своему, и кнопки выходили разной высоты.
@@ -18,6 +20,8 @@ const PATHS = {
 	close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
 	star: '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/>'
 };
+
+const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 
 const CSS = `
 .st-ico { display:inline-block; vertical-align:middle; line-height:1 }
@@ -71,6 +75,17 @@ return baseclass.extend({
 			onchange(v);
 		});
 		return el;
+	},
+
+	// Сохранить настройки (rpc settings_set); ошибку — уведомлением. Промис — сохранилось ли.
+	saveSettings(values) {
+		return callSettingsSet(values).then((r) => {
+			if (r && r.error) {
+				ui.addNotification(null, E('p', {}, r.error), 'danger');
+				return false;
+			}
+			return true;
+		});
 	},
 
 	plural(n, one, few, many) {

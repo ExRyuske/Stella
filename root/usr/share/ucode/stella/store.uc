@@ -13,6 +13,11 @@ export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
 // замена пропавшему узлу. Рядом с кэшем подписок, но не в нём (там чистятся *.json).
 export const STAB_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability.json';
 
+// JSON из файла; нет файла — def.
+export function read_json(path, def) {
+	return json(readfile(path) || 'null') ?? def;
+};
+
 function as_array(v) {
 	return (v == null) ? [] : (type(v) == 'array') ? v : [ v ];
 }
@@ -43,7 +48,7 @@ export function load_nodes(uci, errors) {
 	uci.foreach('stella', 'subscription', (s) => {
 		if (s.enabled == '0')
 			return;
-		let list = json(readfile(`${CACHE_DIR}/${s['.name']}.json`) || '[]');
+		let list = read_json(`${CACHE_DIR}/${s['.name']}.json`, []);
 		for (let n in list) {
 			n.source = sub_label(s);
 			n.source_id = s['.name'];
@@ -59,7 +64,7 @@ export function load_lists(uci) {
 	let res = [];
 	uci.foreach('stella', 'list', (s) => {
 		let path = `${LISTS_DIR}/${s['.name']}.json`;
-		let remote = json(readfile(path) || 'null') || { domains: [], cidrs: [] };
+		let remote = read_json(path, { domains: [], cidrs: [] });
 		let manual = parse_list(join('\n', as_array(s.entry)));
 		let domains = {}, cidrs = {};
 		for (let d in [ ...remote.domains, ...manual.domains ]) domains[d] = true;

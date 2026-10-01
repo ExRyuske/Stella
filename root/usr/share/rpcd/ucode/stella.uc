@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, read_json, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a } from 'stella.util';
 
@@ -108,21 +108,17 @@ function str_list(v) {
 	return filter(map((type(v) == 'array') ? v : [], (x) => trim(`${x}`)), (x) => x != '');
 }
 
-// Изменились списки или устройства: xray не трогаем (procd оставит процесс, если его
-// команда не изменилась), пересобираются только правила и nfqws.
-function reload_if_enabled(uci) {
+// Применить изменения, если Stella включена: restart — изменился конфиг xray; reload —
+// списки, устройства и т. п.: пересобираются правила и nfqws, а xray procd оставит, если
+// его конфиг не изменился.
+function apply_if_enabled(uci, action) {
 	if (uci.get('stella', 'main', 'enabled') == '1')
-		system('/etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+		system(`/etc/init.d/stella ${action} </dev/null >/dev/null 2>&1 &`);
 }
 
-function lists_update_bg(uci, id) {
-	let apply = (uci.get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : '';
-	return spawn('lists', `/usr/bin/stella lists ${id || ''}${apply}`);
-}
-
-function restart_if_enabled(uci) {
-	if (uci.get('stella', 'main', 'enabled') == '1')
-		system('/etc/init.d/stella restart </dev/null >/dev/null 2>&1 &');
+// Фоновая задача, после которой — reload, если Stella включена.
+function spawn_reload(uci, name, cmd) {
+	return spawn(name, cmd + ((uci.get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : ''));
 }
 
 // Источники узлов для группировки в интерфейсе: подписки (даже пустые) и отдельные ссылки.
@@ -163,7 +159,7 @@ function find_node(uci, id) {
 	uci.foreach('stella', 'subscription', (s) => {
 		if (found || s.enabled == '0' || index(id, `${s['.name']}_`) != 0)
 			return;
-		for (let n in json(readfile(`${CACHE_DIR}/${s['.name']}.json`) || '[]'))
+		for (let n in read_json(`${CACHE_DIR}/${s['.name']}.json`, []))
 			if (n.id == id)
 				found = { id, name: n.name, protocol: n.protocol, source: sub_label(s) };
 	});
@@ -227,8 +223,8 @@ const methods = {
 				sources: sources(uci, all),
 				nodes,
 				errors,
-				ping: json(readfile(`${RUN_DIR}/ping.json`) || '{}'),
-				stability: json(readfile(STAB_PATH) || '{}'),
+				ping: read_json(`${RUN_DIR}/ping.json`, {}),
+				stability: read_json(STAB_PATH, {}),
 				pinging: busy('ping'),
 				picking: busy('pick'),
 				updating: busy('update'),
@@ -251,7 +247,7 @@ const methods = {
 
 			uci.set('stella', 'main', 'node', id);
 			uci.commit('stella');
-			restart_if_enabled(uci);
+			apply_if_enabled(uci, 'restart');
 			return { ok: true };
 		}
 	},
@@ -280,7 +276,7 @@ const methods = {
 			}
 			uci.commit('stella');
 			if (uci.get('stella', 'main', 'select_mode') == 'auto' || a.mode != null)
-				restart_if_enabled(uci);
+				apply_if_enabled(uci, 'restart');
 			// Включили подбор — первый подбор сразу, не дожидаясь расписания.
 			if (a.mode == 'best' && !busy('ping'))
 				spawn('pick', '/usr/bin/stella pick --apply');
@@ -295,8 +291,7 @@ const methods = {
 			if (id && !match(id, /^[A-Za-z0-9_]+$/))
 				return { error: 'некорректный id' };
 			// После обновления — reload: xray перезапустится, только если у узла сменились ключи.
-			let apply = (cursor().get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : '';
-			return { started: spawn('update', `/usr/bin/stella update ${id || ''}${apply}`) };
+			return { started: spawn_reload(cursor(), 'update', `/usr/bin/stella update ${id || ''}`) };
 		}
 	},
 
@@ -331,7 +326,7 @@ const methods = {
 			if (subs || links)
 				uci.commit('stella');
 			if (subs)
-				spawn('update', '/usr/bin/stella update' + ((uci.get('stella', 'main', 'enabled') == '1') ? '; /etc/init.d/stella reload' : ''));
+				spawn_reload(uci, 'update', '/usr/bin/stella update');
 			return { subscriptions: subs, links, errors };
 		}
 	},
@@ -356,7 +351,7 @@ const methods = {
 			// Название, URL и User-Agent на работающий xray не влияют; включение и выключение
 			// меняет набор узлов — reload перезапустит xray, только если конфиг изменился.
 			if (a.enabled != null && !!a.enabled != was_enabled)
-				reload_if_enabled(uci);
+				apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -379,7 +374,7 @@ const methods = {
 			uci.commit('stella');
 			if (t == 'subscription')
 				unlink(`${CACHE_DIR}/${id}.json`);
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -414,7 +409,7 @@ const methods = {
 
 	restart: {
 		call: function() {
-			restart_if_enabled(cursor());
+			apply_if_enabled(cursor(), 'restart');
 			return { ok: true };
 		}
 	},
@@ -518,7 +513,7 @@ const methods = {
 			if (!added)
 				return { error: 'нечего добавлять' };
 			uci.commit('stella');
-			lists_update_bg(uci);
+			spawn_reload(uci, 'lists', '/usr/bin/stella lists');
 			return { added };
 		}
 	},
@@ -559,9 +554,9 @@ const methods = {
 			}
 			uci.commit('stella');
 			if (refetch)
-				lists_update_bg(uci, a.id);
+				spawn_reload(uci, 'lists', `/usr/bin/stella lists ${a.id}`);
 			else
-				reload_if_enabled(uci);
+				apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -576,7 +571,7 @@ const methods = {
 			uci.delete('stella', id);
 			uci.commit('stella');
 			unlink(`${LISTS_DIR}/${id}.json`);
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -594,7 +589,7 @@ const methods = {
 				return { ok: false };
 			uci.reorder('stella', id, index(all, ids[j]));
 			uci.commit('stella');
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -605,7 +600,7 @@ const methods = {
 			let id = req.args?.id;
 			if (id && !match(id, /^[A-Za-z0-9_]+$/))
 				return { error: 'некорректный id' };
-			return { started: lists_update_bg(cursor(), id) };
+			return { started: spawn_reload(cursor(), 'lists', `/usr/bin/stella lists ${id || ''}`) };
 		}
 	},
 
@@ -618,7 +613,7 @@ const methods = {
 			let uci = cursor();
 			uci.set('stella', 'main', 'default_action', a);
 			uci.commit('stella');
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -686,7 +681,7 @@ const methods = {
 				uci.set('stella', sid, 'policy', a.policy);
 			}
 			uci.commit('stella');
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true, id: sid };
 		}
 	},
@@ -699,7 +694,7 @@ const methods = {
 				return { error: 'не найдено' };
 			uci.delete('stella', req.args.id);
 			uci.commit('stella');
-			reload_if_enabled(uci);
+			apply_if_enabled(uci, 'reload');
 			return { ok: true };
 		}
 	},
@@ -737,7 +732,7 @@ const methods = {
 					installed[m[1]] = m[2];
 			}
 			return {
-				info: json(readfile(`${RUN_DIR}/update.json`) || 'null'),
+				info: read_json(`${RUN_DIR}/update.json`, null),
 				installed,
 				checking: busy('upcheck'),
 				installing: busy('upgrade'),
@@ -768,7 +763,7 @@ const methods = {
 	zapret_catalog: {
 		call: function() {
 			let uci = cursor();
-			let cat = json(readfile(`${ZAPRET_DIR}/catalog.json`) || '[]');
+			let cat = read_json(`${ZAPRET_DIR}/catalog.json`, []);
 			let lines = split(uci.get('stella', 'main', 'zapret_opts') || '', '\n');
 			// Имя — из настроек, а у импортированной — из первой строки «#v7»; своя — если
 			// такого имени в каталоге нет.
@@ -788,11 +783,11 @@ const methods = {
 				updated: +(readfile(`${ZAPRET_DIR}/catalog.updated`) || 0) || null,
 				current,
 				custom: !!uci.get('stella', 'main', 'zapret_opts') && !in_catalog,
-				results: json(readfile(`${ZAPRET_DIR}/results.json`) || 'null'),
+				results: read_json(`${ZAPRET_DIR}/results.json`, null),
 				// Подделки, которые есть на роутере (из пакета zapret или копии Flowseal), и чего не хватило nfqws.
 				fakes: filter(map(UDP_FAKES, (f) => stat(`/opt/zapret/files/fake/${f}`) ? `/opt/zapret/files/fake/${f}` :
 					stat(`${ZAPRET_DIR}/fake/${f}`) ? `${ZAPRET_DIR}/fake/${f}` : null), (f) => f != null),
-				missing: json(readfile(`${RUN_DIR}/zapret-missing.json`) || '[]'),
+				missing: read_json(`${RUN_DIR}/zapret-missing.json`, []),
 				hostlists: map([ 'google', 'exclude', 'exclude_fs' ], (n) => {
 					let st = stat(`${ZAPRET_DIR}/hosts-${n}.txt`);
 					return { name: n, own: !!st, updated: st?.mtime };
@@ -804,7 +799,7 @@ const methods = {
 					fs: length(excl.exclude_fs),
 					all: length(keys({ ...excl.exclude, ...excl.exclude_fs }))
 				},
-				progress: json(readfile(`${RUN_DIR}/ztest.json`) || 'null'),
+				progress: read_json(`${RUN_DIR}/ztest.json`, null),
 				testing: busy('ztest'),
 				updating: busy('zcatalog')
 			};
@@ -888,10 +883,8 @@ const methods = {
 					action = d.apply;
 			}
 			uci.commit('stella');
-			if (action == 'restart')
-				restart_if_enabled(uci);
-			else if (action == 'reload')
-				reload_if_enabled(uci);
+			if (action)
+				apply_if_enabled(uci, action);
 			return { ok: true };
 		}
 	},

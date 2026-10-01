@@ -105,14 +105,14 @@ N=$(python3 -c "import json,sys; d=json.load(open('$T/run/ping.json')); print(su
 
 # pick: отдельная ссылка фиктивная — никто не ответил, выбор не меняется, итоги записаны.
 uci_main best_from='"manual"'
-if PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run pick --apply >/dev/null 2>&1; then echo "FAIL: pick без ответивших узлов"; exit 1; fi
+if PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run pick --apply >"$T/pick.out" 2>&1; then echo "FAIL: pick без ответивших узлов"; exit 1; fi
 python3 - "$T" <<'PY' || exit 1
 import json, sys
 t = sys.argv[1]
-st = json.load(open(t + '/stability.json'))['n1']
+st = json.load(open(t + '/stability.json')).get('n1')
 node = json.load(open(t + '/uci.json'))['main']['node']
-if st['ok'] != 0 or st['n'] != 5 or node != 'nope':
-    print('FAIL: pick', st, node); sys.exit(1)
+if not st or st['ok'] != 0 or st['n'] != 5 or node != 'nope':
+    print('FAIL: pick', st, node, open(t + '/pick.out').read()); sys.exit(1)
 PY
 uci_main best_from=null
 
