@@ -66,6 +66,10 @@ return view.extend({
 				E('span', { 'class': 'st-dim' }, st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source) ];
 		else if (st.node_id)
 			node = [ E('span', { 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
+		else if (st.select_mode == 'auto')
+			node = [ E('strong', {}, _('автовыбор из ★')) ];
+		else if (st.select_mode == 'best')
+			node = [ E('span', { 'class': 'st-dim' }, _('лучший по проверке — ещё не подобран')) ];
 		else
 			node = [ E('span', { 'class': 'st-bad' }, _('не выбран')) ];
 

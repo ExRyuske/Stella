@@ -148,12 +148,6 @@ function is_ipv4(s) {
 	return match(s, /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) != null;
 }
 
-// IP из адреса DNS-сервера: "https://77.88.8.8/dns-query", "tcp://1.1.1.1:53", "8.8.8.8".
-export function dns_server_ip(addr) {
-	let m = match(addr || '', /^([a-z+]+:\/\/)?([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/);
-	return m ? m[2] : null;
-};
-
 // opts: { node, auto_nodes, log_level, socks_port,
 //         intercept, tproxy_port, dns_port, dns_remote, dns_direct }
 //
@@ -226,19 +220,20 @@ export function build_config(opts) {
 		});
 		push(outbounds, { tag: 'dns-out', protocol: 'dns' });
 
+		// Запросы к прямому DNS помечены своим тегом и идут напрямую по нему, а не по IP:
+		// иначе при одном IP у обоих DNS (1.1.1.1 есть в обоих списках) мимо VPN уходили бы
+		// и запросы устройств.
 		let servers = [];
-		let direct_ip = dns_server_ip(opts.dns_direct);
 		if (length(servers_of))
-			push(servers, { address: opts.dns_direct, domains: servers_of, skipFallback: true });
+			push(servers, { address: opts.dns_direct, domains: servers_of, skipFallback: true, tag: 'dns-direct' });
 		push(servers, opts.dns_remote);
 		if (has_proxy && opts.dns_direct != opts.dns_remote)
-			push(servers, opts.dns_direct);
+			push(servers, { address: opts.dns_direct, tag: 'dns-direct' });
 
 		cfg.dns = { tag: 'dns-internal', queryStrategy: 'UseIPv4', servers };
 
 		push(rules, { inboundTag: ['dns-in'], outboundTag: 'dns-out' });
-		if (direct_ip)
-			push(rules, { inboundTag: ['dns-internal'], ip: [ direct_ip ], outboundTag: 'direct' });
+		push(rules, { inboundTag: ['dns-direct'], outboundTag: 'direct' });
 		push(rules, { inboundTag: ['dns-internal'], ...to_main });
 	}
 

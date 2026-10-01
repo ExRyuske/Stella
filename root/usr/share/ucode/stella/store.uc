@@ -9,6 +9,9 @@ import { parse_list } from 'stella.lists';
 export const CACHE_DIR = getenv('STELLA_CACHE_DIR') || '/etc/stella/subs';
 export const RUN_DIR = getenv('STELLA_RUN_DIR') || '/var/run/stella';
 export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
+// Итоги проверки стабильности узлов — на флеше: после перезагрузки по ним выбирается
+// замена пропавшему узлу. Рядом с кэшем подписок, но не в нём (там чистятся *.json).
+export const STAB_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability.json';
 
 function as_array(v) {
 	return (v == null) ? [] : (type(v) == 'array') ? v : [ v ];
@@ -118,4 +121,51 @@ export function task_script(name, cmd) {
 	// Zapret) не мог бы прочитать nfqws, который работает не от root.
 	writefile(script, `echo $$ >${run}\numask 022\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrm -f ${run}\n`);
 	return script;
+};
+
+/* ---- выбор узла по проверке стабильности ---- */
+
+// Замеры одного узла (мс, -1 — нет ответа) → { ok, n, ms — медиана, jit — средний
+// разброс от медианы }.
+export function stab_entry(samples) {
+	let good = sort(filter(samples, (v) => v >= 0), (a, b) => a - b);
+	let ok = length(good);
+	if (!ok)
+		return { ok: 0, n: length(samples), ms: -1, jit: 0 };
+	let ms = good[int(ok / 2)];
+	let dev = 0;
+	for (let v in good)
+		dev += (v > ms) ? v - ms : ms - v;
+	return { ok, n: length(samples), ms, jit: int(dev / ok) };
+};
+
+// Стоимость при равной доле ответов: задержка плюс удвоенный разброс.
+function stab_cost(e) {
+	return e.ms + 2 * e.jit;
+}
+
+// a лучше b: больше доля ответов; при равной — дешевле хотя бы на 20 % (иначе по
+// расписанию узел менялся бы из-за случайных колебаний).
+export function stab_better(a, b) {
+	if (!a?.ok)
+		return false;
+	if (!b?.ok)
+		return true;
+	if (a.ok * b.n != b.ok * a.n)
+		return a.ok * b.n > b.ok * a.n;
+	return stab_cost(a) < 0.8 * stab_cost(b);
+};
+
+// Лучший из узлов по итогам проверки; null — ни один не отвечал.
+export function best_node(nodes, stab) {
+	let best = null;
+	for (let n in nodes) {
+		let e = stab[n.id];
+		if (!e?.ok)
+			continue;
+		let b = best ? stab[best.id] : null;
+		if (!best || e.ok * b.n > b.ok * e.n || (e.ok * b.n == b.ok * e.n && stab_cost(e) < stab_cost(b)))
+			best = n;
+	}
+	return best;
 };

@@ -14,8 +14,12 @@ const callAdd = rpc.declare({ object: 'stella', method: 'add', params: [ 'text',
 const callEdit = rpc.declare({ object: 'stella', method: 'edit', params: [ 'id', 'name', 'url', 'user_agent', 'enabled' ] });
 const callRemove = rpc.declare({ object: 'stella', method: 'remove', params: [ 'id' ] });
 const callAuto = rpc.declare({ object: 'stella', method: 'auto_set', params: [ 'mode', 'id', 'on' ] });
+const callPick = rpc.declare({ object: 'stella', method: 'node_pick' });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
+
+const PICK_INTERVALS = [ [ '0', _('только вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ],
+	[ '6', _('каждые 6 ч') ], [ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ] ];
 
 const INTERVALS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
 	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
@@ -65,7 +69,19 @@ function typeLabel(n) {
 	return t;
 }
 
-function pingLabel(v) {
+// st — итоги проверки стабильности (режим «лучший по проверке»): потери — рядом с
+// задержкой, подробности — в подсказке.
+function pingLabel(v, st) {
+	const el = pingValue(v);
+	if (!st || st.n < 2)
+		return el;
+	el.title = _('ответил %d из %d, разброс ±%d мс, проверено %s').format(st.ok, st.n, st.jit, new Date(st.at * 1000).toLocaleString('ru-RU'));
+	if (st.ok && st.ok < st.n)
+		return E('span', { 'title': el.title }, [ el, ' ', E('span', { 'class': 'st-mid' }, '%d/%d'.format(st.ok, st.n)) ]);
+	return el;
+}
+
+function pingValue(v) {
 	if (v == null)
 		return E('span', { 'class': 'st-dim' }, '—');
 	if (v == -2)
@@ -105,7 +121,7 @@ return view.extend({
 			else
 				this.renderAll();
 
-			const busy = data.pinging || data.updating;
+			const busy = data.pinging || data.updating || data.picking;
 			if (busy && !this.polling) {
 				this.polling = () => this.refresh();
 				poll.add(this.polling, 2);
@@ -227,29 +243,52 @@ return view.extend({
 		const d = this.data;
 		const n = d.nodes.find((x) => x.id == d.selected);
 		const known = d.auto_nodes.filter((id) => d.nodes.find((x) => x.id == id));
-		const auto = d.select_mode == 'auto';
+		const auto = d.select_mode == 'auto', best = d.select_mode == 'best';
 
 		let node;
-		if (auto && known.length >= 2)
+		if (best && !n && !d.selected)
+			node = [ E('span', { 'class': 'st-dim' }, d.picking ? _('Подбираю узел…') : _('Узел ещё не подобран.')) ];
+		else if (auto && known.length >= 2)
 			node = [ E('strong', {}, _('Автовыбор из %d ★').format(known.length)), ' ',
 				E('span', { 'class': 'st-dim' }, n ? _('запасной: %s').format(n.name) : _('запасной не выбран')) ];
 		else if (auto)
 			node = [ E('span', { 'class': 'st-bad' }, _('Отметьте ★ хотя бы два узла для автовыбора.')) ];
 		else if (n)
-			node = [ E('strong', {}, n.name), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id]))) ];
+			node = [ E('strong', {}, n.name), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id], d.stability[n.id]))) ];
 		else if (d.selected)
 			node = [ E('span', { 'class': 'st-bad' }, _('Выбранный узел пропал из списка — выберите другой.')) ];
 		else
 			node = [ E('span', { 'class': 'st-dim' }, _('Узел не выбран.')) ];
+
+		// Подбор по проверке: из каких узлов, как часто, и подобрать сейчас.
+		const cfg = this.cfg;
+		const set = (key) => (v) => callSettingsSet({ [key]: v }).then((r) => {
+			if (r && r.error)
+				return ui.addNotification(null, E('p', {}, r.error), 'danger');
+			cfg[key] = v;
+		});
+		const subs = d.sources.filter((x) => x.kind == 'subscription');
+		const pick = best ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
+			_('из'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => set('best_from')(ev.target.value) }, [
+				E('option', { 'value': '', 'selected': cfg.best_from ? null : '' }, _('всех подписок и ссылок')),
+				...subs.map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.best_from ? '' : null }, x.name))
+			]),
+			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
+			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
+				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null, 'click': ui.createHandlerFn(this, () => callPick().then(() => this.refresh())) }, _('Подобрать сейчас')),
+			E('span', { 'class': 'st-dim', 'title': _('Через каждый узел — 5 запросов подряд. Лучший — с наибольшей долей ответов, при равной — с меньшими задержкой и разбросом. Узел меняется, только если новый заметно лучше текущего.') }, _('по задержке и стабильности'))
+		]) : '';
 
 		dom.content(this.currentBox, [
 			E('div', { 'class': 'st-node' }, node),
 			E('label', { 'style': 'white-space:nowrap' }, [ _('Выбор узла'), ' ', E('select', {
 				'class': 'cbi-input-select', 'change': (ev) => this.handleAuto(ev.target.value)
 			}, [
-				E('option', { 'value': 'single', 'selected': auto ? null : '' }, _('вручную')),
-				E('option', { 'value': 'auto', 'selected': auto ? '' : null }, _('самый быстрый из ★'))
-			]) ])
+				E('option', { 'value': 'single', 'selected': (auto || best) ? null : '' }, _('вручную')),
+				E('option', { 'value': 'auto', 'selected': auto ? '' : null }, _('самый быстрый из ★')),
+				E('option', { 'value': 'best', 'selected': best ? '' : null }, _('лучший по проверке'))
+			]) ]),
+			pick
 		]);
 	},
 
@@ -263,13 +302,24 @@ return view.extend({
 					else
 						cfg.sub_interval = v;
 				}), { custom_placeholder: _('часов…') }) ]),
-			E('p', { 'class': 'st-dim' }, _('Автовыбор проверяет отмеченные ★ узлы раз в минуту и ведёт трафик через самый быстрый из отвечающих.')),
+			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Если выбранный узел пропал из подписки')),
+				E('select', { 'class': 'cbi-input-select', 'change': (ev) => callSettingsSet({ node_missing: ev.target.value }).then((r) => {
+					if (r && r.error)
+						ui.addNotification(null, E('p', {}, r.error), 'danger');
+					else
+						cfg.node_missing = ev.target.value;
+				}) }, [
+					E('option', { 'value': 'stop', 'selected': cfg.node_missing != 'best' ? '' : null }, _('лучший из ★, без ★ — не запускать Stella')),
+					E('option', { 'value': 'best', 'selected': cfg.node_missing == 'best' ? '' : null }, _('лучший из ★, без ★ — лучший по проверке из всех'))
+				]),
+				E('div', { 'class': 'st-dim' }, _('«Не запускать» — работающая Stella остаётся на прежнем узле, а после перезагрузки роутера не запускается (весь трафик идёт напрямую), пока узел не вернётся после обновления подписки.')) ]),
+			E('p', { 'class': 'st-dim' }, _('«Самый быстрый из ★» проверяет отмеченные узлы раз в минуту и ведёт трафик через самый быстрый из отвечающих. «Лучший по проверке» сам подбирает узел по задержке и стабильности по расписанию.')),
 			E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Закрыть')))
 		]);
 	},
 
 	signature(d) {
-		return JSON.stringify([ d.selected, d.select_mode, d.auto_nodes, d.errors.length, d.nodes.length,
+		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.auto_nodes, d.errors.length, d.nodes.length,
 			d.sources.map((x) => [ x.id, x.count, x.updated, x.enabled, x.name ]) ]);
 	},
 
@@ -291,14 +341,15 @@ return view.extend({
 		const d = this.data;
 		dom.content(this.busyBox, [
 			d.updating ? E('em', { 'class': 'spinning' }, _('обновляю подписки…')) : '',
-			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : ''
+			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : '',
+			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю узел…')) : ''
 		]);
 	},
 
 	updateInPlace() {
 		const d = this.data;
 		for (const id in this.cells)
-			dom.content(this.cells[id], pingLabel(d.ping[id]));
+			dom.content(this.cells[id], pingLabel(d.ping[id], d.stability[id]));
 		for (const src of d.sources)
 			if (this.metas[src.id])
 				this.metas[src.id].textContent = this.metaText(src);
@@ -307,7 +358,7 @@ return view.extend({
 		// меняется только её задержка.
 		const cur = d.nodes.find((x) => x.id == d.selected);
 		if (cur && this.curPing)
-			dom.content(this.curPing, pingLabel(d.ping[cur.id]));
+			dom.content(this.curPing, pingLabel(d.ping[cur.id], d.stability[cur.id]));
 	},
 
 	renderGroups() {
@@ -361,7 +412,7 @@ return view.extend({
 						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : '',
 						E('span', { 'class': 'st-type' }, typeLabel(n))
 					]),
-					(this.cells[n.id] = E('td', { 'class': 'st-ping' }, pingLabel(d.ping[n.id]))),
+					(this.cells[n.id] = E('td', { 'class': 'st-ping' }, pingLabel(d.ping[n.id], d.stability[n.id]))),
 					E('td', { 'class': 'st-act' }, [
 						sel ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
 						sui.iconButton('ping', _('Проверить задержку'), () => this.handlePing([ n.id ])),
@@ -425,7 +476,7 @@ return view.extend({
 		]);
 
 		this.renderAll();
-		if (data.pinging || data.updating)
+		if (data.pinging || data.updating || data.picking)
 			this.refresh();
 
 		return E([], [

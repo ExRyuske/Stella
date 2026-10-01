@@ -6,10 +6,11 @@
 import { writefile, unlink, readfile } from 'fs';
 import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
-import { build_config, dns_server_ip } from 'stella.xray';
+import { build_config } from 'stella.xray';
+import { stab_entry, stab_better, best_node } from 'stella.store';
 import { parse_list } from 'stella.lists';
 import { nft_script, dnsmasq_conf } from 'stella.firewall';
-import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
@@ -171,14 +172,15 @@ if (xray_test(null, 'без узла'))
 // Адрес прокси-сервера — домен: он резолвится напрямую, а DNS-сервер идёт в direct.
 let c = build_config({ node: parse(CASES[1].link), ...INTERCEPT });
 let dns0 = c.dns.servers[0];
-if (dns0.domains?.[0] == 'full:srv.example.com' && c.routing.rules[1].ip[0] == '77.88.8.8' && c.routing.rules[1].outboundTag == 'direct')
+if (dns0.domains?.[0] == 'full:srv.example.com' && dns0.tag == 'dns-direct' &&
+    c.routing.rules[1].inboundTag[0] == 'dns-direct' && c.routing.rules[1].outboundTag == 'direct')
 	passed++;
 else
 	fail(`прямой резолв адреса сервера: ${sprintf('%J', dns0)}`);
 
 // Адрес сервера — IP: прямого DNS для него не нужно; в конце — запасной DNS напрямую.
 c = build_config({ node: parse(CASES[0].link), ...INTERCEPT });
-if (sprintf('%J', c.dns.servers) == sprintf('%J', [ INTERCEPT.dns_remote, INTERCEPT.dns_direct ]))
+if (sprintf('%J', c.dns.servers) == sprintf('%J', [ INTERCEPT.dns_remote, { address: INTERCEPT.dns_direct, tag: 'dns-direct' } ]))
 	passed++;
 else
 	fail(`DNS-серверы для IP-адреса: ${sprintf('%J', c.dns.servers)}`);
@@ -209,10 +211,14 @@ if (!c.routing.balancers && !c.observatory)
 else
 	fail('автовыбор из одного узла');
 
-if (dns_server_ip('https://77.88.8.8/dns-query') == '77.88.8.8' && dns_server_ip('8.8.4.4') == '8.8.4.4' && dns_server_ip('https://dns.google/dns-query') == null)
+// Один IP у DNS через VPN и напрямую: запросы устройств всё равно идут через VPN —
+// напрямую только сервер с тегом dns-direct, правила по IP нет.
+c = build_config({ node: parse(CASES[0].link), ...INTERCEPT, dns_remote: 'https://1.1.1.1/dns-query', dns_direct: 'tcp://1.1.1.1' });
+if (length(filter(c.routing.rules, (r) => r.ip && r.outboundTag == 'direct' && r.ip[0] == '1.1.1.1')) == 0 &&
+    length(filter(c.routing.rules, (r) => r.inboundTag?.[0] == 'dns-internal' && r.outboundTag == 'proxy')) == 1)
 	passed++;
 else
-	fail('dns_server_ip');
+	fail(`DNS с одним IP: ${sprintf('%J', c.routing.rules)}`);
 
 // Разбор списков: форматы itdoginfo, meta-rules-dat, clash, dnsmasq, yaml.
 let pl = parse_list(join('\n', [
@@ -361,6 +367,39 @@ if (ya[1] == '--dpi-desync-autottl=2:2-12' && ya[0] == '--dpi-desync=fake' && ya
 	passed++;
 else
 	fail(`norm_arg: ${join(' ', ya)}`);
+
+// Автоподбор по категориям: «main» — v и fs без YouTube, «yv» — только YouTube и без
+// текущей основной; Discord и игры не проверяются никогда.
+let tcat = [ { name: 'v1', family: 'v', args: [ '--a' ] }, { name: 'g1', family: 'fs', args: [ '--b' ] },
+	{ name: 'Yv01', family: 'yv', args: [ '--c' ] }, { name: 'Dv1', family: 'dv', args: [ '--d' ] }, { name: 'Gv1', family: 'gv', args: [ '--e' ] } ];
+let tnames = (scope, cur) => join(',', map(test_list(tcat, scope, cur), (s) => `${s.name}:${s.family}`));
+let tl = {
+	all: tnames('all', { name: 'mine', args: [ '--x' ] }),
+	main: tnames('main', { name: 'mine', args: [ '--x' ] }),
+	main_cur: tnames('main', { name: 'v1', args: [ '--a' ] }),
+	yv: tnames('yv', { name: 'mine', args: [ '--x' ] }),
+	fs: tnames('fs', { name: '', args: [] }),
+	v_cur_fs: tnames('v', { name: 'g1', args: [ '--b' ] }),
+	one: tnames('Yv01', { name: 'mine', args: [ '--x' ] }),
+	dv: tnames('dv', { name: '', args: [] })
+};
+if (tl.all == 'v1:v,g1:fs,Yv01:yv,mine:current' && tl.main == 'v1:v,g1:fs,mine:current' && tl.main_cur == 'v1:v,g1:fs' &&
+    tl.yv == 'Yv01:yv' && tl.fs == 'g1:fs' && tl.v_cur_fs == 'v1:v,g1:fs' && tl.one == 'Yv01:yv' && tl.dv == '')
+	passed++;
+else
+	fail(`test_list: ${sprintf('%J', tl)}`);
+
+// Стабильность узла: медиана и разброс по ответившим; лучший — по доле ответов, затем
+// по задержке с разбросом; менять текущий — только если новый дешевле на 20 %.
+let se = stab_entry([ 120, -1, 100, 140, 110 ]);
+let sn = [ { id: 'a' }, { id: 'b' }, { id: 'c' } ];
+let ss = { a: { ok: 5, n: 5, ms: 300, jit: 30 }, b: { ok: 4, n: 5, ms: 50, jit: 1 }, c: { ok: 5, n: 5, ms: 200, jit: 10 } };
+if (sprintf('%J', se) == '{ "ok": 4, "n": 5, "ms": 120, "jit": 12 }' && stab_entry([ -1, -1 ]).ok == 0 &&
+    best_node(sn, ss).id == 'c' && best_node(sn, {}) == null &&
+    stab_better(ss.c, ss.a) && !stab_better({ ok: 5, n: 5, ms: 190, jit: 10 }, ss.c) && stab_better(ss.c, { ok: 0, n: 5 }) && !stab_better(ss.b, ss.c))
+	passed++;
+else
+	fail(`стабильность узлов: ${sprintf('%J', se)}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

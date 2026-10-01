@@ -165,6 +165,21 @@ export function game_strategies(ports) {
 	return res;
 };
 
+// Что проверяет автоподбор: scope — all | main (v и fs) | v | yv | fs | имя стратегии.
+// Discord и игры запросами curl не проверить — они не входят никуда. Текущая основная
+// (cur — { name, args }) проверяется наравне, если проверяются основные: с ней
+// сравнивается лучшая.
+export function test_list(catalog, scope, cur) {
+	let list = filter(catalog, (s) => s.family in [ 'v', 'fs', 'yv' ] &&
+		(scope == 'all' || (scope == 'main' && s.family != 'yv') || s.family == scope || s.name == scope));
+	// Текущая из каталога проверяется как она сама: иначе её результат записался бы
+	// «текущей» и пропал из таблицы результатов.
+	if (length(cur.args) && length(filter(list, (s) => s.family != 'yv')) && !length(filter(list, (s) => s.name == cur.name)))
+		push(list, filter(catalog, (s) => s.name == cur.name && s.family in [ 'v', 'fs' ])[0] ||
+			{ name: cur.name || 'текущая', family: 'current', args: cur.args });
+	return list;
+};
+
 // Свои копии хостлистов вместо файлов пакета zapret: те устаревают вместе с пакетом, а без
 // пакета стратегий с ними не запустить. Источники — те же, что у Zapret Manager.
 export const HOSTLISTS = {

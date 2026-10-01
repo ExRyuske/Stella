@@ -25,6 +25,7 @@
 					"select",
 					"update",
 					"ping",
+					"node_pick",
 					"restart",
 					"check",
 					"add",

@@ -58,16 +58,63 @@ VID=$(run nodes | awk '/Sub XHTTP/ {print $1}')
 sed -i.bak "s/\"node\": \"$ID\"/\"node\": \"$VID\"/" "$T/uci.json"
 run gen "$T/config.json"
 grep -q "\"id\": \"$UUID\"" "$T/config.json" || { echo "FAIL: в конфиге не UUID пользователя"; exit 1; }
+
+# Правка настроек main в uci.json: uci_main ключ=значение-JSON…
+uci_main() {
+	python3 - "$T/uci.json" "$@" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for kv in sys.argv[2:]:
+    k, v = kv.split('=', 1)
+    v = json.loads(v)
+    if v is None:
+        d['main'].pop(k, None)
+    else:
+        d['main'][k] = v
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+}
+
+# Выбранный узел пропал, ★ нет: по умолчанию код 3 — init оставит прежний конфиг, а без
+# него не запустит Stella (но не выдаст direct).
+uci_main node='"sub1_00000000"'
+rc=0; run gen "$T/c2.json" 2>/dev/null || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL: gen без узла и без ★ вернул $rc, а не 3"; exit 1; }
+
+# Есть ★ — замена из избранного.
+uci_main auto_node="[\"$VID\"]"
+run gen "$T/config.json" 2>"$T/gen.err" || { echo "FAIL: gen с заменой из ★"; exit 1; }
+grep -q 'временно работаю через «Sub XHTTP»' "$T/gen.err" || { echo "FAIL: замена не из ★: $(cat "$T/gen.err")"; exit 1; }
 "$XRAY" run -test -c "$T/config.json" >/dev/null
 
+# ★ нет, «лучший по проверке»: из итогов стабильности — у кого больше доля ответов.
+uci_main auto_node=null node_missing='"best"'
+printf '{"%s":{"ok":5,"n":5,"ms":300,"jit":20},"%s":{"ok":3,"n":5,"ms":50,"jit":1}}' "$ID" "$VID" > "$T/stability.json"
+run gen "$T/config.json" 2>"$T/gen.err" || { echo "FAIL: gen с заменой по проверке"; exit 1; }
+grep -q 'временно работаю через «Sub HY2»' "$T/gen.err" || { echo "FAIL: замена не лучшая по проверке: $(cat "$T/gen.err")"; exit 1; }
+uci_main node_missing=null
+
 # Несуществующий узел — gen обязан упасть, а не выдать direct.
-sed -i.bak "s/\"node\": \"$VID\"/\"node\": \"nope\"/" "$T/uci.json"
+uci_main node='"nope"'
 if run gen "$T/c2.json" 2>/dev/null; then echo "FAIL: gen с неизвестным узлом"; exit 1; fi
 
 # ping: узлы фиктивные, у каждого должен появиться результат -1.
 PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run ping >/dev/null
 N=$(python3 -c "import json,sys; d=json.load(open('$T/run/ping.json')); print(sum(1 for v in d.values() if v == -1))")
 [ "$N" = 3 ] || { echo "FAIL: ping записал $N результатов из 3"; exit 1; }
+
+# pick: отдельная ссылка фиктивная — никто не ответил, выбор не меняется, итоги записаны.
+uci_main best_from='"manual"'
+if PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run pick --apply >/dev/null 2>&1; then echo "FAIL: pick без ответивших узлов"; exit 1; fi
+python3 - "$T" <<'PY' || exit 1
+import json, sys
+t = sys.argv[1]
+st = json.load(open(t + '/stability.json'))['n1']
+node = json.load(open(t + '/uci.json'))['main']['node']
+if st['ok'] != 0 or st['n'] != 5 or node != 'nope':
+    print('FAIL: pick', st, node); sys.exit(1)
+PY
+uci_main best_from=null
 
 # Списки: скачивание по HTTP + записи вручную -> сет, правило и nftset для dnsmasq.
 printf 'youtube.com\n+.googlevideo.com\n91.108.4.0/22\n' > "$T/list.txt"
@@ -129,7 +176,7 @@ case "$ARGS" in *hosts-exclude_fs.txt*) echo "FAIL: nfqws получил иск�
 # migrate: анонимная подписка переименовывается, кэш и выбранный узел следуют за ней.
 cat > "$T/uci.json" <<EOF
 {
-	"main": { ".type": "stella", "node": "cfg0112ab_deadbeef" },
+	"main": { ".type": "stella", "node": "cfg0112ab_deadbeef", "auto_node": [ "cfg0112ab_deadbeef", "node_keep" ] },
 	"cfg0112ab": { ".type": "subscription", "name": "anon", "url": "http://example.com/s" }
 }
 EOF
@@ -141,5 +188,7 @@ case "$NEW" in sub_????????) ;; *) echo "FAIL: migrate не переименов
 [ "$SEL" = "${NEW}_deadbeef" ] || { echo "FAIL: migrate не обновил выбранный узел ($SEL)"; exit 1; }
 grep -q "\"${NEW}_deadbeef\"" "$T/cache/$NEW.json" || { echo "FAIL: migrate не переименовал кэш"; exit 1; }
 [ ! -e "$T/cache/cfg0112ab.json" ] || { echo "FAIL: старый кэш остался"; exit 1; }
+AUTO=$(python3 -c "import json; print(' '.join(json.load(open('$T/uci.json'))['main']['auto_node']))")
+[ "$AUTO" = "${NEW}_deadbeef node_keep" ] || { echo "FAIL: migrate не обновил отметки автовыбора ($AUTO)"; exit 1; }
 
 echo "cli: OK"

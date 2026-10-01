@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a } from 'stella.util';
 
@@ -75,6 +75,9 @@ const SETTINGS = {
 	block_doh: { title: 'Блокировка DoH', def: '1', apply: 'reload', check: (v) => v in [ '0', '1' ] },
 	log_level: { title: 'Лог xray', def: 'warning', apply: 'restart', check: (v) => v in [ 'error', 'warning', 'info', 'debug' ] },
 	sub_interval: { title: 'Обновление подписок', def: '12', apply: 'reload', check: HOURS },
+	best_from: { title: 'Из каких узлов подбирать', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
+	best_interval: { title: 'Подбор узла', def: '6', apply: 'reload', check: HOURS },
+	node_missing: { title: 'Если узел пропал', def: 'stop', apply: 'restart', check: (v) => v in [ 'stop', 'best' ] },
 	lists_interval: { title: 'Обновление списков', def: '24', apply: 'reload', check: HOURS },
 	lan_ifname: { title: 'Интерфейсы LAN', def: [ 'br-lan' ], apply: 'reload',
 		check: (v) => type(v) == 'array' && length(v) && length(filter(v, (i) => !match(i, /^[A-Za-z0-9._-]+$/))) == 0 },
@@ -193,6 +196,7 @@ const methods = {
 					match(cmd_output('ip rule 2>/dev/null') || '', /lookup 1127/) != null,
 				node_id: sel,
 				node,
+				select_mode: uci.get('stella', 'main', 'select_mode') || 'single',
 				updating: busy('update'),
 				pinging: busy('ping'),
 				update_log: readfile(`${RUN_DIR}/update.log`) || ''
@@ -224,7 +228,9 @@ const methods = {
 				nodes,
 				errors,
 				ping: json(readfile(`${RUN_DIR}/ping.json`) || '{}'),
+				stability: json(readfile(STAB_PATH) || '{}'),
 				pinging: busy('ping'),
+				picking: busy('pick'),
 				updating: busy('update'),
 				update_log: readfile(`${RUN_DIR}/update.log`) || ''
 			};
@@ -250,14 +256,15 @@ const methods = {
 		}
 	},
 
-	// Автовыбор: mode — single/auto; id + on — отметить узел звёздочкой или снять.
+	// Режим выбора: single — вручную, auto — самый быстрый из ★ (xray), best — лучший по
+	// проверке (Stella сама раз в best_interval часов); id + on — отметить узел ★ или снять.
 	auto_set: {
 		args: { mode: 'mode', id: 'id', on: true },
 		call: function(req) {
 			let uci = cursor();
 			let a = req.args || {};
 			if (a.mode != null) {
-				if (!(a.mode in [ 'single', 'auto' ]))
+				if (!(a.mode in [ 'single', 'auto', 'best' ]))
 					return { error: 'некорректный режим' };
 				uci.set('stella', 'main', 'select_mode', a.mode);
 			}
@@ -274,6 +281,9 @@ const methods = {
 			uci.commit('stella');
 			if (uci.get('stella', 'main', 'select_mode') == 'auto' || a.mode != null)
 				restart_if_enabled(uci);
+			// Включили подбор — первый подбор сразу, не дожидаясь расписания.
+			if (a.mode == 'best' && !busy('ping'))
+				spawn('pick', '/usr/bin/stella pick --apply');
 			return { ok: true };
 		}
 	},
@@ -390,7 +400,15 @@ const methods = {
 		args: { ids: [] },
 		call: function(req) {
 			let ids = filter(req.args?.ids || [], (id) => type(id) == 'string' && match(id, /^[A-Za-z0-9_]+$/));
-			return { started: spawn('ping', `/usr/bin/stella ping ${join(' ', ids)}`) };
+			// Подбор узла занимает те же порты для временного xray.
+			return { started: !busy('pick') && spawn('ping', `/usr/bin/stella ping ${join(' ', ids)}`) };
+		}
+	},
+
+	// Подобрать лучший узел сейчас (режим «лучший по проверке»).
+	node_pick: {
+		call: function() {
+			return { started: !busy('ping') && spawn('pick', '/usr/bin/stella pick --apply') };
 		}
 	},
 
@@ -809,7 +827,7 @@ const methods = {
 		}
 	},
 
-	// scope: all | v | yv | fs | имя стратегии; apply — применить лучшую, если она лучше текущей.
+	// scope: all | main | v | yv | fs | имя стратегии; apply — применить лучшую, если она лучше текущей.
 	zapret_test: {
 		args: { scope: 'scope', apply: true },
 		call: function(req) {

@@ -171,10 +171,12 @@ return view.extend({
 	},
 
 	refresh() {
-		return Promise.all([ callLists(), callDevices(), callZapretInfo(), callZCatalog() ]).then(([ d, dr, zi, zc ]) => {
+		// Настройки тоже: стратегию меняют и выбор из каталога, и автоподбор.
+		return Promise.all([ callLists(), callDevices(), callZapretInfo(), callZCatalog(), callSettings() ]).then(([ d, dr, zi, zc, cfg ]) => {
 			const was = this.data && this.data.updating;
 			const wasTesting = this.zc && this.zc.testing;
 			this.data = d;
+			this.cfg = cfg;
 			this.zi = zi;
 			this.zc = zc;
 			this.setDevices(dr);
@@ -460,6 +462,10 @@ return view.extend({
 					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest('all', auto.checked)); }) }, _('Подобрать')),
 				E('label', { 'class': 'st-dim' }, [ auto, ' ', _('применить лучшую') ])
 			];
+		// Подбор только своей категории — у строк «Основная» и «YouTube».
+		const pick = (scope, has) => zc.testing ? '' : E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
+			'title': _('Проверить только эти стратегии'),
+			'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, auto.checked)); }) }, _('подобрать'));
 
 		// Результаты: лучшие сверху, с кнопкой «Применить».
 		const names = Object.keys(res).filter((n) => res[n].family != 'current').sort((a, b) => res[b].ok - res[a].ok);
@@ -522,8 +528,8 @@ return view.extend({
 				])
 			]),
 			E('div', { 'class': 'st-zgrid' }, [
-				E('b', {}, _('Основная')), E('div', {}, [ sel ]),
-				E('b', {}, 'YouTube'), E('div', {}, [ ytSel ]),
+				E('b', {}, _('Основная')), E('div', {}, [ sel, pick('main', (st) => st.family == 'v' || st.family == 'fs') ]),
+				E('b', {}, 'YouTube'), E('div', {}, [ ytSel, pick('yv', (st) => st.family == 'yv') ]),
 				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
 				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret.') },
@@ -537,7 +543,7 @@ return view.extend({
 				E('span', {}, hl ? _('хостлисты: свои') : _('хостлисты: из пакета zapret')),
 				svc,
 				E('details', {}, [ E('summary', { 'style': 'cursor:pointer' }, _('как проверяются стратегии')),
-					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей; по расписанию — всегда так.')) ])
+					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут; кнопка «подобрать» у строки проверяет только её стратегии. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей и больше, чем без обхода; по расписанию — так же, но выключенные основную и YouTube он не включает.')) ])
 			])
 		]);
 	},

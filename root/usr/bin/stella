@@ -11,13 +11,14 @@ import { build_config, outbound } from 'stella.xray';
 import { fnv1a } from 'stella.util';
 import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
-import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, HOSTLISTS } from 'stella.zapret';
-import { CACHE_DIR, RUN_DIR, LISTS_DIR, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
 const PING_URL = 'https://www.gstatic.com/generate_204';
 const PING_PORT = 21000;
 const PING_CHUNK = 50;
+const PICK_ROUNDS = 5;
 const TPROXY_PORT = 10812;
 const DNS_PORT = 10853;
 const CONF_DIR = '/var/etc/stella';
@@ -50,6 +51,7 @@ function usage() {
 		'  nodes              список узлов (* — выбранный)\n' +
 		'  gen [файл|-]       сгенерировать конфиг xray\n' +
 		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
+		'  pick [--apply]     подобрать лучший узел по задержке и стабильности\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
 		'  upgrade check|stella|xray|zapret|dnsmasq  проверить или установить обновления\n' +
@@ -480,27 +482,37 @@ function cmd_fw(action) {
 
 const AUTO_MAX = 30;
 
-// Конфиг xray для текущих настроек; null — выбранного узла нет (init оставит прежний).
+// Конфиг xray для текущих настроек; 'stop' — выбранный узел пропал, а замены нет.
 function current_config() {
 	let nodes = load_nodes();
 	let by_id = {};
 	for (let n in nodes)
 		by_id[n.id] = n;
 
+	let auto_nodes = [], starred = [];
+	let ids = opt('main', 'auto_node', []);
+	for (let id in (type(ids) == 'array') ? ids : [ ids ])
+		if (by_id[id])
+			push(starred, by_id[id]);
+	if (opt('main', 'select_mode', 'single') == 'auto')
+		auto_nodes = slice(starred, 0, AUTO_MAX);
+
 	let node_id = opt('main', 'node');
 	let node = node_id ? by_id[node_id] : null;
-	// Не подменяем прокси на direct молча — пусть init оставит прежний конфиг.
-	if (node_id && !node) {
-		warn(`выбранный узел ${node_id} не найден\n`);
-		return null;
-	}
-
-	let auto_nodes = [];
-	if (opt('main', 'select_mode', 'single') == 'auto') {
-		let ids = opt('main', 'auto_node', []);
-		for (let id in (type(ids) == 'array') ? ids : [ ids ])
-			if (by_id[id] && length(auto_nodes) < AUTO_MAX)
-				push(auto_nodes, by_id[id]);
+	// Узел пропал (провайдер переименовал сервер, подписку выключили). В автовыборе запасным
+	// станет первый из ★. Иначе — лучший из ★ по проверке, а без ★ — по настройке
+	// node_missing: stop — Stella не запускается (работающая остаётся на прежнем конфиге),
+	// best — лучший по проверке из всех.
+	if (node_id && !node && length(auto_nodes) < 2) {
+		let stab = json(readfile(STAB_PATH) || '{}') || {};
+		node = best_node(starred, stab) || starred[0];
+		if (!node && opt('main', 'node_missing', 'stop') == 'best')
+			node = best_node(nodes, stab) || filter(nodes, (n) => index(node_id, `${n.source_id}_`) == 0)[0] || nodes[0];
+		if (!node) {
+			warn(`выбранный узел ${node_id} не найден\n`);
+			return 'stop';
+		}
+		warn(`выбранный узел ${node_id} не найден, временно работаю через «${node.name}»\n`);
 	}
 
 	for (let n in [ node, ...auto_nodes ])
@@ -522,8 +534,8 @@ function current_config() {
 
 function cmd_gen(out) {
 	let cfg = current_config();
-	if (!cfg)
-		return 1;
+	if (cfg == 'stop')
+		return 3;
 
 	let data = sprintf('%.J\n', cfg);
 	if (!out || out == '-')
@@ -535,10 +547,11 @@ function cmd_gen(out) {
 	return 0;
 }
 
-// Реальная задержка: временный xray с отдельным socks-входом на каждый узел,
-// через каждый параллельно идёт запрос к generate_204. Результат (мс, -1 — ошибка)
-// дописывается в $RUN_DIR/ping.json.
-function ping_chunk(nodes, results) {
+// Реальная задержка: временный xray с отдельным socks-входом на каждый узел, через
+// каждый параллельно идут rounds запросов к generate_204 подряд. Результат — медиана
+// (мс, -1 — ни одного ответа, -2 — xray не принял конфиг); stab (если задан) получает
+// итоги проверки стабильности.
+function ping_chunk(nodes, results, rounds, stab) {
 	let cfg_path = `${RUN_DIR}/ping.json.cfg.json`;
 	let cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [], routing: { rules: [] } };
 
@@ -555,28 +568,61 @@ function ping_chunk(nodes, results) {
 
 	if (system(`kill -0 ${pid} 2>/dev/null`) != 0) {
 		// xray не принял конфиг целиком — помечаем пачку, но не останавливаемся.
-		for (let n in nodes)
+		for (let n in nodes) {
 			results[n.id] = -2;
+			if (stab)
+				stab[n.id] = { ok: 0, n: rounds, ms: -1, jit: 0, at: time() };
+		}
 		unlink(cfg_path);
 		return;
 	}
 
-	let cmd = '';
-	for (let i = 0; i < length(nodes); i++) {
-		let port = PING_PORT + i;
-		cmd += sprintf("curl -s -o /dev/null --max-time 6 -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
-			port, PING_URL, shq(RUN_DIR), port);
+	let samples = map(nodes, () => []);
+	for (let r = 0; r < rounds; r++) {
+		let cmd = '';
+		for (let i = 0; i < length(nodes); i++) {
+			let port = PING_PORT + i;
+			cmd += sprintf("curl -s -o /dev/null --max-time 6 -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
+				port, PING_URL, shq(RUN_DIR), port);
+		}
+		system(cmd + 'wait');
+		for (let i = 0; i < length(nodes); i++) {
+			let out = `${RUN_DIR}/ping.${PING_PORT + i}`;
+			let m = match(readfile(out) || '', /^(200|204) ([0-9.]+)/);
+			push(samples[i], m ? int(+m[2] * 1000) : -1);
+			unlink(out);
+		}
 	}
-	system(cmd + 'wait');
 	system(`kill ${pid} 2>/dev/null`);
+	// Следующая пачка займёт те же порты — ждём, пока xray их освободит.
+	for (let i = 0; i < 30 && system(`kill -0 ${pid} 2>/dev/null`) == 0; i++)
+		sleep(100);
 
 	for (let i, n in nodes) {
-		let out = `${RUN_DIR}/ping.${PING_PORT + i}`;
-		let m = match(readfile(out) || '', /^(200|204) ([0-9.]+)/);
-		results[n.id] = m ? int(+m[2] * 1000) : -1;
-		unlink(out);
+		let e = stab_entry(samples[i]);
+		results[n.id] = e.ok ? e.ms : -1;
+		if (stab)
+			stab[n.id] = { ...e, at: time() };
 	}
 	unlink(cfg_path);
+}
+
+// Проверка пачками по PING_CHUNK; задержки — в $RUN_DIR/ping.json, итоги стабильности
+// (если stab задан) — в STAB_PATH.
+function measure(nodes, rounds, stab) {
+	system(`mkdir -p ${shq(RUN_DIR)}`);
+	let path = `${RUN_DIR}/ping.json`;
+	let results = json(readfile(path) || '{}');
+	for (let i = 0; i < length(nodes); i += PING_CHUNK) {
+		ping_chunk(slice(nodes, i, i + PING_CHUNK), results, rounds, stab);
+		writefile(`${path}.tmp`, sprintf('%J', results));
+		rename(`${path}.tmp`, path);
+	}
+	if (stab) {
+		writefile(`${STAB_PATH}.tmp`, sprintf('%J', stab));
+		rename(`${STAB_PATH}.tmp`, STAB_PATH);
+	}
+	return results;
 }
 
 function cmd_ping(...ids) {
@@ -584,18 +630,53 @@ function cmd_ping(...ids) {
 	if (length(ids))
 		nodes = filter(nodes, (n) => n.id in ids);
 
-	system(`mkdir -p ${shq(RUN_DIR)}`);
-	let path = `${RUN_DIR}/ping.json`;
-	let results = json(readfile(path) || '{}');
-
-	for (let i = 0; i < length(nodes); i += PING_CHUNK) {
-		ping_chunk(slice(nodes, i, i + PING_CHUNK), results);
-		writefile(`${path}.tmp`, sprintf('%J', results));
-		rename(`${path}.tmp`, path);
-	}
-
+	let results = measure(nodes, 1, null);
 	for (let n in nodes)
 		printf('%6s  %s\n', (results[n.id] >= 0) ? `${results[n.id]}ms` : 'fail', n.name);
+	return 0;
+}
+
+// Режим «лучший по проверке»: через каждый узел из выбранных (best_from: пусто — все,
+// иначе id подписки) по PICK_ROUNDS запросов; лучший — с наибольшей долей ответов, при
+// равной — с меньшими задержкой и разбросом. Текущий меняется, только если новый заметно
+// лучше. --apply — сохранить выбор (reload перезапустит xray, раз изменился конфиг).
+function cmd_pick(...argv) {
+	let all = load_nodes();
+	let from = opt('main', 'best_from', '');
+	let nodes = filter(all, (n) => from == '' || n.source_id == from);
+	if (!length(nodes)) {
+		warn('нет узлов для подбора\n');
+		return 1;
+	}
+	// Итоги узлов, которых больше нет, не копим.
+	let stab = json(readfile(STAB_PATH) || '{}') || {};
+	let alive = {};
+	for (let n in all)
+		alive[n.id] = true;
+	for (let id in keys(stab))
+		if (!alive[id])
+			delete stab[id];
+
+	measure(nodes, PICK_ROUNDS, stab);
+	let best = best_node(nodes, stab);
+	if (!best) {
+		warn('ни один узел не ответил — выбор не меняю\n');
+		return 1;
+	}
+	let cur_id = opt('main', 'node', '');
+	let cur = filter(nodes, (n) => n.id == cur_id)[0];
+	if (best.id == cur_id || (cur && !stab_better(stab[best.id], stab[cur_id]))) {
+		printf('Текущий узел не хуже лучшего: %s\n', cur.name);
+		return 0;
+	}
+	let e = stab[best.id];
+	printf('Лучший узел: %s — ответил %d из %d, %d мс ±%d\n', best.name, e.ok, e.n, e.ms, e.jit);
+	if ('--apply' in argv) {
+		uci.set('stella', 'main', 'node', best.id);
+		uci.commit('stella');
+		if (opt('main', 'enabled', '0') == '1')
+			system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+	}
 	return 0;
 }
 
@@ -618,6 +699,7 @@ function cmd_migrate() {
 		while (uci.get('stella', to))
 			to += 'x';
 		uci.rename('stella', from, to);
+		r[1] = to;
 
 		let cache = json(readfile(`${CACHE_DIR}/${from}.json`) || 'null');
 		if (cache) {
@@ -630,6 +712,15 @@ function cmd_migrate() {
 			uci.set('stella', 'main', 'node', to + substr(sel, length(from)));
 		print(`${from} -> ${to}\n`);
 	}
+	// Отметки автовыбора — те же id узлов.
+	let auto = opt('main', 'auto_node', null);
+	if (auto != null)
+		uci.set('stella', 'main', 'auto_node', map((type(auto) == 'array') ? auto : [ auto ], (id) => {
+			for (let r in renames)
+				if (id == r[0] || index(id, `${r[0]}_`) == 0)
+					return r[1] + substr(id, length(r[0]));
+			return id;
+		}));
 	uci.commit('stella');
 	return 0;
 }
@@ -801,16 +892,19 @@ function zapret_apply(st) {
 		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
 }
 
-// Автоподбор: scope — all | v | yv | fs | имя стратегии; --apply — применить лучшую,
-// если она открывает больше текущей (менять работающее на равное незачем).
+// Автоподбор: scope — all | main | v | yv | fs | имя стратегии; --apply — применить лучшую,
+// если она открывает больше текущей и больше, чем без обхода (менять работающее на равное
+// незачем); --scheduled — запуск по расписанию: выключенные категории он не включает.
 function cmd_zapret_test(...argv) {
-	let apply = ('--apply' in argv);
-	let scope = filter(argv, (a) => a != '--apply')[0] || 'all';
+	let apply = ('--apply' in argv), scheduled = ('--scheduled' in argv);
+	let scope = filter(argv, (a) => !(a in [ '--apply', '--scheduled' ]))[0] || 'all';
 	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
-	let catalog = zapret_catalog();
-	// Discord и игры проверить запросами curl нельзя — они в автоподбор не входят.
-	let testable = filter(catalog, (s) => s.family in [ 'v', 'fs', 'yv' ]);
-	let list = (scope == 'all') ? testable : filter(testable, (s) => s.family == scope || s.name == scope);
+	// Текущая стратегия проверяется наравне с каталогом — с ней и сравнивается лучшая.
+	let cur_lines = map(split(opt('main', 'zapret_opts', ''), /\r?\n/), (l) => trim(l));
+	let cur_args = filter(cur_lines, (l) => l != '' && substr(l, 0, 1) != '#');
+	// Имя — из настроек, а у импортированной из zapret — из первой строки «#v7».
+	let cur_name = opt('main', 'zapret_strategy', '') || match(cur_lines[0] || '', /^#(.+)$/)?.[1] || '';
+	let list = test_list(zapret_catalog(), scope, { name: cur_name, args: cur_args });
 	system(`mkdir -p ${RUN_DIR} ${shq(ZAPRET_DIR)}`);
 	let progress = `${RUN_DIR}/ztest.json`;
 	// Без nfqws проверять нечего: каждая стратегия записалась бы «ошибкой».
@@ -840,15 +934,8 @@ function cmd_zapret_test(...argv) {
 		let hosts = zt_targets(fam == 'yv' ? 'yv' : 'general');
 		baseline[fam] = { ok: length(zt_probe(hosts)), total: length(hosts) };
 	}
-	res.baseline = baseline;
-
-	// Текущая стратегия проверяется наравне с каталогом — с ней и сравнивается лучшая.
-	let cur_lines = map(split(opt('main', 'zapret_opts', ''), /\r?\n/), (l) => trim(l));
-	let cur_args = filter(cur_lines, (l) => l != '' && substr(l, 0, 1) != '#');
-	// Имя — из настроек, а у импортированной из zapret — из первой строки «#v7».
-	let cur_name = opt('main', 'zapret_strategy', '') || match(cur_lines[0] || '', /^#([A-Za-z0-9 ()._-]+)$/)?.[1] || '';
-	if (length(cur_args) && !length(filter(list, (s) => s.name == cur_name)))
-		push(list, { name: cur_name || 'текущая', family: 'current', args: cur_args });
+	// Проверка одной категории не стирает замер без обхода у другой.
+	res.baseline = { ...(res.baseline || {}), ...baseline };
 
 	for (let i, st in list) {
 		if (readfile(stopf) != null)
@@ -869,9 +956,13 @@ function cmd_zapret_test(...argv) {
 	if (apply && readfile(stopf) == null) {
 		let msgs = [];
 		// Основная и YouTube выбираются раздельно: лучшая Yv идёт в поле YouTube, а не
-		// в основную. Меняется, только если лучшая открывает больше текущей (для YouTube
-		// без своей стратегии — больше, чем без обхода).
+		// в основную. Меняется, только если лучшая открывает больше текущей и больше, чем
+		// без обхода. Выключенная категория — «текущей» нет; по расписанию её не включаем.
+		let yt_cur = opt('main', 'zapret_yt', '');
 		for (let yt in [ false, true ]) {
+			let on = yt ? !(yt_cur in [ '', '0' ]) : length(cur_args) > 0;
+			if (scheduled && !on)
+				continue;
 			let best = null;
 			for (let st in list)
 				if (st.family != 'current' && (st.family == 'yv') == yt && res.items[st.name]?.ok >= 0 &&
@@ -879,10 +970,10 @@ function cmd_zapret_test(...argv) {
 					best = st;
 			if (!best)
 				continue;
-			let cur_key = yt ? opt('main', 'zapret_yt', '') : (cur_name || 'текущая');
-			let cur = res.items[cur_key]?.ok ?? (yt ? (res.baseline?.yv?.ok ?? -1) : -1);
+			let cur = on ? (res.items[yt ? yt_cur : (cur_name || 'текущая')]?.ok ?? -1) : -1;
+			let base = res.baseline?.[yt ? 'yv' : 'general']?.ok ?? -1;
 			let got = res.items[best.name];
-			if (got.ok > cur) {
+			if (got.ok > max(cur, base)) {
 				if (yt) {
 					uci.set('stella', 'main', 'zapret_yt', best.name);
 					uci.commit('stella');
@@ -1144,13 +1235,25 @@ function cmd_tick() {
 		action = 'reload';
 	}
 	// Автоподбор Zapret — ночью (3–5 ч), раз в zapret_test_interval дней, только если
-	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей.
+	// Zapret используется. Меняет стратегию, только если лучшая открывает больше текущей,
+	// и не включает выключенные основную и YouTube.
 	let zt_days = +opt('main', 'zapret_test_interval', '0');
 	let hour = +trim(cmd_out('date +%H') || '12');
 	st.ztest ??= +(json(readfile(`${ZAPRET_DIR}/results.json`) || 'null')?.at || now);
 	if (zt_days > 0 && hour >= 3 && hour < 5 && now - st.ztest >= zt_days * 86400 - 3600 &&
-	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply')) {
+	    zapret_used(enabled_lists()) && run_locked('ztest', '/usr/bin/stella zapret-test all --apply --scheduled')) {
 		st.ztest = now;
+	}
+
+	// Режим «лучший по проверке» — подбор узла раз в best_interval часов. Время отмечается
+	// до запуска: подбор перезапускает xray, и отметка не должна зависеть от того, успеет ли
+	// этот процесс дописать состояние.
+	let best_h = +opt('main', 'best_interval', '6');
+	st.pick ??= stat(STAB_PATH)?.mtime ?? 0;
+	if (opt('main', 'select_mode', 'single') == 'best' && best_h > 0 && now - st.pick >= best_h * 3600 && !task_busy('ping')) {
+		st.pick = now;
+		writefile(state_path, sprintf('%J', st));
+		run_locked('pick', '/usr/bin/stella pick --apply');
 	}
 
 	writefile(state_path, sprintf('%J', st));
@@ -1180,6 +1283,7 @@ const CMDS = {
 	nodes: cmd_nodes,
 	gen: cmd_gen,
 	ping: cmd_ping,
+	pick: cmd_pick,
 	fw: cmd_fw,
 	migrate: cmd_migrate,
 	lists: cmd_lists,
