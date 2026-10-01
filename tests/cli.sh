@@ -28,10 +28,12 @@ cat > "$T/uci.json" <<EOF
 }
 EOF
 
+# «--» перед скриптом: getopt из glibc переставляет аргументы и принял бы «--apply» команды
+# за ключ самого ucode (на роутере musl так не делает, а в CI — glibc).
 run() {
 	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
-		root/usr/bin/stella "$@"
+		-- root/usr/bin/stella "$@"
 }
 
 # broken подписка должна дать код 1, но sub1 обязана обновиться.
