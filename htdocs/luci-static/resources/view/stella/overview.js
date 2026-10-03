@@ -259,12 +259,12 @@ return view.extend({
 		this.updBox = E('div');
 		this.upd = upd;
 		this.renderUpdates(upd);
-		// Сведения об обновлениях лежат в /var/run и после загрузки роутера пропадают —
-		// первый заход на страницу проверяет сам.
-		if (!upd.info && !upd.checking && !upd.installing)
-			this.handleUpdateCheck();
-		else if (upd.checking || upd.installing)
+		// Обновления проверяются при каждом открытии страницы; пока проверка или установка
+		// уже идут — только следим за ними.
+		if (upd.checking || upd.installing)
 			this.pollUpdates();
+		else
+			this.handleUpdateCheck();
 		this.checkBox = E('span', {}, E('button', {
 			'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleCheck')
 		}, _('Проверить')));

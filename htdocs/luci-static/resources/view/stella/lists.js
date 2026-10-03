@@ -405,9 +405,6 @@ return view.extend({
 			E('option', { 'value': '', 'selected': cfg[key] ? null : '' }, _('stun (по умолчанию)')),
 			...(zc.fakes || []).map((f) => E('option', { 'value': f, 'selected': f == cfg[key] ? '' : null }, fakeName(f)))
 		]) ];
-		const sched = sui.combo(cfg.zapret_test_interval || '0',
-			[ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
-			(v) => sui.saveSettings({ zapret_test_interval: v }), { custom_placeholder: _('дней…') });
 		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
 			if (ev.target.value == '__custom')
 				return this.showZapret();
@@ -435,25 +432,23 @@ return view.extend({
 				? _('не запущен — нет файлов: %s').format(zc.missing.join(', '))
 				: _('не запущен — стратегия не подходит к nfqws'));
 
-		// Автоподбор.
+		// Автоподбор — у каждой категории свой: кнопка и расписание. Во время проверки у её
+		// категории — ход проверки и «Остановить», у остальных — ничего.
 		const p = zc.progress || {};
-		const auto = E('input', { 'type': 'checkbox', 'checked': '' });
-		let test;
-		if (zc.testing)
-			test = [
-				(this.zProgress = E('em', { 'class': 'spinning' }, p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…'))),
-				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZTestStop())) }, _('Остановить'))
+		const pick = (scope, key, has) => {
+			if (zc.testing)
+				return (p.scope && p.scope != scope) ? [] : [
+					(this.zProgress = E('em', { 'class': 'spinning' }, p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…'))),
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZTestStop())) }, _('Остановить'))
+				];
+			return [
+				E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
+					'title': _('Проверить эти стратегии и применить лучшую, если она лучше текущей'),
+					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, true)); }) }, _('подобрать')),
+				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
+					(v) => sui.saveSettings({ [key]: v }), { custom_placeholder: _('дней…') })
 			];
-		else
-			test = [
-				E('button', { 'class': 'btn cbi-button-action', 'disabled': zc.strategies.length ? null : '',
-					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest('all', auto.checked)); }) }, _('Подобрать')),
-				E('label', { 'class': 'st-dim' }, [ auto, ' ', _('применить лучшую') ])
-			];
-		// Подбор только своей категории — у строк «Основная» и «YouTube».
-		const pick = (scope, has) => zc.testing ? '' : E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
-			'title': _('Проверить только эти стратегии'),
-			'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, auto.checked)); }) }, _('подобрать'));
+		};
 
 		// Результаты: лучшие сверху, с кнопкой «Применить».
 		const names = Object.keys(res).filter((n) => res[n].family != 'current').sort((a, b) => res[b].ok - res[a].ok);
@@ -514,13 +509,12 @@ return view.extend({
 				])
 			]),
 			E('div', { 'class': 'st-zgrid' }, [
-				E('b', {}, _('Основная')), E('div', {}, [ sel, pick('main', (st) => st.family == 'v' || st.family == 'fs') ]),
-				E('b', {}, 'YouTube'), E('div', {}, [ ytSel, pick('yv', (st) => st.family == 'yv') ]),
+				E('b', {}, _('Основная')), E('div', {}, [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs') ]),
+				E('b', {}, 'YouTube'), E('div', {}, [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
 				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
 				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret.') },
 					(exN.zms || exN.fs) ? _('всегда напрямую') : _('обновите каталог')) ]),
-				E('b', {}, _('Автоподбор')), E('div', {}, [ ...test, E('span', { 'class': 'st-dim' }, _('по расписанию:')), sched ])
 			]),
 			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
 				_('Игры и голос Discord ходят по IP вне списков — Zapret их коснётся, только если вверху выбрано «Всё, что не попало в списки: через Zapret».')) : '',
@@ -529,7 +523,7 @@ return view.extend({
 				E('span', {}, hl ? _('хостлисты: свои') : _('хостлисты: из пакета zapret')),
 				svc,
 				E('details', {}, [ E('summary', { 'style': 'cursor:pointer' }, _('как проверяются стратегии')),
-					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд, весь каталог — около 9 минут; кнопка «подобрать» у строки проверяет только её стратегии. С галочкой «применить лучшую» стратегия меняется, только если лучшая открывает больше текущей и больше, чем без обхода; по расписанию — так же, но выключенные основную и YouTube он не включает.')) ])
+					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд. «Подобрать» у строки проверяет только её стратегии и меняет стратегию, только если лучшая открывает больше текущей и больше, чем без обхода; по расписанию — так же, но выключенную категорию не включает.')) ])
 			])
 		]);
 	},

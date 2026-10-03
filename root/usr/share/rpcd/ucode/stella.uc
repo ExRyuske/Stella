@@ -90,7 +90,8 @@ const SETTINGS = {
 	zapret_games_fake: { title: 'Подделка для игр', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
 	zapret_discord_fake: { title: 'Подделка для Discord', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+\.bin$/) != null },
 	zapret_exclude: { title: 'Исключения Zapret', def: '', apply: 'reload', check: (v) => v in [ '', 'zms', 'fs', 'all' ] },
-	zapret_test_interval: { title: 'Автоподбор по расписанию', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
+	zapret_test_main: { title: 'Автоподбор основной', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
+	zapret_test_yt: { title: 'Автоподбор YouTube', def: '0', apply: 'reload', check: (v) => match(v, /^[0-9]{1,3}$/) != null },
 	zapret_tcp_ports: { title: 'Порты TCP', def: '80,443', apply: 'reload', check: PORTS },
 	zapret_udp_ports: { title: 'Порты UDP', def: '443', apply: 'reload', check: PORTS }
 };

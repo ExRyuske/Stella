@@ -909,10 +909,12 @@ function cmd_zapret_test(...argv) {
 	let cur_name = opt('main', 'zapret_strategy', '') || match(cur_lines[0] || '', /^#(.+)$/)?.[1] || '';
 	let list = test_list(zapret_catalog(), scope, { name: cur_name, args: cur_args });
 	system(`mkdir -p ${RUN_DIR} ${shq(ZAPRET_DIR)}`);
+	// Ход проверки для интерфейса; scope — у какой категории его показывать.
 	let progress = `${RUN_DIR}/ztest.json`;
+	writefile(progress, sprintf('%J', { state: 'running', done: 0, total: 0, scope }));
 	// Без nfqws проверять нечего: каждая стратегия записалась бы «ошибкой».
 	let fail = (msg) => {
-		writefile(progress, sprintf('%J', { state: 'done', done: 0, total: 0, message: msg }));
+		writefile(progress, sprintf('%J', { state: 'done', done: 0, total: 0, scope, message: msg }));
 		warn(msg + '\n');
 		return 1;
 	};
@@ -943,7 +945,7 @@ function cmd_zapret_test(...argv) {
 	for (let i, st in list) {
 		if (readfile(stopf) != null)
 			break;
-		writefile(progress, sprintf('%J', { state: 'running', done: i, total: length(list), current: st.name }));
+		writefile(progress, sprintf('%J', { state: 'running', done: i, total: length(list), current: st.name, scope }));
 		let fam = (st.family == 'yv') ? 'yv' : 'general';
 		let hosts = zt_targets(fam);
 		let ok = zt_run(bin, st.args, hosts);
@@ -983,7 +985,7 @@ function cmd_zapret_test(...argv) {
 		}
 		msg = length(msgs) ? 'Применена ' + join(', ', msgs) : 'Текущие стратегии не хуже лучших из проверенных — оставлены';
 	}
-	writefile(progress, sprintf('%J', { state: readfile(stopf) != null ? 'stopped' : 'done', done: length(list), total: length(list), message: msg }));
+	writefile(progress, sprintf('%J', { state: readfile(stopf) != null ? 'stopped' : 'done', done: length(list), total: length(list), scope, message: msg }));
 	unlink(stopf);
 	print(msg, '\n');
 	return 0;
@@ -1214,8 +1216,16 @@ function cmd_tick() {
 	let st = read_json(state_path, {});
 	let now = time();
 	let hour = +trim(cmd_out('date +%H') || '12');
+	// Автоподбор Zapret по категориям — ночью (3–5 ч), только если Zapret используется; общая
+	// задача ztest — одна проверка за раз.
+	let ztest = (scope, key) => ({ name: `ztest_${scope}`, task: 'ztest',
+		every: +opt('main', key, '0') * 86400 - 3600,
+		since: () => +(read_json(`${ZAPRET_DIR}/results.json`, null)?.at || now),
+		when: () => hour >= 3 && hour < 5 && zapret_used(enabled_lists()),
+		cmd: `/usr/bin/stella zapret-test ${scope} --apply --scheduled` });
 	// Задачи по расписанию: every — период в секундах (0 и меньше — выключена); since — от
-	// чего отсчитывать, пока состояния нет (после загрузки); when — дополнительное условие.
+	// чего отсчитывать, пока состояния нет (после загрузки); when — дополнительное условие;
+	// task — общая блокировка, если не своя.
 	let jobs = [
 		{ name: 'update', every: +opt('main', 'sub_interval', '12') * 3600,
 		  since: () => newest_mtime(`${CACHE_DIR}/*.json`), cmd: '/usr/bin/stella update', reload: true },
@@ -1224,18 +1234,15 @@ function cmd_tick() {
 		// Режим «лучший по проверке»; проверка задержки занимает те же порты — тогда позже.
 		{ name: 'pick', every: (opt('main', 'select_mode', 'single') == 'best') ? +opt('main', 'best_interval', '6') * 3600 : 0,
 		  since: () => stat(STAB_PATH)?.mtime ?? 0, when: () => !task_busy('ping'), cmd: '/usr/bin/stella pick --apply' },
-		// Автоподбор Zapret — ночью (3–5 ч), только если Zapret используется. Меняет стратегию,
-		// только если лучшая открывает больше текущей, и не включает выключенные.
-		{ name: 'ztest', every: +opt('main', 'zapret_test_interval', '0') * 86400 - 3600,
-		  since: () => +(read_json(`${ZAPRET_DIR}/results.json`, null)?.at || now),
-		  when: () => hour >= 3 && hour < 5 && zapret_used(enabled_lists()), cmd: '/usr/bin/stella zapret-test all --apply --scheduled' }
+		ztest('main', 'zapret_test_main'),
+		ztest('yv', 'zapret_test_yt')
 	];
 	// После обновлений — reload: init передаёт procd контрольную сумму конфига xray, и тот
 	// перезапускается, только если конфиг изменился (например, у узла сменились ключи).
 	let reload = false;
 	for (let j in jobs) {
 		st[j.name] ??= j.since();
-		if (j.every > 0 && now - st[j.name] >= j.every && (!j.when || j.when()) && run_locked(j.name, j.cmd)) {
+		if (j.every > 0 && now - st[j.name] >= j.every && (!j.when || j.when()) && run_locked(j.task || j.name, j.cmd)) {
 			st[j.name] = now;
 			if (j.reload)
 				reload = true;

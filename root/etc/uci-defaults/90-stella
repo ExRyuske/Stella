@@ -1,4 +1,11 @@
 #!/bin/sh
 # Переименование анонимных секций от старых версий и ручного `uci add`.
 /usr/bin/stella migrate >/dev/null 2>&1
+# Общее расписание автоподбора Zapret (до 0.1.10) — теперь у основной и YouTube своё.
+if v=$(uci -q get stella.main.zapret_test_interval); then
+	uci set stella.main.zapret_test_main="$v"
+	uci set stella.main.zapret_test_yt="$v"
+	uci delete stella.main.zapret_test_interval
+	uci commit stella
+fi
 exit 0
