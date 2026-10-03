@@ -130,7 +130,7 @@ return view.extend({
 				this.polling = null;
 			}
 			if (wasUpdating && !data.updating && data.update_log)
-				ui.addNotification(_('Обновление подписок'), E('pre', { 'style': 'white-space:pre-wrap' }, data.update_log), 'info');
+				ui.addNotification(_('Обновление подписок'), E('pre', { 'style': 'white-space:pre-wrap' }, [ data.update_log ]), 'info');
 		});
 	},
 
@@ -184,7 +184,7 @@ return view.extend({
 							for (const e of (r.errors || []))
 								msg.push(_('Не разобрано «%s…»: %s').format(e.line, e.error));
 							if (msg.length)
-								ui.addNotification(null, msg.map((m) => E('p', {}, m)), (r.errors && r.errors.length) ? 'warning' : 'info');
+								ui.addNotification(null, msg.map((m) => E('p', {}, [ m ])), (r.errors && r.errors.length) ? 'warning' : 'info');
 							return this.refresh();
 						});
 					})
@@ -249,11 +249,11 @@ return view.extend({
 			node = [ E('span', { 'class': 'st-dim' }, d.picking ? _('Подбираю узел…') : _('Узел ещё не подобран.')) ];
 		else if (auto && known.length >= 2)
 			node = [ E('strong', {}, _('Автовыбор из %d ★').format(known.length)), ' ',
-				E('span', { 'class': 'st-dim' }, n ? _('запасной: %s').format(n.name) : _('запасной не выбран')) ];
+				E('span', { 'class': 'st-dim' }, [ n ? _('запасной: %s').format(n.name) : _('запасной не выбран') ]) ];
 		else if (auto)
 			node = [ E('span', { 'class': 'st-bad' }, _('Отметьте ★ хотя бы два узла для автовыбора.')) ];
 		else if (n)
-			node = [ E('strong', {}, n.name), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id], d.stability[n.id]))) ];
+			node = [ E('strong', {}, [ n.name ]), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id], d.stability[n.id]))) ];
 		else if (d.selected)
 			node = [ E('span', { 'class': 'st-bad' }, _('Выбранный узел пропал из списка — выберите другой.')) ];
 		else
@@ -265,7 +265,7 @@ return view.extend({
 		const pick = best ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
 			_('из'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => set('best_from')(ev.target.value) }, [
 				E('option', { 'value': '', 'selected': cfg.best_from ? null : '' }, _('всех подписок и ссылок')),
-				...subs.map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.best_from ? '' : null }, x.name))
+				...subs.map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.best_from ? '' : null }, [ x.name ]))
 			]),
 			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
 			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
@@ -369,7 +369,7 @@ return view.extend({
 		}
 
 		const errors = d.errors.map((e) => E('div', { 'class': 'alert-message warning' },
-			_('Ссылка «%s» не разобрана: %s').format(e.name, e.error)));
+			[ _('Ссылка «%s» не разобрана: %s').format(e.name, e.error) ]));
 
 		if (!d.sources.length) {
 			dom.content(this.groupsBox, [ ...errors, E('p', {}, _('Серверов пока нет. Нажмите «Добавить» и вставьте подписку или ссылку.')) ]);
@@ -397,7 +397,7 @@ return view.extend({
 						'click': ui.createHandlerFn(this, 'handleAuto', undefined, n.id, !star)
 					}, sui.icon('star', star))),
 					E('td', {}, [
-						sel ? E('strong', {}, '✓ ' + n.name) : n.name,
+						sel ? E('strong', {}, [ '✓ ' + n.name ]) : n.name,
 						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : '',
 						E('span', { 'class': 'st-type' }, typeLabel(n))
 					]),
@@ -412,7 +412,7 @@ return view.extend({
 
 			const el = E('details', { 'class': 'st-group', 'open': (q || this.open.has(src.id)) ? '' : null }, [
 				E('summary', { 'class': 'st-summary' }, [
-					E('span', { 'class': 'st-title' }, isSub ? src.name : _('Отдельные ссылки')),
+					E('span', { 'class': 'st-title' }, [ isSub ? src.name : _('Отдельные ссылки') ]),
 					(this.metas[src.id] = E('span', { 'class': 'st-meta' }, this.metaText(src))),
 					E('span', { 'class': 'st-actions' }, [
 						sui.iconButton('ping', _('Проверить задержку узлов'), () => this.handlePing(list.map((n) => n.id))),

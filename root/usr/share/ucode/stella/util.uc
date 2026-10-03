@@ -14,6 +14,17 @@ export function b64dec_loose(s) {
 	return b64dec(s);
 };
 
+// json() на невалидном тексте бросает исключение — а тексты из подписок и файлов бывают
+// битыми. Здесь вместо исключения — null.
+export function try_json(s) {
+	try {
+		return json(s);
+	}
+	catch (e) {
+		return null;
+	}
+};
+
 export function urldecode(s) {
 	if (type(s) != 'string')
 		return s;
@@ -58,14 +69,16 @@ export function parse_url(s) {
 	if (qi >= 0)
 		rest = substr(rest, 0, qi);
 
-	let pi = index(rest, '/');
-	res.path = (pi < 0) ? '' : pctdecode(substr(rest, pi));
-	if (pi >= 0)
-		rest = substr(rest, 0, pi);
-
+	// userinfo — до последнего «@», и отделяется раньше пути: в нём бывает «/» (обычный,
+	// не url-safe base64 у ss://), а в адресе и порте «@» не бывает.
 	let ai = rindex(rest, '@');
 	res.userinfo = (ai < 0) ? null : substr(rest, 0, ai);
-	let hostport = (ai < 0) ? rest : substr(rest, ai + 1);
+	if (ai >= 0)
+		rest = substr(rest, ai + 1);
+
+	let pi = index(rest, '/');
+	res.path = (pi < 0) ? '' : pctdecode(substr(rest, pi));
+	let hostport = (pi < 0) ? rest : substr(rest, 0, pi);
 
 	let hm = match(hostport, /^\[([^\]]+)\](:(.*))?$/) || match(hostport, /^([^:]*)(:(.*))?$/);
 	if (!hm)

@@ -5,6 +5,7 @@
 import { readfile, writefile, stat } from 'fs';
 import { parse } from 'stella.uri';
 import { parse_list } from 'stella.lists';
+import { try_json } from 'stella.util';
 
 export const CACHE_DIR = getenv('STELLA_CACHE_DIR') || '/etc/stella/subs';
 export const RUN_DIR = getenv('STELLA_RUN_DIR') || '/var/run/stella';
@@ -13,9 +14,9 @@ export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
 // замена пропавшему узлу. Рядом с кэшем подписок, но не в нём (там чистятся *.json).
 export const STAB_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability.json';
 
-// JSON из файла; нет файла — def.
+// JSON из файла; нет файла или он битый (оборвалась запись) — def.
 export function read_json(path, def) {
-	return json(readfile(path) || 'null') ?? def;
+	return try_json(readfile(path) || 'null') ?? def;
 };
 
 function as_array(v) {

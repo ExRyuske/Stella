@@ -120,8 +120,8 @@ return view.extend({
 				const sp = (dev.policy == 'global') ? this.special(dev) : '';
 				return E('tr', {}, [
 					E('td', {}, [
-						E('div', {}, label(dev) || E('span', { 'class': 'st-dim' }, _('без имени'))),
-						sp ? E('div', { 'class': 'st-dim', 'title': _('+ список только для этого устройства, − список не действует на него') }, sp) : ''
+						E('div', {}, [ label(dev) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
+						sp ? E('div', { 'class': 'st-dim', 'title': _('+ список только для этого устройства, − список не действует на него') }, [ sp ]) : ''
 					]),
 					E('td', { 'class': 'st-dim' }, [ E('div', {}, dev.ip || ''), E('div', {}, dev.mac) ]),
 					E('td', {}, E('select', {

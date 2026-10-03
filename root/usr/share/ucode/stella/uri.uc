@@ -12,7 +12,7 @@
 
 'use strict';
 
-import { b64dec_loose, urldecode, pctdecode, parse_url, valid_port, split_list } from 'stella.util';
+import { b64dec_loose, urldecode, pctdecode, parse_url, valid_port, split_list, try_json } from 'stella.util';
 
 const NETWORKS = {
 	'': 'raw', raw: 'raw', tcp: 'raw',
@@ -37,7 +37,7 @@ const SS_METHODS = {
 function json_param(node, q, key) {
 	if (!q[key])
 		return null;
-	let v = json(q[key]);
+	let v = try_json(q[key]);
 	if (type(v) != 'object') {
 		push(node.warnings, `параметр ${key} не является JSON-объектом, пропущен`);
 		return null;
@@ -166,7 +166,7 @@ function parse_vmess(s, u) {
 	let body = substr(s, length('vmess://'));
 	let hash = index(body, '#');
 	let raw = b64dec_loose((hash < 0) ? body : substr(body, 0, hash));
-	let j = raw ? json(raw) : null;
+	let j = raw ? try_json(raw) : null;
 
 	if (type(j) != 'object') {
 		if (!u || !u.userinfo)
@@ -282,7 +282,7 @@ function parse_hysteria2(u) {
 		node.port = valid_port(ports);
 	else if (match(ports, /^[0-9, -]+$/)) {
 		node.ports = replace(ports, / /g, '');
-		node.port = valid_port(match(ports, /^[0-9]+/)[0]);
+		node.port = valid_port(match(node.ports, /^[0-9]+/)?.[0]);
 	}
 	if (q.mport)
 		node.ports = replace(q.mport, / /g, '');

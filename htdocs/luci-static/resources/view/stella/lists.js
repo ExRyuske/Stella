@@ -148,6 +148,21 @@ function lines(text) {
 	return text.split(/\r?\n/).map((s) => s.trim()).filter((s) => s);
 }
 
+// Кириллический домен (сайт.рф) — в punycode: dnsmasq понимает только его. У ссылки
+// переводится адрес целиком, как это делает браузер.
+function puny(s) {
+	if (!(/[^\x00-\x7f]/).test(s))
+		return s;
+	const url = (/^[a-z]+:\/\//i).test(s);
+	try {
+		const u = new URL(url ? s : 'http://' + s);
+		return url ? u.href : u.hostname;
+	}
+	catch (e) {
+		return s;
+	}
+}
+
 // Ссылка на файл списка (а не на сайт): по расширению или по известному хранилищу.
 function isListUrl(s) {
 	return /^https?:\/\/\S+\.(lst|list|txt|conf|yaml|yml)(\?\S*)?$/i.test(s) || /^https?:\/\/raw\.githubusercontent\.com\//i.test(s);
@@ -187,7 +202,7 @@ return view.extend({
 			else
 				this.renderAll();
 			if ((wasTesting || this.zStarted) && !zc.testing && zc.progress && zc.progress.message)
-				ui.addNotification(null, E('p', {}, _('Автоподбор: %s').format(zc.progress.message)), 'info');
+				ui.addNotification(null, E('p', {}, [ _('Автоподбор: %s').format(zc.progress.message) ]), 'info');
 			if (zc.testing || !this.zStarted || (zc.progress && zc.progress.message))
 				this.zStarted = false;
 			const busy = d.updating || zc.testing || zc.updating || zi.installing;
@@ -200,7 +215,7 @@ return view.extend({
 				this.polling = null;
 			}
 			if (was && !d.updating && d.update_log)
-				ui.addNotification(_('Обновление списков'), E('pre', { 'style': 'white-space:pre-wrap' }, d.update_log), 'info');
+				ui.addNotification(_('Обновление списков'), E('pre', { 'style': 'white-space:pre-wrap' }, [ d.update_log ]), 'info');
 		});
 	},
 
@@ -255,7 +270,7 @@ return view.extend({
 		const boxes = devs.map((d) => [ d, E('input', { 'type': 'checkbox', 'checked': l.macs.indexOf(d.mac) >= 0 ? '' : null }) ]);
 		const devList = E('div', { 'class': 'st-devs' }, boxes.map(([ d, cb ]) => E('label', { 'class': 'st-dev' }, [
 			cb,
-			E('span', { 'class': 'st-name' }, label(d) || E('span', { 'class': 'st-dim' }, _('без имени'))),
+			E('span', { 'class': 'st-name' }, [ label(d) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
 			E('span', { 'class': 'st-dim' }, d.ip || d.mac)
 		])));
 		const mode = E('select', { 'class': 'cbi-input-select', 'style': 'width:auto' }, [
@@ -271,7 +286,7 @@ return view.extend({
 			const macs = boxes.filter(([ , cb ]) => cb.checked).map(([ d ]) => d.mac);
 			if (mode.value != 'all' && !macs.length)
 				return ui.addNotification(null, E('p', {}, _('Выберите хотя бы одно устройство.')), 'warning');
-			const all = lines(text.value);
+			const all = lines(text.value).map(puny);
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
 
 			if (!isNew) {
@@ -293,7 +308,7 @@ return view.extend({
 			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, mode.value, macs));
 		};
 
-		ui.showModal(isNew ? _('Новый список') : _('Список «%s»').format(l.name), [
+		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name,
 				isNew ? E('small', { 'class': 'st-dim' }, _('Если не указать — по выбранному, например «YouTube, Discord».')) : '' ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Что делать с этими сайтами')), actSel ]),
@@ -319,7 +334,7 @@ return view.extend({
 		if (l.devices_mode == 'all')
 			return '';
 		const names = l.macs.map((m) => this.devNames[m] || m);
-		return E('span', { 'class': 'st-scope' }, ' · ' + (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')));
+		return E('span', { 'class': 'st-scope' }, [ ' · ' + (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')) ]);
 	},
 
 	/* Zapret */
@@ -387,7 +402,7 @@ return view.extend({
 			const v = cur(key, f);
 			return E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ [key]: ev.target.value }) }, [
 				E('option', { 'value': '', 'selected': v ? null : '' }, _('выключено')),
-				...fam(f).map((st) => E('option', { 'value': st.name, 'selected': st.name == v ? '' : null }, st.name + (res[st.name] ? '  · ' + score(st.name) : '')))
+				...fam(f).map((st) => E('option', { 'value': st.name, 'selected': st.name == v ? '' : null }, [ st.name + (res[st.name] ? '  · ' + score(st.name) : '') ]))
 			]);
 		};
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
@@ -416,7 +431,7 @@ return view.extend({
 			E('option', { 'value': '', 'selected': (!zc.current && !zc.custom) ? '' : null }, _('выключено')),
 			...Object.keys(groups).map((f) => E('optgroup', { 'label': FAMILIES[f] || f },
 				groups[f].map((st) => E('option', { 'value': st.name, 'selected': (!zc.custom && st.name == zc.current) ? '' : null },
-					st.name + (res[st.name] ? '  · ' + score(st.name) : ''))))),
+					[ st.name + (res[st.name] ? '  · ' + score(st.name) : '') ])))),
 			E('option', { 'value': '__custom', 'selected': zc.custom ? '' : null }, zc.custom ? _('своя стратегия') : _('своя стратегия…'))
 		]);
 
@@ -428,9 +443,9 @@ return view.extend({
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
 		else
-			state = E('span', { 'class': 'st-bad' }, (zc.missing && zc.missing.length)
+			state = E('span', { 'class': 'st-bad' }, [ (zc.missing && zc.missing.length)
 				? _('не запущен — нет файлов: %s').format(zc.missing.join(', '))
-				: _('не запущен — стратегия не подходит к nfqws'));
+				: _('не запущен — стратегия не подходит к nfqws') ]);
 
 		// Автоподбор — у каждой категории свой: кнопка и расписание. Во время проверки у её
 		// категории — ход проверки и «Остановить», у остальных — ничего.
@@ -438,7 +453,7 @@ return view.extend({
 		const pick = (scope, key, has) => {
 			if (zc.testing)
 				return (p.scope && p.scope != scope) ? [] : [
-					(this.zProgress = E('em', { 'class': 'spinning' }, p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…'))),
+					(this.zProgress = E('em', { 'class': 'spinning' }, [ p.total ? _('проверяю %d из %d: %s').format(p.done + 1, p.total, p.current || '') : _('готовлюсь…') ])),
 					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZTestStop())) }, _('Остановить'))
 				];
 			return [
@@ -463,11 +478,11 @@ return view.extend({
 				const r = res[n];
 				const pct = (r.ok > 0 && r.total) ? Math.round(100 * r.ok / r.total) : 0;
 				return E('tr', { 'class': isCur(n, r) ? 'st-cur' : '' }, [
-					E('td', {}, n),
+					E('td', {}, [ n ]),
 					E('td', { 'class': 'st-dim' }, FAMILIES[r.family] || r.family),
 					// У ошибки — причина: nfqws не принял ключи, нет файла и т. п.
 					r.ok >= 0 ? E('td', { 'style': 'white-space:nowrap' }, [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ])
-						: E('td', { 'class': 'st-bad' }, r.error ? _('ошибка: %s').format(r.error) : _('ошибка')),
+						: E('td', { 'class': 'st-bad' }, [ r.error ? _('ошибка: %s').format(r.error) : _('ошибка') ]),
 					E('td', { 'class': 'st-act' }, isCur(n, r) ? _('текущая') :
 						E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => apply(n)) }, _('Применить')))
 				]);
@@ -479,18 +494,17 @@ return view.extend({
 			_('служба zapret:') + ' ',
 			zi.service_running ? E('span', { 'class': 'st-bad' }, _('работает — будет мешать')) :
 			zi.service_enabled ? E('span', { 'class': 'st-bad' }, _('включена в автозапуск')) :
-			zi.leftover_tables ? _('остановлена, остались её правила') : _('остановлена'),
-			svcBad ? E('button', {
+			_('остановлена, остались её правила'),
+			E('button', {
 				'class': 'btn cbi-button-negative', 'style': 'padding:0 .6em;line-height:1.7em;min-height:0',
 				'click': ui.createHandlerFn(this, () => callZapretOff().then((r) => {
 					if (r.running)
 						ui.addNotification(null, E('p', {}, _('nfqws службы zapret всё ещё работает — возможно, запущен другой обход (zapret2, zapret-manager).')), 'warning');
 					return this.refresh();
 				}))
-			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила')) : ''
+			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила'))
 		]);
 
-		const hl = (zc.hostlists || []).every((h) => h.own);
 		if (!zi.binaries.length)
 			return dom.content(this.zapretBox, [
 				E('h3', { 'style': 'margin-top:0' }, 'Zapret'),
@@ -519,12 +533,8 @@ return view.extend({
 			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
 				_('Игры и голос Discord ходят по IP вне списков — Zapret их коснётся, только если вверху выбрано «Всё, что не попало в списки: через Zapret».')) : '',
 			results,
-			E('div', { 'class': 'st-zfoot st-dim' }, [
-				E('span', {}, hl ? _('хостлисты: свои') : _('хостлисты: из пакета zapret')),
-				svc,
-				E('details', {}, [ E('summary', { 'style': 'cursor:pointer' }, _('как проверяются стратегии')),
-					E('div', { 'style': 'max-width:46em;margin-top:.3em' }, _('Для каждой стратегии запускается отдельный nfqws на своей очереди, и в неё уходит только трафик самой проверки (исходящие порты 20000–20999) — трафик устройств не трогается и работающая стратегия не меняется. Сначала замеряется, сколько целей открывается без обхода, затем для каждой стратегии: общие — по хостам за зарубежными CDN (обрыв на 16–20 КБ, набор hyperion-cs/dpi-checkers) и YouTube, стратегии YouTube — по доменам YouTube. Цель считается открытой, если ответ пришёл целиком или скачано больше 24 КБ. Одна стратегия — около 9 секунд. «Подобрать» у строки проверяет только её стратегии и меняет стратегию, только если лучшая открывает больше текущей и больше, чем без обхода; по расписанию — так же, но выключенную категорию не включает.')) ])
-			])
+			// Внизу — только предупреждение о конфликте с отдельной службой zapret.
+			svcBad ? E('div', { 'class': 'st-zfoot st-dim' }, svc) : ''
 		]);
 	},
 
@@ -558,7 +568,7 @@ return view.extend({
 			]),
 			E('td', {}, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
 				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, ev.target.checked)) })),
-			E('td', {}, [ E('div', {}, l.name), E('div', { 'class': 'st-dim' }, [ sourceLabel(l), this.scopeLabel(l) ]) ]),
+			E('td', {}, [ E('div', {}, [ l.name ]), E('div', { 'class': 'st-dim' }, [ sourceLabel(l), this.scopeLabel(l) ]) ]),
 			E('td', { 'class': 'st-dim' }, [
 				E('div', {}, countLabel(l)),
 				l.updated ? E('div', {}, new Date(l.updated * 1000).toLocaleString('ru-RU')) : ''

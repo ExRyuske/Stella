@@ -164,6 +164,26 @@ export function nft_script(opts) {
 	return join('\n', out);
 };
 
+// Команды, возвращающие в пересозданные сеты адреса, которые туда уже положил dnsmasq.
+// saved — { сет: [IP] } из прежней таблицы; prev и cur — { сет: [домены и подсети] } при
+// прошлом и нынешнем включении. Если из списка что-то убрали, его адреса не возвращаются:
+// по ним не понять, чей это IP, а убранный сайт шёл бы по правилу списка до перезагрузки.
+// Сет снова наполнится, как только устройства переспросят DNS.
+export function restore_script(saved, prev, cur) {
+	let out = [];
+	for (let id, entries in cur) {
+		if (!length(saved[id]))
+			continue;
+		let now = {};
+		for (let e in entries)
+			now[e] = true;
+		if (length(filter(prev[id] || [], (e) => !now[e])))
+			continue;
+		push(out, `add element inet stella ${id} { ${join(', ', saved[id])} }`);
+	}
+	return out;
+};
+
 // dnsmasq: DNS только через xray; IP доменов из списков — в сеты nftables.
 // Домен из нескольких списков получает все их сеты одной строкой.
 export function dnsmasq_conf(opts) {

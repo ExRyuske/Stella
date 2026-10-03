@@ -7,9 +7,9 @@ import { writefile, unlink, readfile } from 'fs';
 import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config } from 'stella.xray';
-import { stab_entry, stab_better, best_node } from 'stella.store';
+import { stab_entry, stab_better, best_node, read_json } from 'stella.store';
 import { parse_list } from 'stella.lists';
-import { nft_script, dnsmasq_conf } from 'stella.firewall';
+import { nft_script, dnsmasq_conf, restore_script } from 'stella.firewall';
 import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
@@ -82,6 +82,18 @@ const CASES = [
 	{ link: `ss://${b64enc('aes-256-gcm:x')}@1.1.1.1:1?plugin=obfs-local`, error: true },
 	{ link: `wireguard://x@1.1.1.1:51820`, error: true },
 	{ link: `vless://${UUID}@srv.example.com:99999?security=tls`, error: true },
+	// Обычный (не url-safe) base64 в userinfo: в нём «/».
+	{
+		link: `ss://${b64enc('aes-256-gcm:a???b')}@1.2.3.4:8388#slash`,
+		expect: { method: 'aes-256-gcm', password: 'a???b', address: '1.2.3.4', port: 8388 }
+	},
+	// Битый JSON в параметре — предупреждение, а не ошибка всего узла.
+	{
+		link: `vless://${UUID}@srv.example.com:443?type=xhttp&security=tls&extra=notjson&fm=%7Bbad#bad json`,
+		expect: { network: 'xhttp', extra: null, warnings: 2 }
+	},
+	{ link: `vmess://${b64enc('not json')}`, error: true },
+	{ link: `hysteria2://pw@hy.example.com:-1#bad port`, error: true },
 ];
 
 let failed = 0, passed = 0;
@@ -164,6 +176,21 @@ if (length(sub.nodes) == 2 && !length(sub.errors))
 	passed++;
 else
 	fail('подписка открытым текстом');
+
+// Битые строки подписки пропускаются, а не обрывают разбор всей подписки.
+sub = decode(join('\n', [ 'hysteria2://pw@h.example.com:,443#bad', `vmess://${b64enc('{bad')}`, CASES[0].link ]), 'sub4');
+if (length(sub.nodes) == 1 && length(sub.errors) == 2)
+	passed++;
+else
+	fail(`подписка с битыми строками: ${length(sub.nodes)} узлов, ${length(sub.errors)} ошибок`);
+
+// Битый файл (оборвалась запись) — значение по умолчанию, а не исключение.
+writefile(`${TMP}/stella-bad.json`, '{"a": [');
+if (read_json(`${TMP}/stella-bad.json`, 'def') == 'def' && read_json(`${TMP}/stella-none.json`, 'def') == 'def')
+	passed++;
+else
+	fail('read_json: битый файл');
+unlink(`${TMP}/stella-bad.json`);
 
 // Конфиг без узла — всё напрямую, должен быть валиден.
 if (xray_test(null, 'без узла'))
@@ -260,6 +287,17 @@ if (ok)
 	passed++;
 else
 	fail(`nft_script:\n${nft}`);
+
+// Возврат адресов в сеты: в список только добавили — возвращаются; из списка что-то убрали —
+// нет (иначе убранный сайт шёл бы по правилу до перезагрузки); прежнего состояния нет — да.
+let rs = restore_script(
+	{ list_a: [ '1.1.1.1' ], list_b: [ '2.2.2.2' ], list_c: [ '3.3.3.3' ], zapret_excl: [ '4.4.4.4', '5.5.5.5' ] },
+	{ list_a: [ 'a.com' ], list_b: [ 'b.com', '9.9.9.9' ], list_c: [ 'c.com' ] },
+	{ list_a: [ 'a.com', 'new.com' ], list_b: [ 'b.com' ], list_c: [], zapret_excl: [ 'x.ru' ], list_d: [ 'd.com' ] });
+if (sprintf('%J', rs) == sprintf('%J', [ 'add element inet stella list_a { 1.1.1.1 }', 'add element inet stella zapret_excl { 4.4.4.4, 5.5.5.5 }' ]))
+	passed++;
+else
+	fail(`restore_script: ${sprintf('%J', rs)}`);
 
 // Вставленная ссылка на сайт превращается в домен.
 if (sprintf('%J', parse_list('https://www.Example.com/path?q=1\nhttp://2ip.io').domains) == '[ "2ip.io", "www.example.com" ]')

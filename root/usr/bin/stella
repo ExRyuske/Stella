@@ -9,7 +9,7 @@ import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config, outbound } from 'stella.xray';
 import { fnv1a } from 'stella.util';
-import { nft_script, dnsmasq_conf, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
+import { nft_script, dnsmasq_conf, restore_script, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
 import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
@@ -367,10 +367,16 @@ function fw_up() {
 		return 1;
 	}
 
-	let restore = [];
-	for (let id in [ ...map(o.lists, (l) => l.id), ...(o.nft.zapret ? [ 'zapret_excl' ] : []) ])
-		if (length(saved[id]))
-			push(restore, `add element inet stella ${id} { ${join(', ', saved[id])} }`);
+	// Содержимое сетов запоминается: в следующий раз адреса не вернутся в сет списка, из
+	// которого что-то убрали.
+	let cur = {};
+	for (let l in o.dnsmasq.lists)
+		cur[l.id] = l.domains;
+	for (let l in o.lists)
+		cur[l.id] = [ ...cur[l.id], ...l.cidrs ];
+	let state = `${CONF_DIR}/fw-sets.json`;
+	let restore = restore_script(saved, read_json(state, {}), cur);
+	writefile(state, sprintf('%J', cur));
 	if (length(restore)) {
 		writefile(`${CONF_DIR}/fw-restore.nft`, join('\n', restore) + '\n');
 		system(`nft -f ${CONF_DIR}/fw-restore.nft 2>/dev/null`);
@@ -815,8 +821,9 @@ function zt_targets(family) {
 		return YT_TARGETS;
 	let suite = read_json(`${ZAPRET_DIR}/suite.json`, null);
 	let hosts = [];
+	// Хост идёт в командную строку, а файл скачан из чужого репозитория — только имя хоста.
 	for (let s in (type(suite) == 'array') ? suite : [])
-		if (s.host && !match(s.id || '', /GH-HPRN/) && length(hosts) < 12)
+		if (type(s.host) == 'string' && match(s.host, /^[A-Za-z0-9.-]+$/) && !match(s.id || '', /GH-HPRN/) && length(hosts) < 12)
 			push(hosts, s.host);
 	if (!length(hosts))
 		hosts = [ 'cdn.apple-mapkit.com', 'amplifon.com', 'cdn.eso.org', 'go.coveo.com' ];
@@ -964,6 +971,9 @@ function cmd_zapret_test(...argv) {
 		// в основную. Меняется, только если лучшая открывает больше текущей и больше, чем
 		// без обхода. Выключенная категория — «текущей» нет; по расписанию её не включаем.
 		let yt_cur = opt('main', 'zapret_yt', '');
+		// Старое «1» — первый вариант набора, как в zapret_parts.
+		if (yt_cur == '1')
+			yt_cur = filter(zapret_catalog(), (s) => s.family == 'yv')[0]?.name || '';
 		for (let yt in [ false, true ]) {
 			let on = yt ? !(yt_cur in [ '', '0' ]) : length(cur_args) > 0;
 			if (scheduled && !on)

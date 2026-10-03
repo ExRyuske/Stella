@@ -61,8 +61,8 @@ return view.extend({
 
 		let node;
 		if (st.node)
-			node = [ E('strong', {}, st.node.name), ' ',
-				E('span', { 'class': 'st-dim' }, st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source) ];
+			node = [ E('strong', {}, [ st.node.name ]), ' ',
+				E('span', { 'class': 'st-dim' }, [ st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source ]) ];
 		else if (st.node_id)
 			node = [ E('span', { 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
 		else if (st.select_mode == 'auto')
@@ -135,7 +135,7 @@ return view.extend({
 
 		const line = (label, cur, extra) => [ E('span', { 'class': 'st-k' }, label), E('span', {}, [ cur, ' ', ...extra ]) ];
 		const btn = (what, text) => E('button', { 'class': 'btn cbi-button-positive', 'disabled': u.installing ? '' : null,
-			'click': ui.createHandlerFn(this, 'handleInstall', what) }, text);
+			'click': ui.createHandlerFn(this, 'handleInstall', what) }, [ text ]);
 
 		let stExtra = [];
 		if (st && st.available)
@@ -202,7 +202,7 @@ return view.extend({
 				this.updPoll = null;
 			}
 			if (was && !u.installing) {
-				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, u.log || _('Готово.')), 'info');
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, [ u.log || _('Готово.') ]), 'info');
 				setTimeout(() => location.reload(), 3000);
 			}
 		}).catch(() => {
@@ -235,7 +235,7 @@ return view.extend({
 		return callCheck().then((r) => {
 			dom.content(this.checkBox, [
 				...(r.steps || []).map((s) => E('div', {}, [
-					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, s.name), ' — ', s.detail
+					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, [ s.name ]), ' — ', s.detail
 				])),
 				again
 			]);
