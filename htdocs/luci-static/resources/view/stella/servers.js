@@ -243,9 +243,14 @@ return view.extend({
 		const n = d.nodes.find((x) => x.id == d.selected);
 		const known = d.auto_nodes.filter((id) => d.nodes.find((x) => x.id == id));
 		const auto = d.select_mode == 'auto', best = d.select_mode == 'best';
+		// Работает резервный канал mwan3 — xray идёт через его узел.
+		const bn = d.backup && d.nodes.find((x) => x.id == this.cfg.backup_node);
 
 		let node;
-		if (best && !n && !d.selected)
+		if (bn)
+			node = [ E('strong', {}, [ bn.name ]), ' ', E('span', { 'class': 'st-dim' }, typeLabel(bn)), ' ',
+				E('span', { 'class': 'st-mid' }, _('резервный канал %s — основной недоступен').format(d.backup)) ];
+		else if (best && !n && !d.selected)
 			node = [ E('span', { 'class': 'st-dim' }, d.picking ? _('Подбираю узел…') : _('Узел ещё не подобран.')) ];
 		else if (auto && known.length >= 2)
 			node = [ E('strong', {}, _('Автовыбор из %d ★').format(known.length)), ' ',
@@ -269,8 +274,34 @@ return view.extend({
 			]),
 			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
 			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
-				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null, 'click': ui.createHandlerFn(this, () => callPick().then(() => this.refresh())) }, _('Подобрать сейчас')),
+				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null, 'click': ui.createHandlerFn(this, () => callPick().then((r) => {
+					if (r && r.error)
+						ui.addNotification(null, E('p', {}, r.error), 'warning');
+					return this.refresh();
+				})) }, _('Подобрать сейчас')),
 			E('span', { 'class': 'st-dim', 'title': _('Через каждый узел — 5 запросов подряд. Лучший — с наибольшей долей ответов, при равной — с меньшими задержкой и разбросом. Узел меняется, только если новый заметно лучше текущего.') }, _('по задержке и стабильности'))
+		]) : '';
+
+		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него.
+		// Без mwan3 строки нет.
+		const ifs = d.mwan3 || [];
+		const save = (key, v) => this.setting(key, v).then(() => this.refresh()).then(() => this.renderCurrent());
+		const bsel = cfg.backup_node && d.nodes.find((x) => x.id == cfg.backup_node);
+		const backup = (ifs.length || cfg.backup_iface) ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
+			_('Резервный канал'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => save('backup_iface', ev.target.value) }, [
+				E('option', { 'value': '', 'selected': cfg.backup_iface ? null : '' }, _('нет')),
+				...ifs.map((i) => E('option', { 'value': i.name, 'selected': i.name == cfg.backup_iface ? '' : null },
+					'%s — %s'.format(i.name, i.online ? _('в сети') : _('не в сети')))),
+				(cfg.backup_iface && !ifs.find((i) => i.name == cfg.backup_iface)) ?
+					E('option', { 'value': cfg.backup_iface, 'selected': '' }, _('%s — нет в mwan3').format(cfg.backup_iface)) : ''
+			]),
+			...(cfg.backup_iface ? [ _('через'), E('select', { 'class': 'cbi-input-select', 'style': 'max-width:22em', 'change': (ev) => save('backup_node', ev.target.value) }, [
+				E('option', { 'value': '', 'selected': bsel ? null : '' }, cfg.backup_node ? _('— узел пропал, выберите другой —') : _('— выберите узел —')),
+				...d.sources.map((src) => E('optgroup', { 'label': src.kind == 'subscription' ? src.name : _('Отдельные ссылки') },
+					d.nodes.filter((x) => x.source == src.id).map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.backup_node ? '' : null }, [ x.name ]))))
+			]) ] : []),
+			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) :
+				E('span', { 'class': 'st-dim', 'title': _('Когда основной канал падает и mwan3 пускает трафик только через резервный, xray переключается на выбранный узел, а когда основной возвращается — на прежний. Пока работает резервный канал, подбор узла по проверке не запускается.') }, _('когда основной недоступен'))
 		]) : '';
 
 		dom.content(this.currentBox, [
@@ -282,7 +313,8 @@ return view.extend({
 				E('option', { 'value': 'auto', 'selected': auto ? '' : null }, _('самый быстрый из ★')),
 				E('option', { 'value': 'best', 'selected': best ? '' : null }, _('лучший по проверке'))
 			]) ]),
-			pick
+			pick,
+			backup
 		]);
 	},
 
@@ -308,7 +340,7 @@ return view.extend({
 	},
 
 	signature(d) {
-		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.auto_nodes, d.errors.length, d.nodes.length,
+		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.auto_nodes, d.backup, d.mwan3, d.errors.length, d.nodes.length,
 			d.sources.map((x) => [ x.id, x.count, x.updated, x.enabled, x.name ]) ]);
 	},
 

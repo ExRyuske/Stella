@@ -106,6 +106,30 @@ export function load_devices(uci) {
 	return res;
 };
 
+/* ---- резервный канал mwan3 ---- */
+
+// Состояние интерфейсов mwan3 (online/offline): по этим файлам он сам решает, через какие
+// каналы пускать трафик.
+export const MWAN3_STATE = getenv('STELLA_MWAN3_STATE') || '/var/run/mwan3/iface_state';
+
+// Включённые IPv4-интерфейсы mwan3 и в сети ли они; mwan3 не установлен — пусто.
+export function mwan3_ifaces(uci) {
+	let res = [];
+	uci.foreach('mwan3', 'interface', (s) => {
+		if (s.enabled in [ '1', 'on', 'yes', 'true' ] && s.family != 'ipv6')
+			push(res, { name: s['.name'], online: trim(readfile(`${MWAN3_STATE}/${s['.name']}`) || '') == 'online' });
+	});
+	return res;
+};
+
+// Резервный канал, если трафик сейчас идёт через него: из интерфейсов mwan3 в сети только он,
+// основной упал. Иначе null.
+export function on_backup(uci) {
+	let b = uci.get('stella', 'main', 'backup_iface');
+	let up = filter(mwan3_ifaces(uci), (i) => i.online);
+	return (b && length(up) == 1 && up[0].name == b) ? b : null;
+};
+
 // Фоновые задачи (обновление, проверка задержки, автоподбор…) — общие для CLI и rpcd.
 // Флаг $RUN_DIR/<имя>.running хранит PID процесса: задача занята, пока он жив. Сразу
 // после запуска, пока PID ещё не записан, в флаге «starting» — считается занятым 15 с.

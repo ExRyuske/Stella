@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, read_json, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, read_json, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a } from 'stella.util';
 
@@ -27,6 +27,8 @@ function new_section(uci, type, prefix, seed) {
 }
 
 const XRAY_CONF = '/var/etc/stella/config.json';
+// Проверка интернета напрямую: Яндекс DNS по HTTPS — открыт и на мобильных белых списках.
+const DIRECT_PROBE = 'https://77.88.8.8/dns-query';
 const ZAPRET_DIR = getenv('STELLA_ZAPRET_DIR') || '/etc/stella/zapret';
 // Подделки для UDP (голос Discord, игры) — набор из Zapret Manager; stun.bin — по умолчанию.
 const UDP_FAKES = [ 'stun2.bin', 'quic_initial_www_google_com.bin', 'quic_initial_4pda_to.bin',
@@ -78,6 +80,9 @@ const SETTINGS = {
 	best_from: { title: 'Из каких узлов подбирать', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
 	best_interval: { title: 'Подбор узла', def: '6', apply: 'reload', check: HOURS },
 	node_missing: { title: 'Если узел пропал', def: 'stop', apply: 'restart', check: (v) => v in [ 'stop', 'best' ] },
+	// Резервный канал mwan3 и его узел: xray перезапустится, только если канал уже работает.
+	backup_iface: { title: 'Резервный канал', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_.-]*$/) != null },
+	backup_node: { title: 'Узел резервного канала', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
 	lists_interval: { title: 'Обновление списков', def: '24', apply: 'reload', check: HOURS },
 	lan_ifname: { title: 'Интерфейсы LAN', def: [ 'br-lan' ], apply: 'reload',
 		check: (v) => type(v) == 'array' && length(v) && length(filter(v, (i) => !match(i, /^[A-Za-z0-9._-]+$/))) == 0 },
@@ -182,7 +187,10 @@ const methods = {
 		call: function() {
 			let uci = cursor();
 			let sel = uci.get('stella', 'main', 'node');
-			let node = find_node(uci, sel);
+			// Работает резервный канал mwan3 — xray идёт через его узел (если он есть).
+			let backup = on_backup(uci);
+			let bnode = backup ? find_node(uci, uci.get('stella', 'main', 'backup_node')) : null;
+			let node = bnode || find_node(uci, sel);
 
 			return {
 				enabled: uci.get('stella', 'main', 'enabled') == '1',
@@ -193,6 +201,7 @@ const methods = {
 					match(cmd_output('ip rule 2>/dev/null') || '', /lookup 1127/) != null,
 				node_id: sel,
 				node,
+				backup: bnode ? backup : null,
 				select_mode: uci.get('stella', 'main', 'select_mode') || 'single',
 				updating: busy('update'),
 				pinging: busy('ping'),
@@ -226,6 +235,8 @@ const methods = {
 				errors,
 				ping: read_json(`${RUN_DIR}/ping.json`, {}),
 				stability: read_json(STAB_PATH, {}),
+				mwan3: mwan3_ifaces(uci),
+				backup: on_backup(uci),
 				pinging: busy('ping'),
 				picking: busy('pick'),
 				updating: busy('update'),
@@ -372,6 +383,9 @@ const methods = {
 			let keep = filter(auto, (x) => x != id && index(x, `${id}_`) != 0);
 			if (length(keep) != length(auto))
 				length(keep) ? uci.set('stella', 'main', 'auto_node', keep) : uci.delete('stella', 'main', 'auto_node');
+			let bn = uci.get('stella', 'main', 'backup_node');
+			if (bn && (bn == id || index(bn, `${id}_`) == 0))
+				uci.delete('stella', 'main', 'backup_node');
 			uci.commit('stella');
 			if (t == 'subscription')
 				unlink(`${CACHE_DIR}/${id}.json`);
@@ -404,6 +418,8 @@ const methods = {
 	// Подобрать лучший узел сейчас (режим «лучший по проверке»).
 	node_pick: {
 		call: function() {
+			if (on_backup(cursor()))
+				return { error: 'работает резервный канал — подбор узла отложен до возвращения основного' };
 			return { started: !busy('ping') && spawn('pick', '/usr/bin/stella pick --apply') };
 		}
 	},
@@ -423,6 +439,19 @@ const methods = {
 			let uci = cursor();
 			let steps = [];
 			let step = (name, ok, detail) => push(steps, { name, ok, detail });
+
+			// Сначала — напрямую, мимо VPN (трафик самого роутера Stella не перехватывает): не
+			// отвечает и это — дело в провайдере, а не в VPN. Адрес, а не имя: DNS роутера идёт
+			// через xray и сам зависит от VPN. Канал — тот, через который mwan3 сейчас пускает трафик.
+			let bk = on_backup(uci);
+			let up = map(filter(mwan3_ifaces(uci), (i) => i.online), (i) => i.name);
+			let via = bk ? `резервный канал ${bk}` : length(up) ? `канал ${join(', ', up)}` : '';
+			let dm = match(cmd_output(`curl -sk -o /dev/null --max-time 6 -w '%{http_code} %{time_total}' ${DIRECT_PROBE}`) || '', /^([0-9]{3}) ([0-9.]+)/);
+			if (dm && dm[1] != '000')
+				step('Напрямую', true, `интернет у провайдера работает: 77.88.8.8 ответил за ${int(+dm[2] * 1000)} мс${via ? ` (${via})` : ''}`);
+			else
+				step('Напрямую', false, `77.88.8.8 не отвечает даже без VPN — нет интернета у провайдера${via ? ` (${via})` : ''}, дело не в VPN`);
+
 			if (!running()) {
 				step('xray', false, 'служба не запущена — см. лог');
 				return { steps };

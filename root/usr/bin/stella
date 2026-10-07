@@ -12,7 +12,7 @@ import { fnv1a } from 'stella.util';
 import { nft_script, dnsmasq_conf, restore_script, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
-import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script } from 'stella.store';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, task_busy, task_script, on_backup } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
 const PING_URL = 'https://www.gstatic.com/generate_204';
@@ -65,6 +65,7 @@ function usage() {
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
 		'  upgrade check|stella|xray|zapret|dnsmasq  проверить или установить обновления\n' +
+		'  uplink             сверить узел с каналом mwan3 (вызывается из hotplug)\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
 		'  parse <ссылка>     разобрать ссылку\n');
 	return 2;
@@ -515,6 +516,21 @@ function current_config() {
 
 	let node_id = opt('main', 'node');
 	let node = node_id ? by_id[node_id] : null;
+
+	// Резервный канал mwan3 (основной упал): xray — через узел этого канала, без автовыбора.
+	// Решение запоминается — по нему uplink поймёт, что канал сменился.
+	let backup = on_backup(uci);
+	system(`mkdir -p ${shq(RUN_DIR)}`);
+	writefile(`${RUN_DIR}/uplink`, backup || '');
+	if (backup) {
+		let bn = by_id[opt('main', 'backup_node', '')];
+		if (bn) {
+			node = bn;
+			auto_nodes = [];
+		}
+		else
+			warn(`работает резервный канал ${backup}, но его узел не выбран или пропал — работаю через основной\n`);
+	}
 	// Узел пропал (провайдер переименовал сервер, подписку выключили). В автовыборе запасным
 	// станет первый из ★. Иначе — лучший из ★ по проверке, а без ★ — по настройке
 	// node_missing: stop — Stella не запускается (работающая остаётся на прежнем конфиге),
@@ -657,6 +673,12 @@ function cmd_ping(...ids) {
 // равной — с меньшими задержкой и разбросом. Текущий меняется, только если новый заметно
 // лучше. --apply — сохранить выбор (reload перезапустит xray, раз изменился конфиг).
 function cmd_pick(...argv) {
+	// Через резервный канал (например, мобильный с белыми списками) не отвечал бы почти никто —
+	// итоги проверки и выбор узла испортились бы.
+	if (on_backup(uci)) {
+		warn('работает резервный канал — подбор узла отложен до возвращения основного\n');
+		return 1;
+	}
 	let all = load_nodes();
 	let from = opt('main', 'best_from', '');
 	let nodes = filter(all, (n) => from == '' || n.source_id == from);
@@ -705,7 +727,7 @@ function cmd_migrate() {
 	if (!length(renames))
 		return 0;
 
-	let sel = opt('main', 'node');
+	let sels = { node: opt('main', 'node'), backup_node: opt('main', 'backup_node') };
 	for (let r in renames) {
 		let from = r[0], to = r[1];
 		while (uci.get('stella', to))
@@ -720,8 +742,9 @@ function cmd_migrate() {
 			writefile(`${CACHE_DIR}/${to}.json`, sprintf('%J', cache));
 			unlink(`${CACHE_DIR}/${from}.json`);
 		}
-		if (sel == from || index(sel, `${from}_`) == 0)
-			uci.set('stella', 'main', 'node', to + substr(sel, length(from)));
+		for (let k, sel in sels)
+			if (sel == from || index(sel, `${from}_`) == 0)
+				uci.set('stella', 'main', k, to + substr(sel, length(from)));
 		print(`${from} -> ${to}\n`);
 	}
 	// Отметки автовыбора — те же id узлов.
@@ -1221,6 +1244,10 @@ function newest_mtime(pattern) {
 }
 
 function cmd_tick() {
+	// Планировщик живёт долго, а курсор uci держит конфиг, прочитанный однажды, — без этого
+	// он не видел бы настроек, изменённых после запуска (например, резервного канала).
+	uci.unload('stella');
+	uci.unload('mwan3');
 	system(`mkdir -p ${RUN_DIR}`);
 	let state_path = `${RUN_DIR}/updater.json`;
 	let st = read_json(state_path, {});
@@ -1241,9 +1268,10 @@ function cmd_tick() {
 		  since: () => newest_mtime(`${CACHE_DIR}/*.json`), cmd: '/usr/bin/stella update', reload: true },
 		{ name: 'lists', every: +opt('main', 'lists_interval', '24') * 3600,
 		  since: () => newest_mtime(`${LISTS_DIR}/*.json`), cmd: '/usr/bin/stella lists', reload: true },
-		// Режим «лучший по проверке»; проверка задержки занимает те же порты — тогда позже.
+		// Режим «лучший по проверке»; проверка задержки занимает те же порты — тогда позже, как
+		// и на резервном канале: подбор ждёт возвращения основного.
 		{ name: 'pick', every: (opt('main', 'select_mode', 'single') == 'best') ? +opt('main', 'best_interval', '6') * 3600 : 0,
-		  since: () => stat(STAB_PATH)?.mtime ?? 0, when: () => !task_busy('ping'), cmd: '/usr/bin/stella pick --apply' },
+		  since: () => stat(STAB_PATH)?.mtime ?? 0, when: () => !task_busy('ping') && !on_backup(uci), cmd: '/usr/bin/stella pick --apply' },
 		ztest('main', 'zapret_test_main'),
 		ztest('yv', 'zapret_test_yt')
 	];
@@ -1273,6 +1301,20 @@ function cmd_updater() {
 	}
 }
 
+// Из hotplug: mwan3 переключил канал. Если резервный канал начал или перестал работать, узел
+// меняется — reload пересоберёт конфиг xray. Запоминаем сразу: событий на одно переключение
+// бывает несколько (ifdown, disconnected), а reload нужен один.
+function cmd_uplink() {
+	let now = on_backup(uci) || '';
+	let path = `${RUN_DIR}/uplink`;
+	if (opt('main', 'enabled', '0') != '1' || now == (readfile(path) ?? ''))
+		return 0;
+	writefile(path, now);
+	system(`logger -t stella ${shq(now ? `работает резервный канал ${now} — переключаюсь на его узел` : 'основной канал снова в сети — возвращаюсь на основной узел')}`);
+	system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+	return 0;
+}
+
 function cmd_parse(link) {
 	let n = parse(link);
 	print(sprintf('%.J\n', n));
@@ -1296,6 +1338,7 @@ const CMDS = {
 	upgrade: cmd_upgrade,
 	updater: cmd_updater,
 	'zapret-cmd': cmd_zapret_cmd,
+	uplink: cmd_uplink,
 	parse: (link) => link ? cmd_parse(link) : usage()
 };
 

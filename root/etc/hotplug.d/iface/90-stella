@@ -1,0 +1,11 @@
+#!/bin/sh
+# mwan3 переключил канал: интерфейс поднялся или упал, связь по нему пропала или вернулась
+# (15-mwan3 к этому моменту уже записал новое состояние). Если задан резервный канал, Stella
+# сверяет, через какой узел работать, и перезапускает xray, только если узел от этого меняется.
+
+case "$ACTION" in
+ifup|ifdown|connected|disconnected) ;;
+*) exit 0 ;;
+esac
+[ -n "$(uci -q get stella.main.backup_iface)" ] || exit 0
+/usr/bin/stella uplink >/dev/null 2>&1

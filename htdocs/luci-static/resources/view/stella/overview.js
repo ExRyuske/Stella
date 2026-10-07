@@ -62,7 +62,8 @@ return view.extend({
 		let node;
 		if (st.node)
 			node = [ E('strong', {}, [ st.node.name ]), ' ',
-				E('span', { 'class': 'st-dim' }, [ st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source ]) ];
+				E('span', { 'class': 'st-dim' }, [ st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source ]),
+				st.backup ? E('span', { 'class': 'st-bad' }, [ ' ', _('— резервный канал %s, основной недоступен').format(st.backup) ]) : '' ];
 		else if (st.node_id)
 			node = [ E('span', { 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
 		else if (st.select_mode == 'auto')

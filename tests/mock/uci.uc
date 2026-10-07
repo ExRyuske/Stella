@@ -12,6 +12,7 @@ export function cursor() {
 
 	return {
 		load: (pkg) => true,
+		unload: (pkg) => true,
 		get: (pkg, sec, opt) => (opt == null) ? conf[sec]?.['.type'] : conf[sec]?.[opt],
 		set: (pkg, sec, opt, val) => {
 			if (val == null)

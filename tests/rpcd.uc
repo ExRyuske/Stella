@@ -3,13 +3,16 @@
 
 'use strict';
 
-import { writefile, readfile } from 'fs';
+import { writefile, readfile, mkdir } from 'fs';
 import { task_busy, task_script } from 'stella.store';
 
 let path = getenv('STELLA_UCI_JSON');
 writefile(path, sprintf('%J', {
 	main: { '.type': 'stella', enabled: '0', mode: 'all', default_action: 'direct' },
-	node_1: { '.type': 'node', name: 'n', link: 'trojan://pw@tr.example.com:443#t' }
+	node_1: { '.type': 'node', name: 'n', link: 'trojan://pw@tr.example.com:443#t' },
+	// Интерфейсы mwan3 (заглушка uci не различает конфиги).
+	wan: { '.type': 'interface', enabled: '1' },
+	wwan: { '.type': 'interface', enabled: '1' }
 }));
 
 let methods = loadfile('root/usr/share/rpcd/ucode/stella.uc')().stella;
@@ -57,6 +60,25 @@ r = methods.settings_set.call({ args: { values: { dns_direct: 'https://1.1.1.1/d
 let st = methods.settings.call({ args: {} });
 check('settings_set', r.ok && st.dns_direct == 'https://1.1.1.1/dns-query' && st.block_doh == '0' &&
 	sprintf('%J', st.lan_ifname) == '[ "br-lan", "br-guest" ]' && st.sub_interval == '6' && st.lists_interval == '24', st);
+
+// Резервный канал mwan3: в сети только он — в статусе его узел, подбор не запускается;
+// удаление узла снимает его с резервного канала.
+let ms = getenv('STELLA_MWAN3_STATE');
+mkdir(ms);
+writefile(`${ms}/wan`, 'offline\n');
+writefile(`${ms}/wwan`, 'online\n');
+check('backup bad iface', methods.settings_set.call({ args: { values: { backup_iface: 'w an' } } }).error != null, null);
+r = methods.settings_set.call({ args: { values: { backup_iface: 'wwan', backup_node: 'node_1' } } });
+st = methods.status.call({ args: {} });
+check('backup status', r.ok && st.backup == 'wwan' && st.node?.id == 'node_1', st);
+let nd = methods.nodes.call({ args: {} });
+check('backup nodes', nd.backup == 'wwan' && length(nd.mwan3) == 2 && nd.mwan3[1].online, nd.mwan3);
+check('backup pick', methods.node_pick.call({ args: {} }).error != null, null);
+writefile(`${ms}/wan`, 'online\n');
+st = methods.status.call({ args: {} });
+check('backup off', st.backup == null && st.node == null, st);
+methods.remove.call({ args: { id: 'node_1' } });
+check('remove clears backup node', json(readfile(path)).main.backup_node == null, json(readfile(path)).main);
 
 // Флаги фоновых задач: «starting» — занято, PID живого процесса — занято, мёртвого — свободно.
 let rd = getenv('STELLA_RUN_DIR');

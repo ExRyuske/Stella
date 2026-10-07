@@ -20,5 +20,5 @@ uc -S tests/test.uc
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
-STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/subs" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" \
+STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/subs" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_MWAN3_STATE="$T/mwan3" \
 	uc -S tests/rpcd.uc

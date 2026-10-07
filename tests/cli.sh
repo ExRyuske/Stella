@@ -31,7 +31,7 @@ EOF
 # «--» перед скриптом: getopt из glibc переставляет аргументы и принял бы «--apply» команды
 # за ключ самого ucode (на роутере musl так не делает, а в CI — glibc).
 run() {
-	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" "$UCODE" -S \
+	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
 		-- root/usr/bin/stella "$@"
 }
@@ -117,6 +117,38 @@ if not st or st['ok'] != 0 or st['n'] != 5 or node != 'nope':
     print('FAIL: pick', st, node, open(t + '/pick.out').read()); sys.exit(1)
 PY
 uci_main best_from=null
+
+# Резервный канал mwan3: в сети только он (IPv6-интерфейсы не в счёт) — xray через его узел;
+# подбор на нём не идёт; uplink перезапускает Stella, только когда канал сменился.
+mkdir -p "$T/mwan3" "$T/bin"
+printf '#!/bin/sh\necho "$*" >> "%s/reload.log"\n' "$T" > "$T/bin/setsid"
+printf '#!/bin/sh\n' > "$T/bin/logger"
+chmod +x "$T/bin/setsid" "$T/bin/logger"
+python3 - "$T/uci.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d['wan'] = { '.type': 'interface', 'enabled': '1', 'family': 'ipv4' }
+d['wwan'] = { '.type': 'interface', 'enabled': '1' }
+d['wan6'] = { '.type': 'interface', 'enabled': '1', 'family': 'ipv6' }
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+uci_main node="\"$VID\"" backup_iface='"wwan"' backup_node='"n1"'
+echo offline > "$T/mwan3/wan"; echo online > "$T/mwan3/wwan"; echo online > "$T/mwan3/wan6"
+run gen "$T/config.json"
+grep -q '"protocol": "trojan"' "$T/config.json" || { echo "FAIL: на резервном канале не его узел"; exit 1; }
+"$XRAY" run -test -c "$T/config.json" >/dev/null
+if run pick --apply 2>"$T/pick.err"; then echo "FAIL: подбор на резервном канале"; exit 1; fi
+grep -q 'резервный канал' "$T/pick.err" || { echo "FAIL: подбор на резервном канале: $(cat "$T/pick.err")"; exit 1; }
+# reload uplink запускает в фоне — его след появляется не сразу.
+PATH="$T/bin:$PATH" run uplink
+sleep 1
+[ ! -e "$T/reload.log" ] || { echo "FAIL: uplink перезапустил Stella без смены канала"; exit 1; }
+echo online > "$T/mwan3/wan"
+PATH="$T/bin:$PATH" run uplink
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/reload.log" ] && break; sleep 0.2; done
+grep -q 'stella reload' "$T/reload.log" 2>/dev/null || { echo "FAIL: основной канал вернулся, а uplink не перезапустил Stella"; exit 1; }
+run gen "$T/config.json"
+grep -q '"protocol": "vless"' "$T/config.json" || { echo "FAIL: основной канал вернулся, а узел не основной"; exit 1; }
 
 # Списки: скачивание по HTTP + записи вручную -> сет, правило и nftset для dnsmasq.
 printf 'youtube.com\n+.googlevideo.com\n91.108.4.0/22\n' > "$T/list.txt"
