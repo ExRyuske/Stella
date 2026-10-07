@@ -756,8 +756,8 @@ const methods = {
 		call: function() {
 			// Установленные версии — локально, без сети: видны и до первой проверки обновлений.
 			let installed = {};
-			for (let l in split(cmd_output('apk list -I luci-app-stella xray-core zapret 2>/dev/null') || '', '\n')) {
-				let m = match(l, /^(luci-app-stella|xray-core|zapret)-([0-9][^ ]*)/);
+			for (let l in split(cmd_output('apk list -I luci-app-stella xray-core zapret mwan3 2>/dev/null') || '', '\n')) {
+				let m = match(l, /^(luci-app-stella|xray-core|zapret|mwan3)-([0-9][^ ]*)/);
 				if (m)
 					installed[m[1]] = m[2];
 			}
@@ -783,8 +783,8 @@ const methods = {
 		args: { what: 'what' },
 		call: function(req) {
 			let what = req.args?.what;
-			if (!(what in [ 'stella', 'xray', 'zapret', 'dnsmasq' ]))
-				return { error: 'нужно stella, xray, zapret или dnsmasq' };
+			if (!(what in [ 'stella', 'xray', 'zapret', 'dnsmasq', 'mwan3' ]))
+				return { error: 'нужно stella, xray, zapret, dnsmasq или mwan3' };
 			return { started: spawn('upgrade', `/usr/bin/stella upgrade ${what}`) };
 		}
 	},

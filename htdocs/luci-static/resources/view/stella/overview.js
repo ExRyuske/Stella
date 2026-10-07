@@ -170,6 +170,28 @@ return view.extend({
 			rows.push(...line('zapret', zr.installed || _('не установлен'), zrExtra));
 		}
 
+		// mwan3 — для резервного канала на «Серверах». Ставится nftables-версия с GitHub (3.x): из
+		// репозитория OpenWrt — старая, на iptables, в 25.12 не рекомендуется.
+		const nft = (v) => parseInt(v, 10) >= 3;
+		const mw = (info && info.mwan3) ? info.mwan3 : { installed: inst.mwan3, available: !nft(inst.mwan3) };
+		let mwExtra = [];
+		if (mw.available && !mw.installed)
+			mwExtra = [ btn('mwan3', mw.latest ? _('Установить %s').format(mw.latest) : _('Установить')), ' ',
+				E('span', { 'class': 'st-dim' }, _('нужен для резервного канала')) ];
+		else if (mw.available && !nft(mw.installed))
+			mwExtra = [ btn('mwan3', _('Заменить на nftables-версию')), ' ',
+				E('span', { 'class': 'st-bad' }, _('эта версия на iptables — в OpenWrt 25.12 не рекомендуется')) ];
+		else if (mw.available)
+			mwExtra = [ btn('mwan3', _('Обновить до %s').format(mw.latest)), ' ',
+				mw.url ? E('a', { 'href': mw.url, 'target': '_blank' }, _('что нового')) : '' ];
+		else if (mw.error)
+			mwExtra = [ E('span', { 'class': 'st-dim' }, mw.error) ];
+		else if (info)
+			mwExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
+		if (nft(mw.installed))
+			mwExtra.push(' ', E('a', { 'href': L.url('admin/network/mwan3') }, _('настроить каналы')));
+		rows.push(...line('mwan3', mw.installed || _('не установлен'), mwExtra));
+
 		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
 		rows.push(...line('dnsmasq', u.dnsmasq_nftset ? 'full' : _('без nftset'), u.dnsmasq_nftset ?
 			[ E('span', { 'class': 'st-ok' }, _('списки сайтов работают')) ] :
@@ -217,6 +239,7 @@ return view.extend({
 
 	handleInstall(what) {
 		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret? Zapret в Stella перезапустится.'),
+			mwan3: _('Установить mwan3 (nftables-версию с GitHub) вместе с его страницей в LuCI? Старый mwan3 заменится, настройки сохранятся. При первой установке каналы в нём выключены — маршрутизация не изменится, пока вы не настроите их в «Сеть → MultiWAN Manager».'),
 			dnsmasq: _('Заменить dnsmasq на dnsmasq-full? Настройки DHCP и DNS сохранятся, на время замены перехват снимается, а DNS на роутере пропадёт на несколько секунд.') }[what] || _('Установить новую версию Stella?')))
 			return;
 		return callUpdateInstall(what).then(() => this.pollUpdates());

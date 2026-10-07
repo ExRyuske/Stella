@@ -64,7 +64,7 @@ function usage() {
 		'  pick [--apply]     подобрать лучший узел по задержке и стабильности\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
-		'  upgrade check|stella|xray|zapret|dnsmasq  проверить или установить обновления\n' +
+		'  upgrade check|stella|xray|zapret|dnsmasq|mwan3  проверить или установить обновления\n' +
 		'  uplink             сверить узел с каналом mwan3 (вызывается из hotplug)\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
 		'  parse <ссылка>     разобрать ссылку\n');
@@ -1092,7 +1092,24 @@ function zapret_release() {
 	return arch ? github_release(ZAPRET_REPO, regexp(`^zapret_v[0-9.]+_${replace(arch, /[.]/g, '\\.')}\\.zip$`)) : null;
 }
 
-// check — записать сведения в $RUN_DIR/update.json; stella / xray — обновить.
+// mwan3 для резервного канала — nftables-версия (порт dl12345): пакет mwan3 из репозитория OpenWrt
+// построен на iptables, и в 25.12 документация его больше не рекомендует. Пакет — под архитектуру
+// и выпуск OpenWrt роутера, интерфейс LuCI — из соседнего репозитория. Версии 3.x — nftables.
+const MWAN3_REPO = 'dl12345/mwan3';
+const MWAN3_LUCI_REPO = 'dl12345/luci-app-mwan3';
+
+function mwan3_release() {
+	let arch = router_arch();
+	let ver = match(readfile('/etc/openwrt_release') || '', /DISTRIB_RELEASE='([0-9]+\.[0-9]+)/)?.[1];
+	return (arch && ver) ? github_release(MWAN3_REPO,
+		regexp(`^mwan3-[0-9][^_]*_openwrt-${replace(ver, /[.]/g, '\\.')}_${replace(arch, /[.]/g, '\\.')}\\.apk$`)) : null;
+}
+
+function mwan3_nft(ver) {
+	return ver != null && +split(ver, '.')[0] >= 3;
+}
+
+// check — записать сведения в $RUN_DIR/update.json; stella / xray / zapret / dnsmasq / mwan3 — обновить.
 function cmd_upgrade(what) {
 	system(`mkdir -p ${RUN_DIR}`);
 	if (what == 'check' || !what) {
@@ -1121,6 +1138,17 @@ function cmd_upgrade(what) {
 			url: zr?.url,
 			available: !!(zr && zr.file && (!zcur || newer(zr.tag, zcur))),
 			error: zr ? null : 'не удалось получить релизы zapret с GitHub'
+		};
+		// mwan3: не установлен — предложим поставить, стоит старый на iptables — заменить.
+		let mcur = pkg_version('mwan3');
+		let mr = mwan3_release();
+		info.mwan3 = {
+			installed: mcur,
+			nft: mwan3_nft(mcur),
+			latest: mr ? replace(mr.tag, /^v/, '') : null,
+			url: mr?.url,
+			available: !!(mr && mr.file && (!mwan3_nft(mcur) || newer(mr.tag, mcur))),
+			error: mr ? null : 'не удалось получить релизы mwan3 (nftables) с GitHub'
 		};
 		writefile(`${RUN_DIR}/update.json`, sprintf('%J', info));
 		print(sprintf('%.J\n', info));
@@ -1208,6 +1236,41 @@ function cmd_upgrade(what) {
 			system('/etc/init.d/zapret disable >/dev/null 2>&1');
 		if (rc != 0) {
 			warn(length(pkgs) ? 'apk не установил пакеты zapret\n' : 'в архиве нет пакетов .apk\n');
+			return 1;
+		}
+	}
+	else if (what == 'mwan3') {
+		let mr = mwan3_release();
+		if (!mr?.file) {
+			warn('в последнем релизе mwan3 (nftables) нет пакета для этого роутера\n');
+			return 1;
+		}
+		// Без интерфейса LuCI каналы mwan3 настраиваются только вручную — но и без него mwan3 работает.
+		let lr = github_release(MWAN3_LUCI_REPO, /^luci-app-mwan3_.*\.apk$/);
+		if (!lr?.file)
+			warn('интерфейс LuCI для mwan3 не получен — ставлю mwan3 без него\n');
+		let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+		let dir = '/tmp/stella-mwan3';
+		system(`rm -rf ${dir} && mkdir -p ${dir}`);
+		let files = [];
+		for (let p in [ [ 'mwan3', mr.file ], [ 'luci-app-mwan3', lr?.file ] ]) {
+			if (!p[1])
+				continue;
+			let body = fetch_any(p[1], proxy);
+			if (body == null || !writefile(`${dir}/${p[0]}.apk`, body)) {
+				warn(`не удалось скачать ${p[0]}\n`);
+				system(`rm -rf ${dir}`);
+				return 1;
+			}
+			push(files, `${dir}/${p[0]}.apk`);
+		}
+		// Поверх старого mwan3 ставится как обновление (версия выше), настройки сохраняются; сам
+		// пакет останавливает и запускает mwan3. apk update — чтобы подтянулись зависимости
+		// (nftables-json, модули ucode) из репозитория OpenWrt.
+		let rc = system(`apk update >/dev/null 2>&1; apk add --allow-untrusted ${join(' ', files)}`);
+		system(`rm -rf ${dir}`);
+		if (rc != 0) {
+			warn('apk не установил mwan3\n');
 			return 1;
 		}
 	}

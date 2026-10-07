@@ -77,10 +77,11 @@ jobs:
             -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF >/dev/null
           cmake --build ucode/build -j"$(nproc)"
 
-      # Из кэша приезжает только сборка, а библиотека json-c нужна и ей.
+      # Из кэша приезжает только сборка, а библиотека json-c нужна и ей. В образе раннера она
+      # обычно уже есть — тогда без apt: зеркало Ubuntu однажды повесило задачу до таймаута.
       - name: runtime deps
         if: steps.ucode-cache.outputs.cache-hit == 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjson-c5
+        run: ldconfig -p | grep -q 'libjson-c\.so\.5 ' || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libjson-c5; }
 
       - name: xray
         run: |
