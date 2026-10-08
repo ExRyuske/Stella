@@ -54,6 +54,7 @@ check('device_set bad policy', methods.device_set.call({ args: { mac: 'aa:bb:cc:
 let l = methods.lists.call({ args: {} }).lists[0];
 check('lists entry', l.domains == 2 && l.devices_mode == 'all', l);
 
+check('settings default', methods.settings.call({ args: {} }).block_doh == '0', null);
 check('settings_set bad', methods.settings_set.call({ args: { values: { dns_direct: 'https://dns.google/dns-query' } } }).error != null, null);
 check('settings_set unknown', methods.settings_set.call({ args: { values: { enabled: '1' } } }).error != null, null);
 r = methods.settings_set.call({ args: { values: { dns_direct: 'https://1.1.1.1/dns-query', block_doh: false, lan_ifname: [ 'br-lan', 'br-guest' ], sub_interval: '6' } } });
@@ -68,6 +69,7 @@ mkdir(ms);
 writefile(`${ms}/wan`, 'offline\n');
 writefile(`${ms}/wwan`, 'online\n');
 check('backup bad iface', methods.settings_set.call({ args: { values: { backup_iface: 'w an' } } }).error != null, null);
+check('backup_vpn bad', methods.settings_set.call({ args: { values: { backup_vpn: 'yes' } } }).error != null, null);
 r = methods.settings_set.call({ args: { values: { backup_iface: 'wwan', backup_node: 'node_1' } } });
 st = methods.status.call({ args: {} });
 check('backup status', r.ok && st.backup == 'wwan' && st.node?.id == 'node_1', st);
@@ -87,6 +89,13 @@ check('task starting', task_busy('t1'), null);
 writefile(`${rd}/t1.running`, '999999');
 check('task dead pid', !task_busy('t1'), null);
 check('task no flag', !task_busy('nope'), null);
+
+// Имена наборов meta-rules-dat: нет файла — пусто, есть — из него.
+r = methods.meta_index.call({ args: {} });
+check('meta_index empty', length(r.geosite) == 0 && !r.loading, r);
+writefile(`${rd}/meta-index.json`, sprintf('%J', { at: 1, geosite: [ 'youtube' ], geoip: [ 'ru' ] }));
+r = methods.meta_index.call({ args: {} });
+check('meta_index', r.geosite[0] == 'youtube' && r.geoip[0] == 'ru' && r.at == 1, r);
 
 print(failed ? `rpcd: ${failed} FAIL\n` : 'rpcd: OK\n');
 exit(failed ? 1 : 0);

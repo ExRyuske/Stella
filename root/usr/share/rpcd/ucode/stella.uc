@@ -74,7 +74,7 @@ const SETTINGS = {
 	dns_remote: { title: 'DNS через VPN', def: 'https://1.1.1.1/dns-query', apply: 'restart', check: (v) => v != '' },
 	dns_direct: { title: 'DNS напрямую', def: 'https://77.88.8.8/dns-query', apply: 'restart', check: IPV4_DNS },
 	dns_hijack: { title: 'Перехват DNS', def: '1', apply: 'reload', check: (v) => v in [ '0', '1' ] },
-	block_doh: { title: 'Блокировка DoH', def: '1', apply: 'reload', check: (v) => v in [ '0', '1' ] },
+	block_doh: { title: 'Блокировка DoH', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
 	log_level: { title: 'Лог xray', def: 'warning', apply: 'restart', check: (v) => v in [ 'error', 'warning', 'info', 'debug' ] },
 	sub_interval: { title: 'Обновление подписок', def: '12', apply: 'reload', check: HOURS },
 	best_from: { title: 'Из каких узлов подбирать', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
@@ -83,6 +83,7 @@ const SETTINGS = {
 	// Резервный канал mwan3 и его узел: xray перезапустится, только если канал уже работает.
 	backup_iface: { title: 'Резервный канал', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_.-]*$/) != null },
 	backup_node: { title: 'Узел резервного канала', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
+	backup_vpn: { title: 'Резервный канал через VPN', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
 	lists_interval: { title: 'Обновление списков', def: '24', apply: 'reload', check: HOURS },
 	lan_ifname: { title: 'Интерфейсы LAN', def: [ 'br-lan' ], apply: 'reload',
 		check: (v) => type(v) == 'array' && length(v) && length(filter(v, (i) => !match(i, /^[A-Za-z0-9._-]+$/))) == 0 },
@@ -448,12 +449,12 @@ const methods = {
 			let via = bk ? `резервный канал ${bk}` : length(up) ? `канал ${join(', ', up)}` : '';
 			let dm = match(cmd_output(`curl -sk -o /dev/null --max-time 6 -w '%{http_code} %{time_total}' ${DIRECT_PROBE}`) || '', /^([0-9]{3}) ([0-9.]+)/);
 			if (dm && dm[1] != '000')
-				step('Напрямую', true, `интернет у провайдера работает: 77.88.8.8 ответил за ${int(+dm[2] * 1000)} мс${via ? ` (${via})` : ''}`);
+				step('Напрямую', true, `77.88.8.8 отвечает, ${int(+dm[2] * 1000)} мс${via ? `, ${via}` : ''}`);
 			else
-				step('Напрямую', false, `77.88.8.8 не отвечает даже без VPN — нет интернета у провайдера${via ? ` (${via})` : ''}, дело не в VPN`);
+				step('Напрямую', false, `77.88.8.8 не отвечает, нет интернета у провайдера${via ? ` (${via})` : ''}`);
 
 			if (!running()) {
-				step('xray', false, 'служба не запущена — см. лог');
+				step('xray', false, 'служба не запущена, см. лог');
 				return { steps };
 			}
 
@@ -463,19 +464,19 @@ const methods = {
 			let t = +pop(lines);
 			let info = json(join('\n', lines) || 'null');
 			if (type(info) == 'object' && info.ip)
-				step('Сервер VPN', true, `выход через ${info.ip} — ${info.country || '?'}, ${info.org || ''} (${int(t * 1000)} мс)`);
+				step('Сервер VPN', true, `${info.ip}, ${info.country || '?'}, ${info.org || ''}, ${int(t * 1000)} мс`);
 			else
-				step('Сервер VPN', false, 'нет ответа через сервер — смените узел или проверьте подписку');
+				step('Сервер VPN', false, 'сервер не отвечает');
 
 			let nft = nft_up();
-			step('Перехват', nft, nft ? 'правила nftables на месте' : 'nft не принял правила — см. лог');
+			step('Перехват', nft, nft ? 'правила на месте' : 'nft не принял правила, см. лог');
 
 			let route = match(cmd_output('ip rule 2>&1') || '', /lookup 1127/) && match(cmd_output('ip route show table 1127 2>&1') || '', /local/);
-			step('Маршрут', !!route, route ? 'перехваченный трафик уходит в xray' : 'нет правила маршрутизации — нужен пакет ip-full (ip из busybox не умеет таблицу 1127)');
+			step('Маршрут', !!route, route ? 'есть' : 'нет правила маршрутизации, нужен пакет ip-full');
 
 			let nftset = match(cmd_output('dnsmasq --version 2>/dev/null') || '', /[ \t]nftset/) != null;
 			if (!nftset)
-				step('dnsmasq', false, 'без поддержки nftset — установите dnsmasq-full в «Обновлениях»');
+				step('dnsmasq', false, 'без nftset, нужен dnsmasq-full');
 
 			// Сайт из первого включённого списка «VPN»: резолвим через dnsmasq роутера и
 			// смотрим, попал ли его IP в сет списка.
@@ -483,13 +484,13 @@ const methods = {
 			let d = length(vpn) ? vpn[0].domains[0] : 'google.com';
 			let ips = filter(map(match(cmd_output(`nslookup ${shq(d)} 127.0.0.1 2>&1`) || '', /Address:?[ \t]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/g) || [],
 				(m) => m[1]), (ip) => substr(ip, 0, 4) != '127.');
-			step('DNS', length(ips) > 0, length(ips) ? `${d} → ${ips[0]}` : `${d} не резолвится — DNS через VPN не отвечает`);
+			step('DNS', length(ips) > 0, length(ips) ? `${d} → ${ips[0]}` : `${d} не резолвится`);
 
 			if (length(vpn) && length(ips) && nftset && nft) {
 				let l = vpn[0];
 				let inset = system(`nft get element inet stella ${l.id} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
 				step(`Список «${l.name}»`, inset, inset ? `${d} идёт через VPN` :
-					`IP ${d} не попал в правила — откройте сайт ещё раз или перезапустите Stella`);
+					`IP ${d} нет в правилах, откройте сайт ещё раз`);
 			}
 			return { steps };
 		}
@@ -631,6 +632,17 @@ const methods = {
 			if (id && !match(id, /^[A-Za-z0-9_]+$/))
 				return { error: 'некорректный id' };
 			return { started: spawn_reload(cursor(), 'lists', `/usr/bin/stella lists ${id || ''}`) };
+		}
+	},
+
+	// Имена наборов meta-rules-dat для поиска в окне списка; update — скачать их заново в фоне.
+	meta_index: {
+		args: { update: true },
+		call: function(req) {
+			if (req.args?.update)
+				spawn('meta', '/usr/bin/stella meta-index');
+			let idx = read_json(`${RUN_DIR}/meta-index.json`, {});
+			return { geosite: idx.geosite || [], geoip: idx.geoip || [], at: idx.at, loading: busy('meta') };
 		}
 	},
 

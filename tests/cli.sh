@@ -139,6 +139,10 @@ grep -q '"protocol": "trojan"' "$T/config.json" || { echo "FAIL: на резер
 "$XRAY" run -test -c "$T/config.json" >/dev/null
 if run pick --apply 2>"$T/pick.err"; then echo "FAIL: подбор на резервном канале"; exit 1; fi
 grep -q 'резервный канал' "$T/pick.err" || { echo "FAIL: подбор на резервном канале: $(cat "$T/pick.err")"; exit 1; }
+# «Всё через VPN»: на резервном канале списки не действуют.
+run fw show | grep -q 'goto pol_global' || { echo "FAIL: на резервном канале без «всё через VPN» не действуют списки"; exit 1; }
+uci_main backup_vpn='"1"'
+if run fw show | grep -q 'goto pol_global'; then echo "FAIL: на резервном канале с «всё через VPN» действуют списки"; exit 1; fi
 # reload uplink запускает в фоне — его след появляется не сразу.
 PATH="$T/bin:$PATH" run uplink
 sleep 1
@@ -149,6 +153,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/reload.log" ] && break; sleep 0.2; do
 grep -q 'stella reload' "$T/reload.log" 2>/dev/null || { echo "FAIL: основной канал вернулся, а uplink не перезапустил Stella"; exit 1; }
 run gen "$T/config.json"
 grep -q '"protocol": "vless"' "$T/config.json" || { echo "FAIL: основной канал вернулся, а узел не основной"; exit 1; }
+run fw show | grep -q 'goto pol_global' || { echo "FAIL: основной канал вернулся, а списки не действуют"; exit 1; }
 
 # Списки: скачивание по HTTP + записи вручную -> сет, правило и nftset для dnsmasq.
 printf 'youtube.com\n+.googlevideo.com\n91.108.4.0/22\n' > "$T/list.txt"
@@ -168,6 +173,21 @@ for want in 'set list_yt' 'elements = { 91.108.4.0/22 }' 'ip daddr @list_yt goto
 	echo "$OUT" | grep -qF "$want" || { echo "FAIL: fw show без «$want»"; exit 1; }
 done
 if echo "$OUT" | grep -q 'list_off'; then echo "FAIL: выключенный список попал в правила"; exit 1; fi
+if echo "$OUT" | grep -q 'dport 853'; then echo "FAIL: DoH блокируется, хотя по умолчанию выключено"; exit 1; fi
+
+# Имена наборов meta-rules-dat: только файлы .list, без подкаталогов и других форматов;
+# не скачалось — прежние имена остаются.
+mkdir -p "$T/trees"
+echo '{"tree":[{"path":"youtube.list","type":"blob"},{"path":"youtube.mrs","type":"blob"},{"path":"geolocation-!cn.list","type":"blob"},{"path":"classical","type":"tree"}]}' > "$T/trees/geosite"
+echo '{"tree":[{"path":"ru.list","type":"blob"}]}' > "$T/trees/geoip"
+STELLA_META_TREES=http://127.0.0.1:18765/trees/ run meta-index >/dev/null
+if STELLA_META_TREES=http://127.0.0.1:18765/missing/ run meta-index 2>/dev/null; then echo "FAIL: meta-index без ответа сервера"; exit 1; fi
+python3 - "$T/run/meta-index.json" <<'PY' || exit 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+if d['geosite'] != ['geolocation-!cn', 'youtube'] or d['geoip'] != ['ru']:
+    print('FAIL: meta-index', d); sys.exit(1)
+PY
 
 # У стратегии Flowseal — свои исключения.
 printf 'steampowered.com\ntwitch.tv\n' > "$T/zapret/hosts-exclude_fs.txt"

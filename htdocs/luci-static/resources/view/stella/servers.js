@@ -166,9 +166,9 @@ return view.extend({
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'placeholder': _('необязательно') });
 
 		ui.showModal(_('Добавить серверы'), [
-			E('p', {}, _('Вставьте ссылку на подписку (https://…) или ссылки на серверы: vless://, vmess://, trojan://, ss://, hysteria2://. Можно несколько — по одной в строке.')),
+			E('p', {}, _('Подписка или ссылки на серверы, по одной в строке.')),
 			text,
-			E('p', {}, [ _('Название (если добавляется одна подписка или ссылка):'), name ]),
+			E('p', {}, [ _('Название'), name ]),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')), ' ',
 				E('button', {
@@ -178,9 +178,9 @@ return view.extend({
 							ui.hideModal();
 							const msg = [];
 							if (r.subscriptions)
-								msg.push(_('Подписок добавлено: %d — загружаю узлы…').format(r.subscriptions));
+								msg.push(_('Добавлено подписок: %d, загружаю узлы…').format(r.subscriptions));
 							if (r.links)
-								msg.push(_('Ссылок добавлено: %d').format(r.links));
+								msg.push(_('Добавлено ссылок: %d').format(r.links));
 							for (const e of (r.errors || []))
 								msg.push(_('Не разобрано «%s…»: %s').format(e.line, e.error));
 							if (msg.length)
@@ -203,8 +203,7 @@ return view.extend({
 		ui.showModal(_('Подписка'), [
 			E('p', {}, [ _('Название'), name ]),
 			E('p', {}, [ _('URL'), url ]),
-			E('p', {}, [ _('User-Agent'), ua,
-				E('small', { 'class': 'st-dim' }, _('Некоторые панели отдают разный формат в зависимости от клиента.')) ]),
+			E('p', {}, [ _('User-Agent'), ua ]),
 			E('p', {}, E('label', {}, [ en, ' ', _('Включена') ])),
 			E('div', { 'style': 'display:flex;gap:.5em' }, [
 				E('button', {
@@ -249,7 +248,7 @@ return view.extend({
 		let node;
 		if (bn)
 			node = [ E('strong', {}, [ bn.name ]), ' ', E('span', { 'class': 'st-dim' }, typeLabel(bn)), ' ',
-				E('span', { 'class': 'st-mid' }, _('резервный канал %s — основной недоступен').format(d.backup)) ];
+				E('span', { 'class': 'st-mid' }, _('резервный канал %s').format(d.backup)) ];
 		else if (best && !n && !d.selected)
 			node = [ E('span', { 'class': 'st-dim' }, d.picking ? _('Подбираю узел…') : _('Узел ещё не подобран.')) ];
 		else if (auto && known.length >= 2)
@@ -260,7 +259,7 @@ return view.extend({
 		else if (n)
 			node = [ E('strong', {}, [ n.name ]), ' ', E('span', { 'class': 'st-dim' }, typeLabel(n)), ' ', (this.curPing = E('span', {}, pingLabel(d.ping[n.id], d.stability[n.id]))) ];
 		else if (d.selected)
-			node = [ E('span', { 'class': 'st-bad' }, _('Выбранный узел пропал из списка — выберите другой.')) ];
+			node = [ E('span', { 'class': 'st-bad' }, _('Выбранного узла больше нет.')) ];
 		else
 			node = [ E('span', { 'class': 'st-dim' }, _('Узел не выбран.')) ];
 
@@ -274,12 +273,12 @@ return view.extend({
 			]),
 			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
 			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
-				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null, 'click': ui.createHandlerFn(this, () => callPick().then((r) => {
+				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null,
+					'title': _('5 запросов через каждый узел; узел меняется, только если новый заметно лучше'), 'click': ui.createHandlerFn(this, () => callPick().then((r) => {
 					if (r && r.error)
 						ui.addNotification(null, E('p', {}, r.error), 'warning');
 					return this.refresh();
-				})) }, _('Подобрать сейчас')),
-			E('span', { 'class': 'st-dim', 'title': _('Через каждый узел — 5 запросов подряд. Лучший — с наибольшей долей ответов, при равной — с меньшими задержкой и разбросом. Узел меняется, только если новый заметно лучше текущего.') }, _('по задержке и стабильности'))
+				})) }, _('Подобрать сейчас'))
 		]) : '';
 
 		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него.
@@ -291,17 +290,18 @@ return view.extend({
 			_('Резервный канал'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => save('backup_iface', ev.target.value) }, [
 				E('option', { 'value': '', 'selected': cfg.backup_iface ? null : '' }, _('нет')),
 				...ifs.map((i) => E('option', { 'value': i.name, 'selected': i.name == cfg.backup_iface ? '' : null },
-					'%s — %s'.format(i.name, i.online ? _('в сети') : _('не в сети')))),
+					'%s (%s)'.format(i.name, i.online ? _('в сети') : _('не в сети')))),
 				(cfg.backup_iface && !ifs.find((i) => i.name == cfg.backup_iface)) ?
-					E('option', { 'value': cfg.backup_iface, 'selected': '' }, _('%s — нет в mwan3').format(cfg.backup_iface)) : ''
+					E('option', { 'value': cfg.backup_iface, 'selected': '' }, _('%s (нет в mwan3)').format(cfg.backup_iface)) : ''
 			]),
 			...(cfg.backup_iface ? [ _('через'), E('select', { 'class': 'cbi-input-select', 'style': 'max-width:22em', 'change': (ev) => save('backup_node', ev.target.value) }, [
-				E('option', { 'value': '', 'selected': bsel ? null : '' }, cfg.backup_node ? _('— узел пропал, выберите другой —') : _('— выберите узел —')),
+				E('option', { 'value': '', 'selected': bsel ? null : '' }, cfg.backup_node ? _('узел удалён') : _('выберите узел')),
 				...d.sources.map((src) => E('optgroup', { 'label': src.kind == 'subscription' ? src.name : _('Отдельные ссылки') },
 					d.nodes.filter((x) => x.source == src.id).map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.backup_node ? '' : null }, [ x.name ]))))
+			]), E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
+				E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn', ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
 			]) ] : []),
-			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) :
-				E('span', { 'class': 'st-dim', 'title': _('Когда основной канал падает и mwan3 пускает трафик только через резервный, xray переключается на выбранный узел, а когда основной возвращается — на прежний. Пока работает резервный канал, подбор узла по проверке не запускается.') }, _('когда основной недоступен'))
+			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) : ''
 		]) : '';
 
 		dom.content(this.currentBox, [
@@ -325,16 +325,14 @@ return view.extend({
 
 	showOptions() {
 		const cfg = this.cfg;
-		ui.showModal(_('Серверы: настройки'), [
+		ui.showModal(_('Настройки'), [
 			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Обновлять подписки')),
 				sui.combo(cfg.sub_interval, INTERVALS, (v) => this.setting('sub_interval', v), { custom_placeholder: _('часов…') }) ]),
-			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Если выбранный узел пропал из подписки')),
+			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Если узел пропал из подписки')),
 				E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.setting('node_missing', ev.target.value) }, [
-					E('option', { 'value': 'stop', 'selected': cfg.node_missing != 'best' ? '' : null }, _('лучший из ★, без ★ — не запускать Stella')),
-					E('option', { 'value': 'best', 'selected': cfg.node_missing == 'best' ? '' : null }, _('лучший из ★, без ★ — лучший по проверке из всех'))
-				]),
-				E('div', { 'class': 'st-dim' }, _('«Не запускать» — работающая Stella остаётся на прежнем узле, а после перезагрузки роутера не запускается (весь трафик идёт напрямую), пока узел не вернётся после обновления подписки.')) ]),
-			E('p', { 'class': 'st-dim' }, _('«Самый быстрый из ★» проверяет отмеченные узлы раз в минуту и ведёт трафик через самый быстрый из отвечающих. «Лучший по проверке» сам подбирает узел по задержке и стабильности по расписанию.')),
+					E('option', { 'value': 'stop', 'selected': cfg.node_missing != 'best' ? '' : null }, _('лучший из ★, иначе не запускать Stella')),
+					E('option', { 'value': 'best', 'selected': cfg.node_missing == 'best' ? '' : null }, _('лучший из ★, иначе лучший из всех'))
+				]) ]),
 			E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Закрыть')))
 		]);
 	},
@@ -404,7 +402,7 @@ return view.extend({
 			[ _('Ссылка «%s» не разобрана: %s').format(e.name, e.error) ]));
 
 		if (!d.sources.length) {
-			dom.content(this.groupsBox, [ ...errors, E('p', {}, _('Серверов пока нет. Нажмите «Добавить» и вставьте подписку или ссылку.')) ]);
+			dom.content(this.groupsBox, [ ...errors, E('p', {}, _('Серверов пока нет.')) ]);
 			return;
 		}
 
@@ -453,7 +451,7 @@ return view.extend({
 					])
 				]),
 				E('div', { 'class': 'st-list', 'data-src': src.id }, E('table', {}, rows.length ? rows :
-					E('tr', {}, E('td', { 'class': 'st-dim' }, isSub ? _('Узлов нет — нажмите «Обновить».') : ''))))
+					E('tr', {}, E('td', { 'class': 'st-dim' }, isSub ? _('Узлов нет.') : ''))))
 			]);
 			el.addEventListener('toggle', () => { if (!q) el.open ? this.open.add(src.id) : this.open.delete(src.id); });
 			return el;

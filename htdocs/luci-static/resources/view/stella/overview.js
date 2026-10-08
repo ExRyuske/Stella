@@ -53,8 +53,8 @@ return view.extend({
 			btn = E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'));
 		}
 		else {
-			state = !st.running ? E('span', { 'class': 'st-state st-bad' }, _('Не запущено — см. лог')) :
-				!st.intercept ? E('span', { 'class': 'st-state st-bad' }, _('Перехват не включён — трафик идёт напрямую, см. лог')) :
+			state = !st.running ? E('span', { 'class': 'st-state st-bad' }, _('Не запущено, см. лог')) :
+				!st.intercept ? E('span', { 'class': 'st-state st-bad' }, _('Перехват не работает, см. лог')) :
 				E('span', { 'class': 'st-state st-ok' }, _('Работает'));
 			btn = E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleEnable', false) }, _('Выключить'));
 		}
@@ -63,13 +63,13 @@ return view.extend({
 		if (st.node)
 			node = [ E('strong', {}, [ st.node.name ]), ' ',
 				E('span', { 'class': 'st-dim' }, [ st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source ]),
-				st.backup ? E('span', { 'class': 'st-bad' }, [ ' ', _('— резервный канал %s, основной недоступен').format(st.backup) ]) : '' ];
+				st.backup ? E('span', { 'class': 'st-bad' }, [ ' ', _('(резервный канал %s)').format(st.backup) ]) : '' ];
 		else if (st.node_id)
 			node = [ E('span', { 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
 		else if (st.select_mode == 'auto')
 			node = [ E('strong', {}, _('автовыбор из ★')) ];
 		else if (st.select_mode == 'best')
-			node = [ E('span', { 'class': 'st-dim' }, _('лучший по проверке — ещё не подобран')) ];
+			node = [ E('span', { 'class': 'st-dim' }, _('лучший по проверке, ещё не подобран')) ];
 		else
 			node = [ E('span', { 'class': 'st-bad' }, _('не выбран')) ];
 
@@ -110,14 +110,14 @@ return view.extend({
 			E('div', { 'class': 'st-card' }, [
 				E('span', { 'class': 'st-k' }, _('Через VPN')),
 				E('span', {}, [ this.dnsField('dns_remote', cfg.dns_remote, DNS_REMOTE),
-					E('div', { 'class': 'st-dim' }, _('Все DNS-запросы устройств.')) ]),
+					E('div', { 'class': 'st-dim' }, _('Запросы устройств')) ]),
 				E('span', { 'class': 'st-k' }, _('Напрямую')),
 				E('span', {}, [ this.dnsField('dns_direct', cfg.dns_direct, DNS_DIRECT),
-					E('div', { 'class': 'st-dim' }, _('Адреса VPN-серверов и запасной, если VPN недоступен.')) ]),
+					E('div', { 'class': 'st-dim' }, _('Адреса серверов VPN и запасной')) ]),
 				E('span', {}, ''),
 				E('span', {}, [
-					E('div', {}, this.flag('dns_hijack', cfg.dns_hijack, _('Перехватывать DNS устройств (иначе списки не работают на устройствах со своим DNS)'))),
-					E('div', {}, this.flag('block_doh', cfg.block_doh, _('Блокировать DNS-over-HTTPS устройств (браузеры с «безопасным DNS»)')))
+					E('div', {}, this.flag('dns_hijack', cfg.dns_hijack, _('Перехватывать DNS устройств'))),
+					E('div', {}, this.flag('block_doh', cfg.block_doh, _('Блокировать DNS-over-HTTPS')))
 				])
 			])
 		]);
@@ -180,7 +180,7 @@ return view.extend({
 				E('span', { 'class': 'st-dim' }, _('нужен для резервного канала')) ];
 		else if (mw.available && !nft(mw.installed))
 			mwExtra = [ btn('mwan3', _('Заменить на nftables-версию')), ' ',
-				E('span', { 'class': 'st-bad' }, _('эта версия на iptables — в OpenWrt 25.12 не рекомендуется')) ];
+				E('span', { 'class': 'st-bad' }, _('версия на iptables')) ];
 		else if (mw.available)
 			mwExtra = [ btn('mwan3', _('Обновить до %s').format(mw.latest)), ' ',
 				mw.url ? E('a', { 'href': mw.url, 'target': '_blank' }, _('что нового')) : '' ];
@@ -194,12 +194,12 @@ return view.extend({
 
 		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
 		rows.push(...line('dnsmasq', u.dnsmasq_nftset ? 'full' : _('без nftset'), u.dnsmasq_nftset ?
-			[ E('span', { 'class': 'st-ok' }, _('списки сайтов работают')) ] :
-			[ btn('dnsmasq', _('Установить dnsmasq-full')), ' ', E('span', { 'class': 'st-bad' }, _('без него списки сайтов не работают')) ]));
+			[] :
+			[ btn('dnsmasq', _('Установить dnsmasq-full')), ' ', E('span', { 'class': 'st-bad' }, _('без него списки не работают')) ]));
 
 		let action;
 		if (u.installing)
-			action = E('em', { 'class': 'spinning' }, _('устанавливаю… страница обновится сама'));
+			action = E('em', { 'class': 'spinning' }, _('устанавливаю…'));
 		else if (u.checking)
 			action = E('em', { 'class': 'spinning' }, _('проверяю…'));
 		else
@@ -238,9 +238,9 @@ return view.extend({
 	},
 
 	handleInstall(what) {
-		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret? Zapret в Stella перезапустится.'),
-			mwan3: _('Установить mwan3 (nftables-версию с GitHub) вместе с его страницей в LuCI? Старый mwan3 заменится, настройки сохранятся. При первой установке каналы в нём выключены — маршрутизация не изменится, пока вы не настроите их в «Сеть → MultiWAN Manager».'),
-			dnsmasq: _('Заменить dnsmasq на dnsmasq-full? Настройки DHCP и DNS сохранятся, на время замены перехват снимается, а DNS на роутере пропадёт на несколько секунд.') }[what] || _('Установить новую версию Stella?')))
+		if (!confirm({ xray: _('Обновить xray-core? Служба перезапустится.'), zapret: _('Установить или обновить zapret?'),
+			mwan3: _('Установить mwan3 (nftables) и luci-app-mwan3? Старый mwan3 заменится, настройки сохранятся. Каналы настраиваются в «Сеть → MultiWAN Manager».'),
+			dnsmasq: _('Заменить dnsmasq на dnsmasq-full? Настройки сохранятся, DNS на роутере пропадёт на несколько секунд.') }[what] || _('Установить новую версию Stella?')))
 			return;
 		return callUpdateInstall(what).then(() => this.pollUpdates());
 	},
@@ -259,7 +259,7 @@ return view.extend({
 		return callCheck().then((r) => {
 			dom.content(this.checkBox, [
 				...(r.steps || []).map((s) => E('div', {}, [
-					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, [ s.name ]), ' — ', s.detail
+					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, [ s.name ]), ': ', s.detail
 				])),
 				again
 			]);
@@ -305,7 +305,7 @@ return view.extend({
 			E('summary', {}, _('Лог')),
 			this.logBox,
 			E('div', { 'class': 'st-row', 'style': 'justify-content:flex-end' }, [
-				_('Подробность лога xray:'), level,
+				_('Уровень лога:'), level,
 				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleLog') }, _('Обновить'))
 			])
 		]);

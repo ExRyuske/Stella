@@ -50,7 +50,7 @@ return view.extend({
 			}) }, _('Сохранить'));
 		input.addEventListener('input', () => save.style.display = '');
 		return E('div', { 'class': 'st-bar st-dim', 'style': 'margin-top:1em' }, [
-			_('Трафик перехватывается с интерфейсов:'), input, save
+			_('Интерфейсы LAN:'), input, save
 		]);
 	},
 
@@ -121,7 +121,7 @@ return view.extend({
 				return E('tr', {}, [
 					E('td', {}, [
 						E('div', {}, [ label(dev) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
-						sp ? E('div', { 'class': 'st-dim', 'title': _('+ список только для этого устройства, − список не действует на него') }, [ sp ]) : ''
+						sp ? E('div', { 'class': 'st-dim', 'title': _('+ только для этого устройства, − не действует на него') }, [ sp ]) : ''
 					]),
 					E('td', { 'class': 'st-dim' }, [ E('div', {}, dev.ip || ''), E('div', {}, dev.mac) ]),
 					E('td', {}, E('select', {
@@ -148,7 +148,6 @@ return view.extend({
 		return E([], [
 			E('style', {}, CSS),
 			E('h2', {}, _('Устройства')),
-			E('div', { 'class': 'cbi-map-descr' }, _('«По спискам» — как настроено на странице «Списки»; там же список можно включить только для некоторых устройств. «Всё через VPN» и «Всё напрямую» — устройство целиком, списки для него не действуют.')),
 			E('div', { 'class': 'st-bar' }, [
 				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showEdit(null) }, _('Добавить по MAC')),
 				E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'flex:1', 'placeholder': _('Поиск по имени, IP или MAC…'),

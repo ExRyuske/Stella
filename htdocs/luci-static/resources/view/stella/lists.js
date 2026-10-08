@@ -12,6 +12,7 @@ const callEdit = rpc.declare({ object: 'stella', method: 'list_edit', params: [ 
 const callRemove = rpc.declare({ object: 'stella', method: 'list_remove', params: [ 'id' ] });
 const callMove = rpc.declare({ object: 'stella', method: 'list_move', params: [ 'id', 'dir' ] });
 const callUpdate = rpc.declare({ object: 'stella', method: 'lists_update', params: [ 'id' ] });
+const callMetaIndex = rpc.declare({ object: 'stella', method: 'meta_index', params: [ 'update' ] });
 const callDefault = rpc.declare({ object: 'stella', method: 'set_default_action', params: [ 'action' ] });
 const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
@@ -34,7 +35,7 @@ const ZMS_EXCLUDE = 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/
 const CATALOG = [
 	[ _('Россия'), [
 		[ _('Заблокированные в России'), [ 'Russia/inside-raw.lst' ] ],
-		[ _('Российские сайты, закрытые для зарубежных IP'), [ 'Russia/outside-raw.lst' ] ]
+		[ _('Российские сайты, закрытые из-за рубежа'), [ 'Russia/outside-raw.lst' ] ]
 	] ],
 	[ _('Сервисы'), [
 		[ 'YouTube', [ 'Services/youtube.lst' ] ],
@@ -51,7 +52,7 @@ const CATALOG = [
 		[ 'Cloudflare', [ 'Services/cloudflare.lst', 'Subnets/IPv4/cloudflare.lst' ] ]
 	] ],
 	[ _('Категории'), [
-		[ _('Геоблок — сервисы, закрывшие доступ из России'), [ 'Categories/geoblock.lst' ] ],
+		[ _('Геоблок (закрыты для России)'), [ 'Categories/geoblock.lst' ] ],
 		[ _('Заблокированные РКН'), [ 'Categories/block.lst' ] ],
 		[ _('Новости'), [ 'Categories/news.lst' ] ],
 		[ _('Аниме'), [ 'Categories/anime.lst' ] ],
@@ -96,6 +97,10 @@ const CSS = `
 .st-dev input { margin:0 }
 .st-dev .st-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .st-dev .st-dim { white-space:nowrap }
+.st-chips { display:flex; flex-wrap:wrap; gap:.3em; margin-bottom:.35em }
+.st-chips:empty { display:none }
+.st-chip { display:inline-flex; gap:.4em; align-items:center; padding:.1em .5em; border-radius:3px; background:rgba(60,140,220,.18); font-size:90% }
+.st-chip a { text-decoration:none; opacity:.7 }
 .st-zapret { padding:.8em 1em; border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-top:1.5em }
 .st-zapret h3 { margin-top:0 }
 .st-ok { color:#2a2 } .st-bad { color:#c33 }
@@ -255,10 +260,97 @@ return view.extend({
 			}))
 		])));
 
-		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('например, Видео и соцсети') : '' });
+		// Наборы meta-rules-dat — поиском по именам, как geosite и geoip в 3x-ui. Хранятся ссылками
+		// на их файлы .list и обновляются вместе со списком.
+		const metaUrl = (p) => META + p[0] + '/' + p[1] + '.list';
+		const metaSel = [];
+		for (const u of l.urls) {
+			const m = u.indexOf(META) == 0 && u.slice(META.length).match(/^(geosite|geoip)\/([^\/]+)\.list$/);
+			if (m)
+				metaSel.push([ m[1], m[2] ]);
+		}
+		const metaInit = metaSel.map(metaUrl);
+		const chips = E('div', { 'class': 'st-chips' });
+		const search = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'disabled': '', 'placeholder': _('загружаю наборы…') });
+		const hits = E('div', { 'class': 'st-devs', 'style': 'display:none' });
+		const metaState = E('small', { 'class': 'st-dim' });
+		const metaIdx = (p) => metaSel.findIndex((x) => x[0] == p[0] && x[1] == p[1]);
+		const toggle = (p) => {
+			const i = metaIdx(p);
+			if (i >= 0)
+				metaSel.splice(i, 1);
+			else
+				metaSel.push(p);
+			drawChips();
+			drawHits();
+		};
+		const drawChips = () => dom.content(chips, metaSel.map((p) => E('span', { 'class': 'st-chip' }, [
+			p[0] + ':' + p[1],
+			E('a', { 'href': '#', 'title': _('Убрать'), 'click': (ev) => { ev.preventDefault(); toggle(p); } }, '×')
+		])));
+		// Сначала точное совпадение, потом начинающиеся с запроса. «geoip:» или «geosite:» в начале
+		// запроса — искать только среди них.
+		const drawHits = () => {
+			const m = search.value.trim().toLowerCase().match(/^(?:(geosite|geoip):)?(.*)$/);
+			const q = m[2];
+			if (!this.meta || !q) {
+				hits.style.display = 'none';
+				return;
+			}
+			const rank = (n) => (n == q) ? 0 : (n.indexOf(q) == 0) ? 1 : 2;
+			const found = [];
+			for (const kind of [ 'geosite', 'geoip' ])
+				if (!m[1] || m[1] == kind)
+					for (const n of this.meta[kind])
+						if (n.indexOf(q) >= 0)
+							found.push([ kind, n ]);
+			found.sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].length - b[1].length || a[1].localeCompare(b[1]));
+			hits.style.display = '';
+			dom.content(hits, found.length ? found.slice(0, 50).map((p) => E('label', { 'class': 'st-dev' }, [
+				E('input', { 'type': 'checkbox', 'checked': metaIdx(p) >= 0 ? '' : null, 'change': () => toggle(p) }),
+				E('span', { 'class': 'st-name' }, p[1]),
+				E('span', { 'class': 'st-dim' }, p[0])
+			])) : E('div', { 'class': 'st-dev st-dim' }, _('ничего не найдено')));
+		};
+		search.addEventListener('input', drawHits);
+		const useMeta = (r) => {
+			this.meta = r;
+			search.disabled = false;
+			search.placeholder = _('поиск: youtube, telegram, geoip:ru');
+			drawHits();
+		};
+		// Имён нет или им больше недели — роутер скачивает их заново; пока качает — опрашиваем.
+		let asked = false;
+		const loadMeta = (update) => callMetaIndex(update).then((r) => {
+			const have = r.geosite.length + r.geoip.length > 0;
+			if (have && (!this.meta || this.meta.at != r.at))
+				useMeta(r);
+			if (!r.loading && !asked && (!have || Date.now() / 1000 - r.at > 7 * 86400)) {
+				asked = true;
+				return loadMeta(true);
+			}
+			if (r.loading)
+				return new Promise((res) => window.setTimeout(res, 1500)).then(() => document.body.contains(search) && loadMeta(false));
+			if (!have) {
+				search.placeholder = '';
+				dom.content(metaState, [ _('Не удалось загрузить наборы.') + ' ', E('a', { 'href': '#', 'click': (ev) => {
+					ev.preventDefault();
+					dom.content(metaState, '');
+					search.placeholder = _('загружаю наборы…');
+					loadMeta(true);
+				} }, _('Повторить')) ]);
+			}
+		}).catch((e) => dom.content(metaState, _('Поиск недоступен: %s').format(e.message)));
+		drawChips();
+		if (this.meta)
+			useMeta(this.meta);
+		else
+			loadMeta(false);
+
+		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('необязательно') : '' });
 		const text = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4,
 			'placeholder': 'mysite.ru\n203.0.113.0/24\nhttps://example.com/list.lst' },
-			[ [ ...l.urls.filter((u) => !catUrls[u]), ...l.entries ].join('\n') ]);
+			[ [ ...l.urls.filter((u) => !catUrls[u] && metaInit.indexOf(u) < 0), ...l.entries ].join('\n') ]);
 
 		// Устройства: известные в сети + уже выбранные в списке (даже если сейчас не в сети).
 		const devs = this.devices.slice();
@@ -274,9 +366,9 @@ return view.extend({
 			E('span', { 'class': 'st-dim' }, d.ip || d.mac)
 		])));
 		const mode = E('select', { 'class': 'cbi-input-select', 'style': 'width:auto' }, [
-			E('option', { 'value': 'all', 'selected': l.devices_mode == 'all' ? '' : null }, _('для всех устройств')),
-			E('option', { 'value': 'only', 'selected': l.devices_mode == 'only' ? '' : null }, _('только для выбранных')),
-			E('option', { 'value': 'except', 'selected': l.devices_mode == 'except' ? '' : null }, _('для всех, кроме выбранных'))
+			E('option', { 'value': 'all', 'selected': l.devices_mode == 'all' ? '' : null }, _('все')),
+			E('option', { 'value': 'only', 'selected': l.devices_mode == 'only' ? '' : null }, _('только выбранные')),
+			E('option', { 'value': 'except', 'selected': l.devices_mode == 'except' ? '' : null }, _('все, кроме выбранных'))
 		]);
 		const syncDevs = () => devList.style.display = (mode.value == 'all') ? 'none' : '';
 		mode.addEventListener('change', syncDevs);
@@ -290,32 +382,33 @@ return view.extend({
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
 
 			if (!isNew) {
-				const all_urls = [ ...checks.filter(([ cb ]) => cb.checked).flatMap(([ , , u ]) => u), ...urls ];
+				const all_urls = [ ...checks.filter(([ cb ]) => cb.checked).flatMap(([ , , u ]) => u), ...metaSel.map(metaUrl), ...urls ];
 				if (!all_urls.length && !sites.length)
-					return ui.addNotification(null, E('p', {}, _('Список пуст — отметьте что-нибудь или впишите сайты.')), 'warning');
+					return ui.addNotification(null, E('p', {}, _('Список пуст.')), 'warning');
 				ui.hideModal();
 				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, sites, action, undefined, mode.value, macs));
 			}
 
-			// Всё выбранное — один список: пункты каталога, свои ссылки и сайты.
+			// Всё выбранное — один список: пункты каталога, наборы meta-rules-dat, свои ссылки и сайты.
 			const picked = checks.filter(([ cb ]) => cb.checked);
-			const all_urls = [ ...picked.flatMap(([ , , u ]) => u), ...urls ];
+			const all_urls = [ ...picked.flatMap(([ , , u ]) => u), ...metaSel.map(metaUrl), ...urls ];
 			if (!all_urls.length && !sites.length)
 				return ui.addNotification(null, E('p', {}, _('Ничего не выбрано.')), 'warning');
-			const names = [ ...picked.map(([ , it ]) => it[0]), ...urls.map(listName), ...(sites.length ? [ _('свои сайты') ] : []) ];
+			const names = [ ...picked.map(([ , it ]) => it[0]), ...metaSel.map((p) => p[0] + ':' + p[1]), ...urls.map(listName),
+				...(sites.length ? [ _('свои сайты') ] : []) ];
 			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
 			ui.hideModal();
 			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, mode.value, macs));
 		};
 
 		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name,
-				isNew ? E('small', { 'class': 'st-dim' }, _('Если не указать — по выбранному, например «YouTube, Discord».')) : '' ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Что делать с этими сайтами')), actSel ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Действие')), actSel ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Готовые списки')), cat ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Свои сайты, подсети или ссылки на списки — по одному в строке')), text,
-				E('small', { 'class': 'st-dim' }, _('Сайт включает все поддомены. Ссылка на файл списка (например, из meta-rules-dat) загружается и обновляется сама.')) ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Для каких устройств')), mode, devList ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, 'meta-rules-dat'), chips, search, hits, metaState ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Свои сайты, подсети и ссылки на списки')), text,
+				E('small', { 'class': 'st-dim' }, _('По одному в строке, поддомены учитываются.')) ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Устройства')), mode, devList ]),
 			E('div', { 'style': 'display:flex;gap:.5em' }, [
 				isNew ? '' : E('button', { 'class': 'btn cbi-button-negative', 'click': () => { ui.hideModal(); this.handleRemove(l); } }, _('Удалить')),
 				E('span', { 'style': 'flex:1' }),
@@ -351,7 +444,7 @@ return view.extend({
 		ui.showModal(_('Своя стратегия Zapret'), [
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Программа')), bin ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Параметры nfqws')), opts,
-				E('small', { 'class': 'st-dim' }, _('Можно по одному в строке, # — комментарий. Подбирается утилитой blockcheck из пакета zapret.')) ]),
+				E('small', { 'class': 'st-dim' }, _('По одному в строке, строки с # пропускаются.')) ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Порты TCP')), tcp ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Порты UDP')), udp ]),
 			E('div', { 'style': 'display:flex;gap:.5em' }, [
@@ -408,8 +501,8 @@ return view.extend({
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
 		// Исключения: без выбора — список источника основной стратегии.
 		const exN = zc.excluded || {};
-		const exLabel = (k) => ({ zms: 'Zapret Manager', fs: 'Flowseal', all: _('все вместе') })[k] + ' — ' +
-			(exN[k] ? exN[k] + ' ' + sui.plural(exN[k], _('домен'), _('домена'), _('доменов')) : _('нет списка'));
+		const exLabel = (k) => ({ zms: 'Zapret Manager', fs: 'Flowseal', all: _('все вместе') })[k] + ' (' +
+			(exN[k] ? exN[k] + ' ' + sui.plural(exN[k], _('домен'), _('домена'), _('доменов')) : _('нет списка')) + ')';
 		const exSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_exclude: ev.target.value }) }, [
 			E('option', { 'value': '', 'selected': cfg.zapret_exclude ? null : '' }, _('как у основной: %s').format(exLabel(zc.exclude_auto))),
 			...[ 'zms', 'fs', 'all' ].map((k) => E('option', { 'value': k, 'selected': k == cfg.zapret_exclude ? '' : null }, exLabel(k)))
@@ -437,15 +530,15 @@ return view.extend({
 
 		let state;
 		if (!used)
-			state = E('span', { 'class': 'st-dim' }, _('не используется — нигде не выбрано «Zapret»'));
+			state = E('span', { 'class': 'st-dim' }, _('не используется'));
 		else if (!cfg.zapret_opts && !cur('zapret_yt', 'yv') && !cur('zapret_discord', 'dv') && !cur('zapret_games', 'gv'))
-			state = E('span', { 'class': 'st-bad' }, _('всё выключено — выберите стратегию'));
+			state = E('span', { 'class': 'st-bad' }, _('стратегия не выбрана'));
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
 		else
 			state = E('span', { 'class': 'st-bad' }, [ (zc.missing && zc.missing.length)
-				? _('не запущен — нет файлов: %s').format(zc.missing.join(', '))
-				: _('не запущен — стратегия не подходит к nfqws') ]);
+				? _('не запущен, нет файлов: %s').format(zc.missing.join(', '))
+				: _('не запущен, nfqws не принял стратегию') ]);
 
 		// Автоподбор — у каждой категории свой: кнопка и расписание. Во время проверки у её
 		// категории — ход проверки и «Остановить», у остальных — ничего.
@@ -458,7 +551,7 @@ return view.extend({
 				];
 			return [
 				E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
-					'title': _('Проверить эти стратегии и применить лучшую, если она лучше текущей'),
+					'title': _('Проверить стратегии и применить лучшую'),
 					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, true)); }) }, _('подобрать')),
 				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
 					(v) => sui.saveSettings({ [key]: v }), { custom_placeholder: _('дней…') })
@@ -492,14 +585,14 @@ return view.extend({
 		const svcBad = zi.service_running || zi.service_enabled || zi.leftover_tables;
 		const svc = E('span', { 'class': 'st-inline' }, [
 			_('служба zapret:') + ' ',
-			zi.service_running ? E('span', { 'class': 'st-bad' }, _('работает — будет мешать')) :
+			zi.service_running ? E('span', { 'class': 'st-bad' }, _('запущена и мешает')) :
 			zi.service_enabled ? E('span', { 'class': 'st-bad' }, _('включена в автозапуск')) :
 			_('остановлена, остались её правила'),
 			E('button', {
 				'class': 'btn cbi-button-negative', 'style': 'padding:0 .6em;line-height:1.7em;min-height:0',
 				'click': ui.createHandlerFn(this, () => callZapretOff().then((r) => {
 					if (r.running)
-						ui.addNotification(null, E('p', {}, _('nfqws службы zapret всё ещё работает — возможно, запущен другой обход (zapret2, zapret-manager).')), 'warning');
+						ui.addNotification(null, E('p', {}, _('nfqws службы zapret всё ещё запущен. Проверьте zapret2 и zapret-manager.')), 'warning');
 					return this.refresh();
 				}))
 			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила'))
@@ -508,7 +601,7 @@ return view.extend({
 		if (!zi.binaries.length)
 			return dom.content(this.zapretBox, [
 				E('h3', { 'style': 'margin-top:0' }, 'Zapret'),
-				E('div', { 'class': 'st-zrow' }, [ E('span', { 'class': 'st-dim' }, _('Пакет zapret не установлен — без него обход без VPN недоступен.')),
+				E('div', { 'class': 'st-zrow' }, [ E('span', { 'class': 'st-dim' }, _('Пакет zapret не установлен.')),
 					zi.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
 					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, () => callUpdateInstall('zapret').then(() => this.refresh())) }, _('Установить')) ])
 			]);
@@ -527,11 +620,11 @@ return view.extend({
 				E('b', {}, 'YouTube'), E('div', {}, [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
 				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
-				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Сайты и сервисы, которые ломаются от обхода: они всегда идут напрямую, без Zapret.') },
+				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Эти сайты идут напрямую, без Zapret') },
 					(exN.zms || exN.fs) ? _('всегда напрямую') : _('обновите каталог')) ]),
 			]),
 			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
-				_('Игры и голос Discord ходят по IP вне списков — Zapret их коснётся, только если вверху выбрано «Всё, что не попало в списки: через Zapret».')) : '',
+				_('Для игр и голоса Discord выберите вверху «Остальной трафик: через Zapret».')) : '',
 			results,
 			// Внизу — только предупреждение о конфликте с отдельной службой zapret.
 			svcBad ? E('div', { 'class': 'st-zfoot st-dim' }, svc) : ''
@@ -542,19 +635,19 @@ return view.extend({
 		const d = this.data;
 
 		dom.content(this.defaultBox, [
-			E('span', {}, _('Всё, что не попало в списки:')),
+			E('span', {}, _('Остальной трафик:')),
 			E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.call(callDefault(ev.target.value)) }, [
 				E('option', { 'value': 'vpn', 'selected': d.default_action == 'vpn' ? '' : null }, _('через VPN')),
 				E('option', { 'value': 'zapret', 'selected': d.default_action == 'zapret' ? '' : null }, _('через Zapret')),
 				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую'))
 			]),
-			E('span', { 'class': 'st-dim' }, _('Списки проверяются сверху вниз, срабатывает первый подходящий.'))
+			E('span', { 'class': 'st-dim' }, _('Списки проверяются сверху вниз.'))
 		]);
 
 		this.renderZapret();
 
 		if (!d.lists.length) {
-			dom.content(this.tableBox, E('p', {}, _('Списков нет — весь трафик идёт по правилу выше. Нажмите «Добавить», чтобы выбрать готовые списки или указать свои сайты.')));
+			dom.content(this.tableBox, E('p', {}, _('Списков пока нет.')));
 			return;
 		}
 
@@ -573,7 +666,6 @@ return view.extend({
 				E('div', {}, countLabel(l)),
 				l.updated ? E('div', {}, new Date(l.updated * 1000).toLocaleString('ru-RU')) : ''
 			]),
-			E('td', {}, actionSelect(l.action, (v) => this.call(callEdit(l.id, undefined, undefined, undefined, v, undefined)))),
 			E('td', { 'class': 'st-act' }, [
 				l.urls.length ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
 				' ',
@@ -584,7 +676,7 @@ return view.extend({
 		dom.content(this.tableBox, [
 			d.updating ? E('p', {}, E('em', { 'class': 'spinning' }, _('Загружаю списки…'))) : '',
 			E('table', { 'class': 'st-table' }, [
-				E('tr', {}, [ E('th', {}, ''), E('th', {}, ''), E('th', {}, _('Список')), E('th', {}, _('Содержимое')), E('th', {}, _('Действие')), E('th', {}, '') ]),
+				E('tr', {}, [ E('th', {}, ''), E('th', {}, ''), E('th', {}, _('Список')), E('th', {}, _('Содержимое')), E('th', {}, '') ]),
 				...rows
 			])
 		]);
@@ -606,7 +698,6 @@ return view.extend({
 		return E([], [
 			E('style', {}, CSS),
 			E('h2', {}, _('Списки сайтов')),
-			E('div', { 'class': 'cbi-map-descr' }, _('Какие сайты открывать через VPN, через Zapret, напрямую или блокировать. Список можно включить только для некоторых устройств.')),
 			this.defaultBox,
 			E('div', { 'class': 'st-bar' }, [
 				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showList(null) }, _('Добавить')),

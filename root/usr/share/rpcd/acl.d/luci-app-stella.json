@@ -37,6 +37,7 @@
 					"list_remove",
 					"list_move",
 					"lists_update",
+					"meta_index",
 					"set_default_action",
 					"device_set",
 					"device_remove",

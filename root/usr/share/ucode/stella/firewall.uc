@@ -8,6 +8,7 @@
 //   список может действовать только для части устройств) решает действие:
 //   act_vpn (TPROXY в xray), act_zapret (метка соединения → очередь nfqws на выходе),
 //   act_direct, act_block; не совпал ни один — действие по умолчанию.
+//   Работает резервный канал с «всё через VPN» — только блок-списки, остальное в act_vpn.
 
 'use strict';
 
@@ -42,10 +43,17 @@ function ports(s) {
 function macs(l) {
 	return `{ ${join(', ', l.macs)} }`;
 }
+
+// Условие на устройства списка, действующего только для части устройств.
+function scope(l) {
+	return (l.devices_mode == 'only') ? `ether saddr ${macs(l)} ` :
+		(l.devices_mode == 'except') ? `ether saddr != ${macs(l)} ` : '';
+}
 // opts: { lan_ifnames, tproxy_port, default_action, dns_hijack, block_doh,
 //         lists:   [ { id, action, cidrs, devices_mode, macs } ]   — включённые, по порядку,
 //         devices: [ { mac, policy } ]                               — vpn/direct в обход списков,
-//         zapret:  { qnum, tcp_ports, udp_ports } | null }
+//         zapret:  { qnum, tcp_ports, udp_ports } | null,
+//         all_vpn: работает резервный канал, и на нём всё через VPN }
 export function nft_script(opts) {
 	let ifs = join(', ', map(opts.lan_ifnames, (i) => sprintf('%J', i)));
 	let out = [
@@ -85,20 +93,28 @@ export function nft_script(opts) {
 				'		meta l4proto { tcp, udp } th dport 853 drop',
 				`		ip daddr { ${join(', ', DOH4)} } meta l4proto { tcp, udp } th dport 443 drop`);
 	}
-	for (let p in [ 'vpn', 'direct' ]) {
-		let m = map(filter(opts.devices || [], (d) => d.policy == p), (d) => d.mac);
-		if (length(m))
-			push(out, `		ether saddr { ${join(', ', m)} } goto act_${p}`);
+	if (opts.all_vpn) {
+		// Резервный канал (например, мобильный с белыми списками): напрямую там мало что
+		// открывается — всё через VPN, списки и устройства не действуют, кроме блокировки.
+		for (let l in opts.lists || [])
+			if (l.action == 'block')
+				push(out, `		${scope(l)}ip daddr @${l.id} goto act_block`);
+		push(out, '		goto act_vpn', '	}');
 	}
-	push(out, '		goto pol_global', '	}');
+	else {
+		for (let p in [ 'vpn', 'direct' ]) {
+			let m = map(filter(opts.devices || [], (d) => d.policy == p), (d) => d.mac);
+			if (length(m))
+				push(out, `		ether saddr { ${join(', ', m)} } goto act_${p}`);
+		}
+		push(out, '		goto pol_global', '	}');
+	}
 
 	push(out, '', '	chain pol_global {');
 	for (let l in opts.lists || []) {
 		if (!ACTIONS[l.action])
 			continue;
-		let who = (l.devices_mode == 'only') ? `ether saddr ${macs(l)} ` :
-			(l.devices_mode == 'except') ? `ether saddr != ${macs(l)} ` : '';
-		push(out, `		${who}ip daddr @${l.id} goto act_${l.action}`);
+		push(out, `		${scope(l)}ip daddr @${l.id} goto act_${l.action}`);
 	}
 	push(out, `		goto act_${(opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
 

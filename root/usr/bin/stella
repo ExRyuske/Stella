@@ -8,7 +8,7 @@ import { readfile, writefile, rename, unlink, glob, popen, stat } from 'fs';
 import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config, outbound } from 'stella.xray';
-import { fnv1a } from 'stella.util';
+import { fnv1a, try_json } from 'stella.util';
 import { nft_script, dnsmasq_conf, restore_script, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
@@ -64,6 +64,7 @@ function usage() {
 		'  pick [--apply]     подобрать лучший узел по задержке и стабильности\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
 		'  lists [id]         обновить списки сайтов\n' +
+		'  meta-index         скачать имена наборов meta-rules-dat для поиска\n' +
 		'  upgrade check|stella|xray|zapret|dnsmasq|mwan3  проверить или установить обновления\n' +
 		'  uplink             сверить узел с каналом mwan3 (вызывается из hotplug)\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
@@ -318,7 +319,7 @@ function routing_opts() {
 	let lists = enabled_lists();
 	let zapret = zapret_used(lists);
 	let hijack = opt('main', 'dns_hijack', '1') == '1';
-	let block_doh = hijack && opt('main', 'block_doh', '1') == '1';
+	let block_doh = hijack && opt('main', 'block_doh', '0') == '1';
 	return {
 		lists,
 		nft: {
@@ -329,7 +330,8 @@ function routing_opts() {
 			block_doh,
 			lists: map(lists, (l) => ({ id: l.id, action: l.action, cidrs: l.cidrs, devices_mode: l.devices_mode, macs: l.macs })),
 			devices: load_devices(uci),
-			zapret: zapret ? { qnum: ZAPRET_QNUM, ...zapret_ports() } : null
+			zapret: zapret ? { qnum: ZAPRET_QNUM, ...zapret_ports() } : null,
+			all_vpn: opt('main', 'backup_vpn', '0') == '1' && on_backup(uci) != null
 		},
 		dnsmasq: { dns_port: DNS_PORT, block_doh, lists: [
 			...map(lists, (l) => ({ id: l.id, domains: l.domains })),
@@ -456,6 +458,31 @@ function cmd_lists(only) {
 			unlink(f);
 
 	return failed ? 1 : 0;
+}
+
+// Имена наборов meta-rules-dat для поиска в интерфейсе: geosite — сайты, geoip — подсети.
+// Берутся из дерева репозитория через API GitHub; лежат в RUN_DIR — флеш не трогают, после
+// перезагрузки скачаются заново.
+const META_TREES = getenv('STELLA_META_TREES') || 'https://api.github.com/repos/MetaCubeX/meta-rules-dat/git/trees/meta:geo/';
+
+function cmd_meta_index() {
+	let proxy = `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	let res = { at: time() };
+	for (let kind in [ 'geosite', 'geoip' ]) {
+		let url = META_TREES + kind;
+		let tree = try_json(fetch(url, 'stella', null) ?? fetch(url, 'stella', proxy) ?? 'null')?.tree;
+		if (type(tree) != 'array') {
+			warn(`meta-rules-dat: не удалось получить наборы ${kind}\n`);
+			return 1;
+		}
+		res[kind] = sort(map(filter(tree, (e) => e.type == 'blob' && match(e.path, /^[a-z0-9@!_.-]+\.list$/)),
+			(e) => replace(e.path, /\.list$/, '')));
+	}
+	system(`mkdir -p ${shq(RUN_DIR)}`);
+	writefile(`${RUN_DIR}/meta-index.json.tmp`, sprintf('%J', res));
+	rename(`${RUN_DIR}/meta-index.json.tmp`, `${RUN_DIR}/meta-index.json`);
+	printf('meta-rules-dat: geosite %d, geoip %d\n', length(res.geosite), length(res.geoip));
+	return 0;
 }
 
 // Команда запуска nfqws для init (по строке на аргумент); пусто — zapret не используется.
@@ -1394,6 +1421,7 @@ const CMDS = {
 	fw: cmd_fw,
 	migrate: cmd_migrate,
 	lists: cmd_lists,
+	'meta-index': cmd_meta_index,
 	tick: cmd_tick,
 	'zapret-catalog': cmd_zapret_catalog,
 	'zapret-test': cmd_zapret_test,

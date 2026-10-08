@@ -288,6 +288,20 @@ if (ok)
 else
 	fail(`nft_script:\n${nft}`);
 
+// Резервный канал «всё через VPN»: блок-списки (со своими устройствами) действуют, остальное —
+// в VPN мимо списков и устройств «всё напрямую».
+let nb = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'direct', zapret: null, all_vpn: true,
+	lists: [
+		{ id: 'list_a', action: 'direct', cidrs: [], devices_mode: 'all', macs: [] },
+		{ id: 'list_b', action: 'block', cidrs: [], devices_mode: 'only', macs: [ 'aa:bb:cc:dd:ee:ff' ] }
+	],
+	devices: [ { mac: '11:22:33:44:55:66', policy: 'direct' } ] });
+if (index(nb, '\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b goto act_block\n\t\tgoto act_vpn\n\t}') >= 0 &&
+    index(nb, 'goto pol_global') < 0 && index(nb, '11:22:33:44:55:66') < 0)
+	passed++;
+else
+	fail(`all_vpn:\n${nb}`);
+
 // Возврат адресов в сеты: в список только добавили — возвращаются; из списка что-то убрали —
 // нет (иначе убранный сайт шёл бы по правилу до перезагрузки); прежнего состояния нет — да.
 let rs = restore_script(
