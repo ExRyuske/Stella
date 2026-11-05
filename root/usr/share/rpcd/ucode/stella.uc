@@ -5,9 +5,10 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, read_json, load_nodes, sub_label, load_lists, load_devices, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, read_json, load_nodes, sub_label, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
 import { parse } from 'stella.uri';
-import { fnv1a } from 'stella.util';
+import { fnv1a, mac_list, try_json } from 'stella.util';
+import { dns_set, ACTIONS } from 'stella.firewall';
 
 // Без явного load() первый add() молча ничего не делает.
 function cursor() {
@@ -26,10 +27,8 @@ function new_section(uci, type, prefix, seed) {
 	return name;
 }
 
-const XRAY_CONF = '/var/etc/stella/config.json';
 // Проверка интернета напрямую: Яндекс DNS по HTTPS — открыт и на мобильных белых списках.
 const DIRECT_PROBE = 'https://77.88.8.8/dns-query';
-const ZAPRET_DIR = getenv('STELLA_ZAPRET_DIR') || '/etc/stella/zapret';
 // Подделки для UDP (голос Discord, игры) — набор из Zapret Manager; stun.bin — по умолчанию.
 const UDP_FAKES = [ 'stun2.bin', 'quic_initial_www_google_com.bin', 'quic_initial_4pda_to.bin',
 	'quic_initial_tencent_com.bin', 'quic_initial_steamcommunity_com.bin', 'quic_initial_5ka_ru.bin',
@@ -40,7 +39,7 @@ function shq(s) {
 }
 
 function running() {
-	return system(`pgrep -f '^/usr/bin/xray run -c ${XRAY_CONF}' >/dev/null`) == 0;
+	return xray_pid() != null;
 }
 
 function busy(name) {
@@ -53,8 +52,6 @@ function spawn(name, cmd) {
 	system(`sh ${task_script(name, cmd)} </dev/null >/dev/null 2>&1 &`);
 	return true;
 }
-
-const ACTIONS = { vpn: true, zapret: true, direct: true, block: true };
 
 function cmd_output(cmd) {
 	let p = popen(cmd, 'r');
@@ -85,6 +82,8 @@ const SETTINGS = {
 	backup_node: { title: 'Узел резервного канала', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
 	backup_vpn: { title: 'Резервный канал через VPN', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
 	lists_interval: { title: 'Обновление списков', def: '24', apply: 'reload', check: HOURS },
+	// Планировщик читает настройки сам — применять нечего.
+	upgrade_interval: { title: 'Автообновление', def: '24', check: HOURS },
 	lan_ifname: { title: 'Интерфейсы LAN', def: [ 'br-lan' ], apply: 'reload',
 		check: (v) => type(v) == 'array' && length(v) && length(filter(v, (i) => !match(i, /^[A-Za-z0-9._-]+$/))) == 0 },
 	zapret_bin: { title: 'Программа nfqws', def: '', apply: 'reload', check: (v) => v == '' || match(v, /^\/[A-Za-z0-9._\/-]+$/) != null },
@@ -106,7 +105,7 @@ const SETTINGS = {
 // очереди 202, проверочный при автоподборе — на 205.
 function zapret_foreign_nfqws() {
 	for (let line in split(cmd_output('ps w') || '', '\n'))
-		if (match(line, /nfqws/) && !match(line, /--qnum=20[25]/) && !match(line, /ps w/))
+		if (match(line, /nfqws/) && !match(line, regexp(`--qnum=(${ZAPRET_QNUM}|${ZT_QNUM})( |$)`)) && !match(line, /ps w/))
 			return true;
 	return false;
 }
@@ -206,7 +205,9 @@ const methods = {
 				select_mode: uci.get('stella', 'main', 'select_mode') || 'single',
 				updating: busy('update'),
 				pinging: busy('ping'),
-				update_log: readfile(`${RUN_DIR}/update.log`) || ''
+				update_log: readfile(`${RUN_DIR}/update.log`) || '',
+				speed: read_json(`${RUN_DIR}/speed.json`, null),
+				speedtesting: busy('speed')
 			};
 		}
 	},
@@ -432,6 +433,13 @@ const methods = {
 		}
 	},
 
+	// Скорость загрузки напрямую и через VPN; итог — в status.
+	speedtest: {
+		call: function() {
+			return { started: spawn('speed', '/usr/bin/stella speedtest') };
+		}
+	},
+
 	// Выходной IP через socks-вход xray: показывает, что трафик реально идёт через узел.
 	// Проверка по шагам всей цепочки, которой идёт трафик устройства: сервер VPN отвечает,
 	// правила перехвата и маршрут на месте, DNS отвечает, а IP сайта из списка попал в сет.
@@ -462,7 +470,7 @@ const methods = {
 			let out = cmd_output(`curl -s --max-time 8 -w '\\n%{time_total}' --socks5-hostname 127.0.0.1:${port} https://ipinfo.io/json`);
 			let lines = split(trim(out || ''), '\n');
 			let t = +pop(lines);
-			let info = json(join('\n', lines) || 'null');
+			let info = try_json(join('\n', lines) || 'null');
 			if (type(info) == 'object' && info.ip)
 				step('Сервер VPN', true, `${info.ip}, ${info.country || '?'}, ${info.org || ''}, ${int(t * 1000)} мс`);
 			else
@@ -488,7 +496,7 @@ const methods = {
 
 			if (length(vpn) && length(ips) && nftset && nft) {
 				let l = vpn[0];
-				let inset = system(`nft get element inet stella ${l.id} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
+				let inset = system(`nft get element inet stella ${dns_set(l.id)} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
 				step(`Список «${l.name}»`, inset, inset ? `${d} идёт через VPN` :
 					`IP ${d} нет в правилах, откройте сайт ещё раз`);
 			}
@@ -519,7 +527,7 @@ const methods = {
 		call: function(req) {
 			let uci = cursor();
 			let action = ACTIONS[req.args?.action] ? req.args.action : 'vpn';
-			let macs = map(filter(str_list(req.args?.macs), (m) => match(m, /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/)), (m) => lc(m));
+			let macs = mac_list(req.args?.macs);
 			let dmode = (req.args?.devices_mode in [ 'only', 'except' ] && length(macs)) ? req.args.devices_mode : null;
 			let added = 0;
 			for (let it in req.args?.items || []) {
@@ -573,7 +581,7 @@ const methods = {
 				length(e) ? uci.set('stella', a.id, 'entry', e) : uci.delete('stella', a.id, 'entry');
 			}
 			if (a.devices_mode != null) {
-				let macs = map(filter(str_list(a.macs), (m) => match(m, /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/)), (m) => lc(m));
+				let macs = mac_list(a.macs);
 				if (a.devices_mode in [ 'only', 'except' ] && length(macs)) {
 					uci.set('stella', a.id, 'devices_mode', a.devices_mode);
 					uci.set('stella', a.id, 'mac', macs);
@@ -672,8 +680,8 @@ const methods = {
 				push(res, d);
 			}
 			let add = (mac, ip, host) => {
-				mac = lc(mac || '');
-				if (!match(mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/))
+				mac = mac_list(mac)[0];
+				if (!mac)
 					return;
 				let d = seen[mac];
 				if (!d) {
@@ -688,10 +696,8 @@ const methods = {
 				if (length(f) >= 4)
 					add(f[1], f[2], f[3]);
 			}
-			let lan = uci.get('stella', 'main', 'lan_ifname') || [ 'br-lan' ];
-			for (let ifn in (type(lan) == 'array') ? lan : [ lan ]) {
-				if (!match(ifn, /^[A-Za-z0-9._-]+$/))
-					continue;
+			// Те же интерфейсы, с которых перехватывается трафик (имена в lan_ifnames уже проверены).
+			for (let ifn in lan_ifnames(uci)) {
 				for (let l in split(cmd_output(`ip -4 neigh show dev ${ifn}`) || '', '\n')) {
 					let m = match(l, /^([0-9.]+) lladdr ([0-9a-f:]+)/);
 					if (m)
@@ -708,8 +714,8 @@ const methods = {
 		call: function(req) {
 			let uci = cursor();
 			let a = req.args || {};
-			let mac = lc(a.mac || '');
-			if (!match(mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/))
+			let mac = mac_list(a.mac)[0];
+			if (!mac)
 				return { error: 'некорректный MAC' };
 			let sid = 'dev_' + replace(mac, /:/g, '');
 			if (uci.get('stella', sid) != 'device')
@@ -755,7 +761,7 @@ const methods = {
 				service_running: zapret_foreign_nfqws(),
 				leftover_tables: system('nft list table inet zapret >/dev/null 2>&1 || nft list table inet zapret2 >/dev/null 2>&1') == 0,
 				// «[n]» — чтобы pgrep не нашёл собственную оболочку с этим же текстом.
-				stella_nfqws: system("pgrep -f '[n]fqws --qnum=202' >/dev/null") == 0,
+				stella_nfqws: system(`pgrep -f '[n]fqws --qnum=${ZAPRET_QNUM}' >/dev/null`) == 0,
 				import_opts: z.get('zapret', 'config', 'NFQWS_OPT'),
 				import_tcp: z.get('zapret', 'config', 'NFQWS_PORTS_TCP'),
 				import_udp: z.get('zapret', 'config', 'NFQWS_PORTS_UDP')

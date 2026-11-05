@@ -4,8 +4,8 @@
 // Путь пакета от устройства LAN (prerouting, mangle):
 //   локальные адреса → мимо; DNS (при перехвате) → мимо, его заберёт nat-цепочка;
 //   устройство «всё через VPN / напрямую» → сразу act_vpn / act_direct;
-//   остальные → pol_global: первый совпавший список (сет с IP, наполняемый dnsmasq;
-//   список может действовать только для части устройств) решает действие:
+//   остальные → pol_global: первый совпавший список (его подсети или адреса его доменов,
+//   которые кладёт dnsmasq; список может действовать только для части устройств) решает действие:
 //   act_vpn (TPROXY в xray), act_zapret (метка соединения → очередь nfqws на выходе),
 //   act_direct, act_block; не совпал ни один — действие по умолчанию.
 //   Работает резервный канал с «всё через VPN» — только блок-списки, остальное в act_vpn.
@@ -17,12 +17,31 @@ export const ZAPRET_MARK = 0x00200000;
 export const ROUTE_TABLE = 1127;
 export const NFQWS_DESYNC_MARK = 0x40000000;
 
+// Адреса, которые кладёт dnsmasq, живут в сете 12 часов с последнего пакета: CDN отдают один
+// адрес разным сайтам и меняют их, и без срока адрес, давно отданный другому сайту, уводил бы
+// тот сайт по правилу списка до перезагрузки. Пока к адресу идут пакеты, срок продлевается
+// (update в правиле), — открытые соединения не обрываются.
+const DNS_TIMEOUT = '12h';
+// Кэш dnsmasq держит ответ не дольше 5 минут: из кэша он адреса в сеты не кладёт, и
+// истёкший адрес вернётся в сет при следующем запросе, а не когда истечёт TTL сайта.
+const DNS_CACHE_TTL = 300;
+
+// Сет для адресов от dnsmasq и правило, которое продлевает их срок. Предел — с запасом: у
+// сета с update по умолчанию 65535, а переполненный молча перестаёт принимать адреса.
+function dns_set_def(name) {
+	return [ '', `	set ${name} {`, '		type ipv4_addr', '		size 262144', '		flags dynamic, timeout', `		timeout ${DNS_TIMEOUT}`, '	}' ];
+}
+
+function dns_match(name) {
+	return `ip daddr @${name} update @${name} { ip daddr }`;
+}
+
 const BYPASS4 = [
 	'0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
 	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4'
 ];
 
-const ACTIONS = { vpn: true, zapret: true, direct: true, block: true };
+export const ACTIONS = { vpn: true, zapret: true, direct: true, block: true };
 
 // Публичные DoH-резолверы (Cloudflare, Google, Quad9, AdGuard, OpenDNS, Яндекс).
 const DOH4 = [
@@ -49,6 +68,23 @@ function scope(l) {
 	return (l.devices_mode == 'only') ? `ether saddr ${macs(l)} ` :
 		(l.devices_mode == 'except') ? `ether saddr != ${macs(l)} ` : '';
 }
+
+// Сет адресов доменов списка — его наполняет dnsmasq. Обычный, не interval: добавление даже
+// одного адреса заставляет nft (и dnsmasq) перечитать все сеты interval целиком, и раньше,
+// когда адреса копились в сетах подсетей, каждый ответ DNS с ростом сетов шёл всё дольше.
+export function dns_set(id) {
+	return `${id}_dns`;
+};
+
+// Правила списка: его подсети (если есть) и адреса его доменов.
+function list_rules(l, verdict) {
+	let res = [];
+	if (length(l.cidrs))
+		push(res, `		${scope(l)}ip daddr @${l.id} ${verdict}`);
+	push(res, `		${scope(l)}${dns_match(dns_set(l.id))} ${verdict}`);
+	return res;
+}
+
 // opts: { lan_ifnames, tproxy_port, default_action, dns_hijack, block_doh,
 //         lists:   [ { id, action, cidrs, devices_mode, macs } ]   — включённые, по порядку,
 //         devices: [ { mac, policy } ]                               — vpn/direct в обход списков,
@@ -69,13 +105,13 @@ export function nft_script(opts) {
 	];
 
 	if (opts.zapret)
-		push(out, '', '	set zapret_excl {', '		type ipv4_addr', '		flags interval', '		auto-merge', '	}');
+		push(out, ...dns_set_def('zapret_excl'));
 
 	for (let l in opts.lists || []) {
-		push(out, '', `	set ${l.id} {`, '		type ipv4_addr', '		flags interval', '		auto-merge');
 		if (length(l.cidrs))
-			push(out, `		elements = { ${join(', ', l.cidrs)} }`);
-		push(out, '	}');
+			push(out, '', `	set ${l.id} {`, '		type ipv4_addr', '		flags interval', '		auto-merge',
+				`		elements = { ${join(', ', l.cidrs)} }`, '	}');
+		push(out, ...dns_set_def(dns_set(l.id)));
 	}
 
 	push(out, '',
@@ -98,7 +134,7 @@ export function nft_script(opts) {
 		// открывается — всё через VPN, списки и устройства не действуют, кроме блокировки.
 		for (let l in opts.lists || [])
 			if (l.action == 'block')
-				push(out, `		${scope(l)}ip daddr @${l.id} goto act_block`);
+				push(out, ...list_rules(l, 'goto act_block'));
 		push(out, '		goto act_vpn', '	}');
 	}
 	else {
@@ -114,7 +150,7 @@ export function nft_script(opts) {
 	for (let l in opts.lists || []) {
 		if (!ACTIONS[l.action])
 			continue;
-		push(out, `		${scope(l)}ip daddr @${l.id} goto act_${l.action}`);
+		push(out, ...list_rules(l, `goto act_${l.action}`));
 	}
 	push(out, `		goto act_${(opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
 
@@ -135,7 +171,7 @@ export function nft_script(opts) {
 		'	chain act_zapret {',
 		// Исключения Zapret (российские сайты и сервисы, которые ломаются от обхода) —
 		// всегда напрямую, без искажений; сет наполняет dnsmasq.
-		...(opts.zapret ? [ '		ip daddr @zapret_excl accept' ] : []),
+		...(opts.zapret ? [ `		${dns_match('zapret_excl')} accept` ] : []),
 		`		ct mark set ct mark | ${hex(ZAPRET_MARK)} accept`,
 		'	}');
 
@@ -184,7 +220,8 @@ export function nft_script(opts) {
 // saved — { сет: [IP] } из прежней таблицы; prev и cur — { сет: [домены и подсети] } при
 // прошлом и нынешнем включении. Если из списка что-то убрали, его адреса не возвращаются:
 // по ним не понять, чей это IP, а убранный сайт шёл бы по правилу списка до перезагрузки.
-// Сет снова наполнится, как только устройства переспросят DNS.
+// Сет снова наполнится, когда устройства переспросят DNS, — если кэш dnsmasq сброшен: из
+// кэша dnsmasq в сеты ничего не кладёт.
 export function restore_script(saved, prev, cur) {
 	let out = [];
 	for (let id, entries in cur) {
@@ -215,12 +252,14 @@ export function dnsmasq_conf(opts) {
 
 	// max-ttl: устройства переспрашивают не реже раза в минуту — новый список начинает
 	// действовать через минуту, а не когда истечёт TTL сайта. Кэш dnsmasq держит настоящий TTL.
-	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}`, 'max-ttl=60' ];
+	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}`, 'max-ttl=60', `max-cache-ttl=${DNS_CACHE_TTL}` ];
 	// «Канарейки»: по NXDOMAIN Firefox отключает свой DoH, Apple — iCloud Private Relay.
 	if (opts.block_doh)
 		push(out, 'address=/use-application-dns.net/', 'address=/mask.icloud.com/', 'address=/mask-h2.icloud.com/');
-	for (let d in order)
-		push(out, `nftset=/${d}/${join(',', sets[d])}`);
+	// Без поддержки nftset (обычный dnsmasq, не dnsmasq-full) он с такими строками не запустится.
+	if (opts.nftset !== false)
+		for (let d in order)
+			push(out, `nftset=/${d}/${join(',', sets[d])}`);
 	push(out, '');
 	return join('\n', out);
 };

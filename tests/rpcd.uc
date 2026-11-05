@@ -61,6 +61,11 @@ r = methods.settings_set.call({ args: { values: { dns_direct: 'https://1.1.1.1/d
 let st = methods.settings.call({ args: {} });
 check('settings_set', r.ok && st.dns_direct == 'https://1.1.1.1/dns-query' && st.block_doh == '0' &&
 	sprintf('%J', st.lan_ifname) == '[ "br-lan", "br-guest" ]' && st.sub_interval == '6' && st.lists_interval == '24', st);
+check('upgrade_interval default', methods.settings.call({ args: {} }).upgrade_interval == '24', null);
+check('upgrade_interval bad', methods.settings_set.call({ args: { values: { upgrade_interval: 'daily' } } }).error != null, null);
+r = methods.settings_set.call({ args: { values: { upgrade_interval: '0' } } });
+check('upgrade_interval', r.ok && methods.settings.call({ args: {} }).upgrade_interval == '0', r);
+
 
 // Резервный канал mwan3: в сети только он — в статусе его узел, подбор не запускается;
 // удаление узла снимает его с резервного канала.
@@ -89,6 +94,11 @@ check('task starting', task_busy('t1'), null);
 writefile(`${rd}/t1.running`, '999999');
 check('task dead pid', !task_busy('t1'), null);
 check('task no flag', !task_busy('nope'), null);
+
+// Скорость: итог из файла задачи — в статусе.
+writefile(`${rd}/speed.json`, sprintf('%J', { at: 1, direct: 94.5, vpn_off: true }));
+st = methods.status.call({ args: {} });
+check('status speed', st.speed?.direct == 94.5 && st.speed.vpn_off && !st.speedtesting, st.speed);
 
 // Имена наборов meta-rules-dat: нет файла — пусто, есть — из него.
 r = methods.meta_index.call({ args: {} });

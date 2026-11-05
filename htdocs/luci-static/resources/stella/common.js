@@ -3,8 +3,8 @@
 'require rpc';
 'require ui';
 
-// Общее для страниц Stella: иконки, выпадающий список с готовыми вариантами, склонение,
-// сохранение настроек.
+// Общее для страниц Stella: стили, иконки, выпадающие списки с готовыми вариантами, время,
+// склонение, сохранение настроек.
 //
 // Иконки — свои SVG одного размера и цвета текста: символы Юникода (⏱ ⟳ ⚙) в каждом
 // шрифте рисуются по-своему, и кнопки выходили разной высоты.
@@ -23,7 +23,40 @@ const PATHS = {
 
 const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 
+// Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
+// запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
+// Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
+const API = 3;
+
+// Расписания в часах: обновление подписок, списков, автообновление.
+const HOURS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
+	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
+
+// Один шаблон для всех страниц: заголовок; рамка с настройками страницы (st-card: подписи
+// слева, под значением — серое пояснение st-hint); строка кнопок (st-bar: «Добавить» слева,
+// поиск растягивается, значки справа); содержимое в рамке (st-box); дальше разделы — h3 и
+// снова st-card.
 const CSS = `
+.st-card { display:grid; grid-template-columns:max-content 1fr; gap:.6em 1.2em; align-items:baseline; padding:1em; border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:1em }
+.st-card > .st-k { opacity:.65 }
+.st-card > .st-wide { grid-column:1 / -1 }
+.st-card > hr { grid-column:1 / -1; width:100%; margin:.1em 0; border:0; border-top:1px solid rgba(128,128,128,.2) }
+.st-card .cbi-dropdown { min-width:12em; max-width:100% }
+.st-row { display:flex; flex-wrap:wrap; gap:.4em .8em; align-items:center }
+.st-hint, .st-full { flex-basis:100% }
+.st-hint { font-size:90%; opacity:.55 }
+.st-bar { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:0 0 1em }
+.st-bar input[type=text] { flex:1; min-width:10em }
+.st-box { border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:1em; overflow:hidden }
+.st-box > p { margin:.8em 1em }
+.st-table { width:100%; border-collapse:collapse; margin:0 }
+.st-table td, .st-table th { padding:.35em .6em; border-bottom:1px solid rgba(128,128,128,.15); vertical-align:middle; text-align:left }
+.st-table tr:last-child td { border-bottom:0 }
+.st-table th { font-weight:normal; opacity:.6; font-size:90% }
+.st-table .st-dim { font-size:85% }
+.st-act { text-align:right; white-space:nowrap; width:1% }
+.st-act .btn { line-height:1.8em; min-height:0 }
+.st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.55 }
 .st-ico { display:inline-block; vertical-align:middle; line-height:1 }
 .st-ico svg { display:block; width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round }
 .st-ico.filled svg { fill:currentColor }
@@ -59,22 +92,82 @@ return baseclass.extend({
 		}, this.icon(name));
 	},
 
-	// Выпадающий список LuCI с готовыми вариантами и своим значением. Виджет сообщает об
-	// изменении и при простом закрытии списка — поэтому onchange зовётся, только если
-	// значение действительно стало другим.
-	combo(value, choices, onchange, opts) {
-		const w = new ui.Combobox(value, Object.fromEntries(choices),
-			Object.assign({ sort: false, custom_placeholder: _('свой вариант…') }, opts));
+	// Для load() страницы: модуль из кэша браузера старее нужного — скачать его заново и
+	// перезагрузить страницу (один раз за сеанс, чтобы не зациклиться).
+	need(api) {
+		if (API >= api)
+			return Promise.resolve();
+		try {
+			if (sessionStorage.getItem('stella-common') == String(api))
+				return Promise.resolve();
+			sessionStorage.setItem('stella-common', String(api));
+		}
+		catch (e) {}
+		return fetch(L.env.base_url + '/stella/common.js' + (L.env.resource_version ? '?v=' + L.env.resource_version : ''), { cache: 'reload' })
+			.then(() => { location.reload(); return new Promise(() => {}); });
+	},
+
+	// Строка рамки: подпись слева, значения справа (в строку; пояснение st-hint — под ними).
+	kv(label, value, title) {
+		return [ E('span', { 'class': 'st-k', 'title': title || null }, label), E('div', { 'class': 'st-row' }, value) ];
+	},
+
+	// Серое пояснение под значением в строке рамки.
+	hint(text) {
+		return E('div', { 'class': 'st-hint' }, [ text ]);
+	},
+
+	dim(text) {
+		return E('span', { 'class': 'st-dim' }, [ text ]);
+	},
+
+	// Время событий везде одинаково — с датой и секундами.
+	time(ts) {
+		return new Date(ts * 1000).toLocaleString('ru-RU');
+	},
+
+	// Расписание в часах (0 — вручную) с готовыми вариантами.
+	hours(value, onchange) {
+		return this.combo(value, HOURS, onchange, { custom_placeholder: _('часов…') });
+	},
+
+	// Выпадающие списки — только виджеты LuCI, а не <select> браузера: у них другие отступы и
+	// стрелка. choices — [ [значение, подпись] ] в нужном порядке; подпись может быть элементом.
+	// Виджет сообщает об изменении и при простом закрытии списка — поэтому onchange зовётся,
+	// только если значение действительно стало другим.
+	dropdown(widget, value, choices, onchange, opts) {
+		value = (value == null) ? '' : String(value);
+		const w = new widget(value, Object.fromEntries(choices), Object.assign({ sort: choices.map((c) => c[0]) }, opts));
 		const el = w.render();
 		let last = value;
 		el.addEventListener('widget-change', () => {
 			const v = w.getValue();
-			if (v == null || v === '' || v === last)
+			if (v == null || v === last || (v === '' && widget === ui.Combobox))
 				return;
 			last = v;
 			onchange(v);
 		});
 		return el;
+	},
+
+	// Готовые варианты и своё значение.
+	combo(value, choices, onchange, opts) {
+		return this.dropdown(ui.Combobox, value, choices, onchange, Object.assign({ custom_placeholder: _('свой вариант…') }, opts));
+	},
+
+	// Только готовые варианты (пустое значение — обычный вариант; снять выбор нельзя).
+	// Значения нет среди вариантов (например, выбранная подписка удалена) — показывается первый,
+	// как у обычного списка, а не пустое поле.
+	select(value, choices, onchange) {
+		value = (value == null) ? '' : String(value);
+		if (!choices.some((c) => c[0] === value))
+			value = choices[0][0];
+		return this.dropdown(ui.Dropdown, value, choices, onchange, { optional: false });
+	},
+
+	// Подпись варианта с серой припиской — вместо групп <optgroup>.
+	label(text, note) {
+		return E('span', {}, [ text, ' ', this.dim(note) ]);
 	},
 
 	// Сохранить настройки (rpc settings_set); ошибку — уведомлением. Промис — сохранилось ли.

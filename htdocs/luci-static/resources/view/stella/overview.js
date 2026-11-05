@@ -4,11 +4,12 @@
 'require ui';
 'require poll';
 'require dom';
-'require stella.ui as sui';
+'require stella.common as sui';
 
 const callStatus = rpc.declare({ object: 'stella', method: 'status' });
 const callCheck = rpc.declare({ object: 'stella', method: 'check' });
 const callRestart = rpc.declare({ object: 'stella', method: 'restart' });
+const callSpeedtest = rpc.declare({ object: 'stella', method: 'speedtest' });
 const callSetEnabled = rpc.declare({ object: 'stella', method: 'set_enabled', params: [ 'enabled' ] });
 const callLog = rpc.declare({ object: 'stella', method: 'log', expect: { log: '' } });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
@@ -27,64 +28,83 @@ const DNS_DIRECT = [
 	[ 'https://8.8.8.8/dns-query', 'Google (DoH) — https://8.8.8.8/dns-query' ]
 ];
 
-
 const CSS = `
-.st-card { display:grid; grid-template-columns:max-content 1fr; gap:.6em 1.2em; align-items:center; padding:1em; border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:1em }
-.st-card .st-k { opacity:.65 }
-.st-card select, .st-card input[type=text] { width:auto; max-width:100% }
-.st-card .cbi-dropdown { min-width:26em; max-width:100% }
-.st-head { display:flex; align-items:center; gap:1em; flex-wrap:wrap; margin-bottom:1em }
-.st-head .st-state { font-size:120%; font-weight:bold }
-.st-ok { color:#2a2 } .st-bad { color:#c33 } .st-dim { opacity:.55; font-size:90% }
+.st-dns .cbi-dropdown { min-width:26em }
+.st-state { font-size:120%; font-weight:bold }
+.st-out:empty { display:none }
 .st-log summary { cursor:pointer; padding:.4em 0 }
 .st-log textarea { width:100%; font-family:monospace; font-size:12px }
-.st-row { display:flex; gap:.5em; align-items:center; flex-wrap:wrap }
 `;
+
+// «0.1.14-r1» → «0.1.14», «v0.1.14» → «0.1.14».
+function ver(v) {
+	return v ? String(v).replace(/^v/, '').replace(/-r[0-9]+$/, '') : v;
+}
 
 return view.extend({
 	load() {
-		return Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]);
+		return sui.need(3).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
 	},
 
 	renderStatus(st) {
-		let state, btn;
-		if (!st.enabled) {
+		let state;
+		if (!st.enabled)
 			state = E('span', { 'class': 'st-state st-dim' }, _('Выключено'));
-			btn = E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'));
-		}
-		else {
-			state = !st.running ? E('span', { 'class': 'st-state st-bad' }, _('Не запущено, см. лог')) :
-				!st.intercept ? E('span', { 'class': 'st-state st-bad' }, _('Перехват не работает, см. лог')) :
-				E('span', { 'class': 'st-state st-ok' }, _('Работает'));
-			btn = E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleEnable', false) }, _('Выключить'));
-		}
+		else if (!st.running)
+			state = E('span', { 'class': 'st-state st-bad' }, _('Не запущено, см. лог'));
+		else if (!st.intercept)
+			state = E('span', { 'class': 'st-state st-bad' }, _('Перехват не работает, см. лог'));
+		else
+			state = E('span', { 'class': 'st-state st-ok' }, _('Работает'));
 
+		// Узел — ссылкой на «Серверы»: там он и меняется. (LuCI не разворачивает вложенные
+		// массивы — здесь всё плоско.)
+		const href = L.url('admin/services/stella/servers');
 		let node;
 		if (st.node)
-			node = [ E('strong', {}, [ st.node.name ]), ' ',
-				E('span', { 'class': 'st-dim' }, [ st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source ]),
-				st.backup ? E('span', { 'class': 'st-bad' }, [ ' ', _('(резервный канал %s)').format(st.backup) ]) : '' ];
+			node = [ E('a', { 'href': href }, [ st.node.name ]), ', ', st.node.source == 'manual' ? _('отдельная ссылка') : st.node.source,
+				st.backup ? ', ' : '', st.backup ? E('span', { 'class': 'st-bad' }, _('резервный канал %s').format(st.backup)) : '' ];
 		else if (st.node_id)
-			node = [ E('span', { 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
+			node = [ E('a', { 'href': href, 'class': 'st-bad' }, _('выбранный узел пропал из списка')) ];
 		else if (st.select_mode == 'auto')
-			node = [ E('strong', {}, _('автовыбор из ★')) ];
+			node = [ E('a', { 'href': href }, _('автовыбор из ★')) ];
 		else if (st.select_mode == 'best')
-			node = [ E('span', { 'class': 'st-dim' }, _('лучший по проверке, ещё не подобран')) ];
+			node = [ E('a', { 'href': href }, _('лучший по проверке, ещё не подобран')) ];
 		else
-			node = [ E('span', { 'class': 'st-bad' }, _('не выбран')) ];
+			node = [ E('a', { 'href': href, 'class': 'st-bad' }, _('узел не выбран')) ];
 
-		dom.content(this.statusBox, [
-			E('div', { 'class': 'st-head' }, [ state, btn ]),
-			E('div', { 'class': 'st-card' }, [
-				E('span', { 'class': 'st-k' }, _('Узел')),
-				E('span', {}, [ ...node, ' ', E('a', { 'href': L.url('admin/services/stella/servers') }, _('сменить')) ]),
-				E('span', { 'class': 'st-k' }, _('Проверка')),
-				E('span', {}, this.checkBox),
-				E('span', {}, ''),
-				E('span', {}, st.enabled ? E('button', {
-					'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleRestart')
-				}, _('Перезапустить')) : '')
-			])
+		dom.content(this.statusBox, E('div', { 'class': 'st-card' }, [
+			E('div', { 'class': 'st-wide st-row' }, [
+				state, E('span', {}, [ '(', ...node, ')' ]), E('span', { 'style': 'flex:1' }),
+				st.enabled ? E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleRestart') }, _('Перезапустить')) : '',
+				st.enabled ?
+					E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleEnable', false) }, _('Выключить')) :
+					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'))
+			]),
+			...sui.kv(_('Проверка'), [ this.checkBtn, this.checkOut ]),
+			...sui.kv(_('Скорость'), [ this.speedBtn, this.speedOut ], _('загрузка с speed.cloudflare.com'))
+		]));
+		this.renderSpeed(st);
+	},
+
+	// Итог проверки скорости (или её ход) — из status, который опрашивается каждые 5 с.
+	renderSpeed(st) {
+		const s = st.speed;
+		this.speedBtn.disabled = !!st.speedtesting;
+		if (st.speedtesting) {
+			dom.content(this.speedOut, E('em', { 'class': 'spinning' },
+				(s && s.step == 'vpn') ? _('проверяю через VPN…') : _('проверяю напрямую…')));
+			return;
+		}
+		if (!s || s.step) {
+			dom.content(this.speedOut, '');
+			return;
+		}
+		const mbps = (v) => (v == null) ? E('span', { 'class': 'st-bad' }, _('нет ответа')) :
+			'%s %s'.format(v >= 10 ? Math.round(v) : v.toFixed(1), _('Мбит/с'));
+		dom.content(this.speedOut, [
+			_('напрямую'), ' ', mbps(s.direct), ', ', _('через VPN'), ' ',
+			s.vpn_off ? E('span', { 'class': 'st-bad' }, _('xray не запущен')) : mbps(s.vpn), ' ', sui.dim(sui.time(s.at))
 		]);
 	},
 
@@ -92,33 +112,27 @@ return view.extend({
 		return sui.saveSettings(values).then((ok) => ok && ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info'));
 	},
 
-	dnsField(key, value, choices) {
-		return sui.combo(value, choices, (v) => this.save({ [key]: v }));
-	},
-
-	flag(key, value, label) {
-		return E('label', {}, [
-			E('input', { 'type': 'checkbox', 'checked': value == '1' ? '' : null,
-				'change': (ev) => this.save({ [key]: ev.target.checked ? '1' : '0' }) }),
-			' ', label
+	// Флажок настройки с пояснением под ним.
+	flag(key, value, label, hint) {
+		return E('div', { 'class': 'st-full' }, [
+			E('label', {}, [
+				E('input', { 'type': 'checkbox', 'checked': value == '1' ? '' : null,
+					'change': (ev) => this.save({ [key]: ev.target.checked ? '1' : '0' }) }),
+				' ', label
+			]),
+			sui.hint(hint)
 		]);
 	},
 
 	renderDns(cfg) {
-		return E('div', {}, [
-			E('h3', {}, 'DNS'),
-			E('div', { 'class': 'st-card' }, [
-				E('span', { 'class': 'st-k' }, _('Через VPN')),
-				E('span', {}, [ this.dnsField('dns_remote', cfg.dns_remote, DNS_REMOTE),
-					E('div', { 'class': 'st-dim' }, _('Запросы устройств')) ]),
-				E('span', { 'class': 'st-k' }, _('Напрямую')),
-				E('span', {}, [ this.dnsField('dns_direct', cfg.dns_direct, DNS_DIRECT),
-					E('div', { 'class': 'st-dim' }, _('Адреса серверов VPN и запасной')) ]),
-				E('span', {}, ''),
-				E('span', {}, [
-					E('div', {}, this.flag('dns_hijack', cfg.dns_hijack, _('Перехватывать DNS устройств'))),
-					E('div', {}, this.flag('block_doh', cfg.block_doh, _('Блокировать DNS-over-HTTPS')))
-				])
+		const dns = (key, choices, hint) => [ sui.combo(cfg[key], choices, (v) => this.save({ [key]: v })), sui.hint(hint) ];
+		return E('div', { 'class': 'st-card st-dns' }, [
+			...sui.kv(_('Через VPN'), dns('dns_remote', DNS_REMOTE, _('Основной DNS для всех устройств, запросы идут через VPN'))),
+			...sui.kv(_('Напрямую'), dns('dns_direct', DNS_DIRECT, _('Запасной, если основной не ответил. Запросы идут мимо VPN'))),
+			...sui.kv('', [
+				this.flag('dns_hijack', cfg.dns_hijack, _('Перехватывать DNS устройств'), _('Запросы к сторонним DNS-серверам (порт 53) уходят на роутер')),
+				this.flag('block_doh', cfg.block_doh, _('Блокировать DNS-over-HTTPS'),
+					_('DoT и DoH к известным серверам блокируются, и браузеры спрашивают DNS роутера'))
 			])
 		]);
 	},
@@ -127,85 +141,49 @@ return view.extend({
 
 	renderUpdates(u) {
 		const info = u.info;
-		const rows = [];
 		// До первой проверки — только установленные версии (их rpcd знает и без сети).
 		const inst = u.installed || {};
-		const st = info ? info.stella : { installed: inst['luci-app-stella'] };
-		const xr = info ? info.xray : { installed: inst['xray-core'] };
-		const zr = info ? info.zapret : { installed: inst.zapret, available: !inst.zapret };
-
-		const line = (label, cur, extra) => [ E('span', { 'class': 'st-k' }, label), E('span', {}, [ cur, ' ', ...extra ]) ];
 		const btn = (what, text) => E('button', { 'class': 'btn cbi-button-positive', 'disabled': u.installing ? '' : null,
 			'click': ui.createHandlerFn(this, 'handleInstall', what) }, [ text ]);
+		// Состояние пакета: есть обновление — кнопка и «что нового», ошибка проверки — она, иначе «последняя версия».
+		const state = (what, x) => x.available ?
+			[ btn(what, _('Обновить до %s').format(ver(x.latest))), x.url ? E('a', { 'href': x.url, 'target': '_blank' }, _('что нового')) : '' ] :
+			x.error ? [ sui.dim(x.error) ] : [ info ? E('span', { 'class': 'st-ok' }, _('последняя версия')) : '' ];
+		const rows = [];
 
-		let stExtra = [];
-		if (st && st.available)
-			stExtra = [ btn('stella', _('Обновить до %s').format(st.latest)), ' ',
-				st.url ? E('a', { 'href': st.url, 'target': '_blank' }, _('что нового')) : '' ];
-		else if (st && st.error)
-			stExtra = [ E('span', { 'class': 'st-dim' }, st.error) ];
-		else if (info)
-			stExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
-		rows.push(...line('Stella', st ? (st.installed || _('установлена не пакетом')) : '—', stExtra));
+		const st = info ? info.stella : { installed: inst['luci-app-stella'] };
+		rows.push(...sui.kv('Stella', [ st.installed ? ver(st.installed) : _('установлена не пакетом'), ...state('stella', st) ]));
 
-		let xrExtra = [];
-		if (xr && xr.available)
-			xrExtra = [ btn('xray', _('Обновить до %s').format(xr.latest)) ];
-		else if (info && xr.installed)
-			xrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
-		rows.push(...line('xray-core', xr ? (xr.installed || '—') : '—', xrExtra));
+		const xr = info ? info.xray : { installed: inst['xray-core'] };
+		rows.push(...sui.kv('xray-core', [ ver(xr.installed) || '—', ...state('xray', xr) ]));
 
-		if (zr) {
-			let zrExtra = [];
-			// Установить можно и без проверки: версию из последнего релиза узнает сама установка.
-			if (zr.available && !zr.installed)
-				zrExtra = [ btn('zapret', zr.latest ? _('Установить %s').format(zr.latest) : _('Установить')) ];
-			else if (zr.available)
-				zrExtra = [ btn('zapret', _('Обновить до %s').format(zr.latest)), ' ',
-					zr.url ? E('a', { 'href': zr.url, 'target': '_blank' }, _('что нового')) : '' ];
-			else if (zr.error)
-				zrExtra = [ E('span', { 'class': 'st-dim' }, zr.error) ];
-			else if (info)
-				zrExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
-			rows.push(...line('zapret', zr.installed || _('не установлен'), zrExtra));
-		}
+		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
+		rows.push(...sui.kv('dnsmasq', u.dnsmasq_nftset ? 'full' :
+			[ _('без nftset'), btn('dnsmasq', _('Установить dnsmasq-full')), E('span', { 'class': 'st-bad' }, _('без него списки не работают')) ]));
+
+		// Установить можно и без проверки: версию из последнего релиза узнает сама установка.
+		const zr = info ? info.zapret : { installed: inst.zapret };
+		rows.push(...sui.kv('zapret', zr.installed ? [ ver(zr.installed), ...state('zapret', zr) ] :
+			[ _('не установлен'), btn('zapret', zr.latest ? _('Установить %s').format(ver(zr.latest)) : _('Установить')) ]));
 
 		// mwan3 — для резервного канала на «Серверах». Ставится nftables-версия с GitHub (3.x): из
 		// репозитория OpenWrt — старая, на iptables, в 25.12 не рекомендуется.
 		const nft = (v) => parseInt(v, 10) >= 3;
-		const mw = (info && info.mwan3) ? info.mwan3 : { installed: inst.mwan3, available: !nft(inst.mwan3) };
-		let mwExtra = [];
-		if (mw.available && !mw.installed)
-			mwExtra = [ btn('mwan3', mw.latest ? _('Установить %s').format(mw.latest) : _('Установить')), ' ',
-				E('span', { 'class': 'st-dim' }, _('нужен для резервного канала')) ];
-		else if (mw.available && !nft(mw.installed))
-			mwExtra = [ btn('mwan3', _('Заменить на nftables-версию')), ' ',
-				E('span', { 'class': 'st-bad' }, _('версия на iptables')) ];
-		else if (mw.available)
-			mwExtra = [ btn('mwan3', _('Обновить до %s').format(mw.latest)), ' ',
-				mw.url ? E('a', { 'href': mw.url, 'target': '_blank' }, _('что нового')) : '' ];
-		else if (mw.error)
-			mwExtra = [ E('span', { 'class': 'st-dim' }, mw.error) ];
-		else if (info)
-			mwExtra = [ E('span', { 'class': 'st-ok' }, _('последняя версия')) ];
-		if (nft(mw.installed))
-			mwExtra.push(' ', E('a', { 'href': L.url('admin/network/mwan3') }, _('настроить каналы')));
-		rows.push(...line('mwan3', mw.installed || _('не установлен'), mwExtra));
+		const mw = (info && info.mwan3) ? info.mwan3 : { installed: inst.mwan3 };
+		rows.push(...sui.kv('mwan3', !mw.installed ?
+			[ _('не установлен'), btn('mwan3', mw.latest ? _('Установить %s').format(ver(mw.latest)) : _('Установить')), sui.dim(_('нужен для резервного канала')) ] :
+			!nft(mw.installed) ?
+			[ ver(mw.installed), btn('mwan3', _('Заменить на nftables-версию')), E('span', { 'class': 'st-bad' }, _('версия на iptables')) ] :
+			[ ver(mw.installed), ...state('mwan3', mw), E('a', { 'href': L.url('admin/network/mwan3') }, _('настроить каналы')) ]));
 
-		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
-		rows.push(...line('dnsmasq', u.dnsmasq_nftset ? 'full' : _('без nftset'), u.dnsmasq_nftset ?
-			[] :
-			[ btn('dnsmasq', _('Установить dnsmasq-full')), ' ', E('span', { 'class': 'st-bad' }, _('без него списки не работают')) ]));
-
-		let action;
-		if (u.installing)
-			action = E('em', { 'class': 'spinning' }, _('устанавливаю…'));
-		else if (u.checking)
-			action = E('em', { 'class': 'spinning' }, _('проверяю…'));
-		else
-			action = [ E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleUpdateCheck') }, _('Проверить обновления')),
-				info ? E('span', { 'class': 'st-dim' }, ' ' + _('проверено %s').format(new Date(info.at * 1000).toLocaleString('ru-RU'))) : '' ];
-		rows.push(E('span', {}, ''), E('span', {}, action));
+		const busy = u.installing ? _('устанавливаю…') : u.checking ? _('проверяю…') : null;
+		rows.push(E('hr'),
+			// Автоматически и вручную — одной строкой: расписание, кнопка, когда проверено.
+			...sui.kv(_('Автообновление'), [ this.autoUpd,
+				busy ? E('em', { 'class': 'spinning' }, busy) :
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleUpdateCheck') }, _('Проверить сейчас')),
+				sui.dim(info ? _('проверено %s').format(sui.time(info.at)) : _('ещё не проверялось')) ],
+				_('Stella и xray-core, zapret и mwan3, если установлены')));
 
 		dom.content(this.updBox, E('div', { 'class': 'st-card' }, rows));
 	},
@@ -249,21 +227,21 @@ return view.extend({
 		return callSetEnabled(on).then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
 	},
 
+	handleSpeed() {
+		return callSpeedtest().then(() => this.poll());
+	},
+
 	handleRestart() {
 		return callRestart().then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
 	},
 
 	handleCheck() {
-		dom.content(this.checkBox, E('em', { 'class': 'spinning' }, _('проверяю…')));
-		const again = E('a', { 'href': '#', 'click': (ev) => { ev.preventDefault(); this.handleCheck(); } }, _('ещё раз'));
+		dom.content(this.checkOut, '');
 		return callCheck().then((r) => {
-			dom.content(this.checkBox, [
-				...(r.steps || []).map((s) => E('div', {}, [
-					E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, [ s.name ]), ': ', s.detail
-				])),
-				again
-			]);
-		}).catch((e) => dom.content(this.checkBox, [ E('span', { 'class': 'st-bad' }, e.message), ' ', again ]));
+			dom.content(this.checkOut, (r.steps || []).map((s) => E('div', {}, [
+				E('span', { 'class': s.ok ? 'st-ok' : 'st-bad' }, s.ok ? '✓ ' : '✗ '), E('strong', {}, [ s.name ]), ': ', s.detail
+			])));
+		}).catch((e) => dom.content(this.checkOut, E('span', { 'class': 'st-bad' }, e.message)));
 	},
 
 	handleLog() {
@@ -279,27 +257,30 @@ return view.extend({
 
 	render(r) {
 		const [ st, cfg, upd ] = r;
+		// Карточки перерисовываются при опросе, а кнопки, итоги проверок и выбор интервала
+		// создаются один раз — чтобы не терять их состояние.
 		this.statusBox = E('div');
 		this.updBox = E('div');
+		this.checkBtn = E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleCheck') }, _('Проверить'));
+		this.checkOut = E('div', { 'class': 'st-out st-full' });
+		this.speedBtn = E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleSpeed') }, _('Проверить'));
+		this.speedOut = E('span');
+		this.autoUpd = sui.hours(cfg.upgrade_interval, (v) => this.save({ upgrade_interval: v }));
 		this.upd = upd;
 		this.renderUpdates(upd);
-		// Обновления проверяются при каждом открытии страницы; пока проверка или установка
-		// уже идут — только следим за ними.
+		// Обновления проверяются при открытии страницы, но не чаще раза в час: у GitHub API лимит
+		// 60 запросов в час на адрес (один на всю домашнюю сеть), а проверка — три запроса. Пока
+		// проверка или установка уже идут — только следим за ними.
 		if (upd.checking || upd.installing)
 			this.pollUpdates();
-		else
+		else if (!upd.info || Date.now() / 1000 - upd.info.at > 3600)
 			this.handleUpdateCheck();
-		this.checkBox = E('span', {}, E('button', {
-			'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleCheck')
-		}, _('Проверить')));
 		this.logBox = E('textarea', { 'class': 'cbi-input-textarea', 'readonly': 'readonly', 'wrap': 'off', 'rows': 15 });
 
 		this.renderStatus(st);
 		poll.add(() => this.poll(), 5);
 
-		const level = E('select', { 'class': 'cbi-input-select', 'style': 'width:auto',
-			'change': (ev) => this.save({ log_level: ev.target.value }) },
-			[ 'error', 'warning', 'info', 'debug' ].map((l) => E('option', { 'value': l, 'selected': l == cfg.log_level ? '' : null }, l)));
+		const level = sui.select(cfg.log_level, [ 'error', 'warning', 'info', 'debug' ].map((l) => [ l, l ]), (v) => this.save({ log_level: v }));
 
 		const log = E('details', { 'class': 'st-log' }, [
 			E('summary', {}, _('Лог')),
@@ -315,6 +296,7 @@ return view.extend({
 			E('style', {}, CSS),
 			E('h2', {}, 'Stella'),
 			this.statusBox,
+			E('h3', {}, 'DNS'),
 			this.renderDns(cfg),
 			E('h3', {}, _('Обновления')),
 			this.updBox,

@@ -4,7 +4,7 @@
 'require ui';
 'require poll';
 'require dom';
-'require stella.ui as sui';
+'require stella.common as sui';
 
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
 const callAdd = rpc.declare({ object: 'stella', method: 'list_add', params: [ 'items', 'action', 'devices_mode', 'macs' ] });
@@ -68,21 +68,11 @@ const ACTIONS = [
 	[ 'block', _('Блокировать') ]
 ];
 
-const INTERVALS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
-	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
-
 
 const CSS = `
-.st-bar { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:.5em 0 1em }
-.st-default { display:flex; flex-wrap:wrap; gap:.6em; align-items:center; padding:.6em .9em; border-radius:4px; background:rgba(128,128,128,.12); margin-bottom:.8em }
-.st-table { width:100%; border-collapse:collapse }
-.st-table td, .st-table th { padding:.35em .6em; border-bottom:1px solid rgba(128,128,128,.15); vertical-align:middle; text-align:left }
-.st-table th { font-weight:normal; opacity:.6; font-size:90% }
 .st-table tr.st-off td { opacity:.5 }
-.st-table select, .st-default select, .st-bar select { width:auto }
-.st-dim { opacity:.6; font-size:85% }
-.st-order .btn, .st-act .btn { line-height:1.8em; min-height:0 }
-.st-act { text-align:right; white-space:nowrap; width:1% }
+.st-table select { width:auto }
+.st-order .btn { line-height:1.8em; min-height:0 }
 .st-order { white-space:nowrap; width:1% }
 .st-scope { color:#39f }
 .st-field { margin:.7em 0 }
@@ -96,24 +86,12 @@ const CSS = `
 .st-dev:last-child { border-bottom:0 }
 .st-dev input { margin:0 }
 .st-dev .st-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.st-dev .st-dim { white-space:nowrap }
+.st-dev .st-dim { white-space:nowrap; font-size:85% }
 .st-chips { display:flex; flex-wrap:wrap; gap:.3em; margin-bottom:.35em }
 .st-chips:empty { display:none }
 .st-chip { display:inline-flex; gap:.4em; align-items:center; padding:.1em .5em; border-radius:3px; background:rgba(60,140,220,.18); font-size:90% }
 .st-chip a { text-decoration:none; opacity:.7 }
-.st-zapret { padding:.8em 1em; border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-top:1.5em }
-.st-zapret h3 { margin-top:0 }
-.st-ok { color:#2a2 } .st-bad { color:#c33 }
-.st-inline { display:inline-flex; gap:.4em; align-items:center; white-space:nowrap }
-.st-zrow { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:.45em 0 }
-.st-zrow select { width:auto; max-width:22em }
-.st-zgrid { display:grid; grid-template-columns:max-content 1fr; gap:.4em 1em; align-items:center; margin:.6em 0 }
-.st-zgrid > b { font-weight:600 }
-.st-zgrid > div { display:flex; flex-wrap:wrap; gap:.5em; align-items:center }
-.st-zgrid select { width:auto; max-width:22em }
-.st-zfoot { font-size:90%; margin-top:.5em; display:flex; flex-wrap:wrap; gap:.3em 1.2em; align-items:center }
-@media (max-width:600px) { .st-zgrid { grid-template-columns:1fr } }
-.st-zres { max-height:18em; overflow-y:auto; margin-top:.4em; border:1px solid rgba(128,128,128,.2); border-radius:4px }
+.st-zres { flex-basis:100%; max-height:18em; overflow-y:auto; margin-top:.4em; border:1px solid rgba(128,128,128,.2); border-radius:4px }
 .st-zres table { width:100%; border-collapse:collapse }
 .st-zres td { padding:.2em .6em; border-bottom:1px solid rgba(128,128,128,.1) }
 .st-zres tr.st-cur td { background:rgba(60,160,60,.14) }
@@ -122,8 +100,7 @@ const CSS = `
 `;
 
 function actionSelect(value, onchange) {
-	return E('select', { 'class': 'cbi-input-select', 'change': (ev) => onchange(ev.target.value) },
-		ACTIONS.map((a) => E('option', { 'value': a[0], 'selected': (a[0] == value) ? '' : null }, a[1])));
+	return sui.select(value, ACTIONS, onchange);
 }
 
 function countLabel(l) {
@@ -179,7 +156,7 @@ function listName(url) {
 
 return view.extend({
 	load() {
-		return Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]);
+		return sui.need(3).then(() => Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]));
 	},
 
 	setDevices(dr) {
@@ -365,18 +342,15 @@ return view.extend({
 			E('span', { 'class': 'st-name' }, [ label(d) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
 			E('span', { 'class': 'st-dim' }, d.ip || d.mac)
 		])));
-		const mode = E('select', { 'class': 'cbi-input-select', 'style': 'width:auto' }, [
-			E('option', { 'value': 'all', 'selected': l.devices_mode == 'all' ? '' : null }, _('все')),
-			E('option', { 'value': 'only', 'selected': l.devices_mode == 'only' ? '' : null }, _('только выбранные')),
-			E('option', { 'value': 'except', 'selected': l.devices_mode == 'except' ? '' : null }, _('все, кроме выбранных'))
-		]);
-		const syncDevs = () => devList.style.display = (mode.value == 'all') ? 'none' : '';
-		mode.addEventListener('change', syncDevs);
+		let devMode = l.devices_mode;
+		const syncDevs = () => devList.style.display = (devMode == 'all') ? 'none' : '';
+		const mode = sui.select(devMode, [ [ 'all', _('все') ], [ 'only', _('только выбранные') ], [ 'except', _('все, кроме выбранных') ] ],
+			(v) => { devMode = v; syncDevs(); });
 		syncDevs();
 
 		const save = () => {
 			const macs = boxes.filter(([ , cb ]) => cb.checked).map(([ d ]) => d.mac);
-			if (mode.value != 'all' && !macs.length)
+			if (devMode != 'all' && !macs.length)
 				return ui.addNotification(null, E('p', {}, _('Выберите хотя бы одно устройство.')), 'warning');
 			const all = lines(text.value).map(puny);
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
@@ -386,7 +360,7 @@ return view.extend({
 				if (!all_urls.length && !sites.length)
 					return ui.addNotification(null, E('p', {}, _('Список пуст.')), 'warning');
 				ui.hideModal();
-				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, sites, action, undefined, mode.value, macs));
+				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, sites, action, undefined, devMode, macs));
 			}
 
 			// Всё выбранное — один список: пункты каталога, наборы meta-rules-dat, свои ссылки и сайты.
@@ -398,7 +372,7 @@ return view.extend({
 				...(sites.length ? [ _('свои сайты') ] : []) ];
 			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
 			ui.hideModal();
-			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, mode.value, macs));
+			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, devMode, macs));
 		};
 
 		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
@@ -434,9 +408,8 @@ return view.extend({
 
 	showZapret() {
 		const zi = this.zi, cfg = this.cfg;
-		const bin = E('select', { 'class': 'cbi-input-select', 'style': 'width:auto' },
-			(zi.binaries.length ? zi.binaries : [ '/opt/zapret/nfq/nfqws' ]).map((b) =>
-				E('option', { 'value': b, 'selected': b == (cfg.zapret_bin || zi.binaries[0]) ? '' : null }, b)));
+		let binV = cfg.zapret_bin || zi.binaries[0] || '/opt/zapret/nfq/nfqws';
+		const bin = sui.select(binV, [ ...new Set([ ...zi.binaries, binV ]) ].map((b) => [ b, b ]), (v) => binV = v);
 		const opts = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 12, 'style': 'font-family:monospace;font-size:12px' }, [ cfg.zapret_opts || '' ]);
 		const tcp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': cfg.zapret_tcp_ports || '', 'placeholder': '80,443' });
 		const udp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': cfg.zapret_udp_ports || '', 'placeholder': '443' });
@@ -458,7 +431,7 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-positive',
 					'click': ui.createHandlerFn(this, () => sui.saveSettings({
-						zapret_bin: bin.value, zapret_opts: opts.value, zapret_strategy: '',
+						zapret_bin: binV, zapret_opts: opts.value, zapret_strategy: '',
 						zapret_tcp_ports: tcp.value.trim(), zapret_udp_ports: udp.value.trim()
 					}).then((ok) => {
 						if (!ok)
@@ -491,42 +464,34 @@ return view.extend({
 		// версий — первый вариант набора.
 		const fam = (f) => zc.strategies.filter((st) => st.family == f);
 		const cur = (key, f) => (!cfg[key] || cfg[key] == '0') ? '' : (cfg[key] == '1' ? ((fam(f)[0] || {}).name || '') : cfg[key]);
-		const setSel = (key, f) => {
-			const v = cur(key, f);
-			return E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ [key]: ev.target.value }) }, [
-				E('option', { 'value': '', 'selected': v ? null : '' }, _('выключено')),
-				...fam(f).map((st) => E('option', { 'value': st.name, 'selected': st.name == v ? '' : null }, [ st.name + (res[st.name] ? '  · ' + score(st.name) : '') ]))
-			]);
-		};
+		// Оценка из последней проверки — серой припиской к названию.
+		const stLabel = (st) => res[st.name] ? sui.label(st.name, score(st.name)) : st.name;
+		const setSel = (key, f) => sui.select(cur(key, f), [ [ '', _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
+			(v) => this.saveSetting({ [key]: v }));
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
 		// Исключения: без выбора — список источника основной стратегии.
 		const exN = zc.excluded || {};
 		const exLabel = (k) => ({ zms: 'Zapret Manager', fs: 'Flowseal', all: _('все вместе') })[k] + ' (' +
 			(exN[k] ? exN[k] + ' ' + sui.plural(exN[k], _('домен'), _('домена'), _('доменов')) : _('нет списка')) + ')';
-		const exSel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.saveSetting({ zapret_exclude: ev.target.value }) }, [
-			E('option', { 'value': '', 'selected': cfg.zapret_exclude ? null : '' }, _('как у основной: %s').format(exLabel(zc.exclude_auto))),
-			...[ 'zms', 'fs', 'all' ].map((k) => E('option', { 'value': k, 'selected': k == cfg.zapret_exclude ? '' : null }, exLabel(k)))
-		]);
+		const exSel = sui.select(cfg.zapret_exclude || '', [ [ '', _('как у основной: %s').format(exLabel(zc.exclude_auto)) ],
+			...[ 'zms', 'fs', 'all' ].map((k) => [ k, exLabel(k) ]) ], (v) => this.saveSetting({ zapret_exclude: v }));
 		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
-		const fakeSel = (key) => [ E('span', { 'class': 'st-dim' }, _('подделка')), E('select', { 'class': 'cbi-input-select',
-			'change': (ev) => this.saveSetting({ [key]: ev.target.value }) }, [
-			E('option', { 'value': '', 'selected': cfg[key] ? null : '' }, _('stun (по умолчанию)')),
-			...(zc.fakes || []).map((f) => E('option', { 'value': f, 'selected': f == cfg[key] ? '' : null }, fakeName(f)))
-		]) ];
-		const sel = E('select', { 'class': 'cbi-input-select', 'change': (ev) => {
-			if (ev.target.value == '__custom')
+		const fakeSel = (key) => [ sui.dim(_('подделка')), sui.select(cfg[key] || '', [ [ '', _('stun (по умолчанию)') ],
+			...(zc.fakes || []).map((f) => [ f, fakeName(f) ]) ], (v) => this.saveSetting({ [key]: v })) ];
+		// Основная: каталог по источникам (источник — серой припиской), выключено и своя.
+		const sel = sui.select(zc.custom ? '__custom' : (zc.current || ''), [
+			[ '', _('выключено') ],
+			...Object.keys(groups).reduce((all, f) => all.concat(groups[f].map((st) =>
+				[ st.name, sui.label(st.name, (FAMILIES[f] || f) + (res[st.name] ? ', ' + score(st.name) : '')) ])), []),
+			[ '__custom', zc.custom ? _('своя стратегия') : _('своя стратегия…') ]
+		], (v) => {
+			if (v == '__custom')
 				return this.showZapret();
 			// Без основной работают только YouTube, Discord и игры.
-			if (ev.target.value == '')
+			if (v == '')
 				return this.saveSetting({ zapret_opts: '', zapret_strategy: '' });
-			return this.call(callZApply(ev.target.value));
-		} }, [
-			E('option', { 'value': '', 'selected': (!zc.current && !zc.custom) ? '' : null }, _('выключено')),
-			...Object.keys(groups).map((f) => E('optgroup', { 'label': FAMILIES[f] || f },
-				groups[f].map((st) => E('option', { 'value': st.name, 'selected': (!zc.custom && st.name == zc.current) ? '' : null },
-					[ st.name + (res[st.name] ? '  · ' + score(st.name) : '') ])))),
-			E('option', { 'value': '__custom', 'selected': zc.custom ? '' : null }, zc.custom ? _('своя стратегия') : _('своя стратегия…'))
-		]);
+			return this.call(callZApply(v));
+		});
 
 		let state;
 		if (!used)
@@ -550,11 +515,12 @@ return view.extend({
 					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZTestStop())) }, _('Остановить'))
 				];
 			return [
+				sui.dim(_('автоподбор')),
+				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
+					(v) => sui.saveSettings({ [key]: v }), { custom_placeholder: _('дней…') }),
 				E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
 					'title': _('Проверить стратегии и применить лучшую'),
-					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, true)); }) }, _('подобрать')),
-				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
-					(v) => sui.saveSettings({ [key]: v }), { custom_placeholder: _('дней…') })
+					'click': ui.createHandlerFn(this, () => { this.zStarted = true; return this.call(callZTest(scope, true)); }) }, _('Подобрать сейчас'))
 			];
 		};
 
@@ -564,9 +530,9 @@ return view.extend({
 		const baseText = base ? Object.keys(base).map((k) => (k == 'yv' ? _('YouTube') : _('общие')) + ' ' + base[k].ok + '/' + base[k].total).join(', ') : '';
 		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == zc.current && !zc.custom);
 		const apply = (n) => this.call(callZApply(n));
-		const results = names.length ? E('details', {}, [
+		const results = names.length ? E('details', { 'class': 'st-full' }, [
 			E('summary', { 'style': 'cursor:pointer' }, _('Результаты проверки (%d)').format(names.length) +
-				(zc.results.at ? ' · ' + new Date(zc.results.at * 1000).toLocaleString('ru-RU') : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
+				(zc.results.at ? ' · ' + sui.time(zc.results.at) : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
 			E('div', { 'class': 'st-zres' }, E('table', {}, names.map((n) => {
 				const r = res[n];
 				const pct = (r.ok > 0 && r.total) ? Math.round(100 * r.ok / r.total) : 0;
@@ -583,8 +549,7 @@ return view.extend({
 		]) : '';
 
 		const svcBad = zi.service_running || zi.service_enabled || zi.leftover_tables;
-		const svc = E('span', { 'class': 'st-inline' }, [
-			_('служба zapret:') + ' ',
+		const svc = [
 			zi.service_running ? E('span', { 'class': 'st-bad' }, _('запущена и мешает')) :
 			zi.service_enabled ? E('span', { 'class': 'st-bad' }, _('включена в автозапуск')) :
 			_('остановлена, остались её правила'),
@@ -596,52 +561,45 @@ return view.extend({
 					return this.refresh();
 				}))
 			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила'))
-		]);
+		];
 
 		if (!zi.binaries.length)
-			return dom.content(this.zapretBox, [
-				E('h3', { 'style': 'margin-top:0' }, 'Zapret'),
-				E('div', { 'class': 'st-zrow' }, [ E('span', { 'class': 'st-dim' }, _('Пакет zapret не установлен.')),
-					zi.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
-					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, () => callUpdateInstall('zapret').then(() => this.refresh())) }, _('Установить')) ])
-			]);
+			return dom.content(this.zapretBox, sui.kv(_('Пакет'), [ sui.dim(_('не установлен')),
+				zi.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
+				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, () => callUpdateInstall('zapret').then(() => this.refresh())) }, _('Установить')) ]));
+		const needDefault = (cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret';
 		dom.content(this.zapretBox, [
-			E('div', { 'style': 'display:flex;align-items:baseline;gap:1em;flex-wrap:wrap' }, [
-				E('h3', { 'style': 'margin:0' }, 'Zapret'),
-				E('span', {}, state),
-				E('span', { 'class': 'st-dim' }, [
-					zc.strategies.length ? _('каталог: %d стратегий').format(zc.strategies.length) : _('каталог не загружен'),
-					zc.updated ? ' · ' + new Date(zc.updated * 1000).toLocaleDateString('ru-RU') : '', ' ',
-					zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю…')) : E('a', { 'href': '#', 'click': (ev) => { ev.preventDefault(); this.call(callZCatalogUpdate()); } }, _('обновить'))
-				])
+			...sui.kv(_('Состояние'), state),
+			...sui.kv(_('Каталог'), [
+				zc.strategies.length ? _('%d стратегий').format(zc.strategies.length) : _('не загружен'),
+				zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю…')) :
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callZCatalogUpdate())) }, _('Обновить сейчас')),
+				zc.updated ? sui.dim(_('обновлён %s').format(sui.time(zc.updated))) : ''
 			]),
-			E('div', { 'class': 'st-zgrid' }, [
-				E('b', {}, _('Основная')), E('div', {}, [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs') ]),
-				E('b', {}, 'YouTube'), E('div', {}, [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
-				E('b', {}, 'Discord'), E('div', {}, [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
-				E('b', {}, _('Игры')), E('div', {}, [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
-				E('b', {}, _('Исключения')), E('div', {}, [ exSel, E('span', { 'class': 'st-dim', 'title': _('Эти сайты идут напрямую, без Zapret') },
-					(exN.zms || exN.fs) ? _('всегда напрямую') : _('обновите каталог')) ]),
-			]),
-			(cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret' ? E('div', { 'class': 'st-dim' },
-				_('Для игр и голоса Discord выберите вверху «Остальной трафик: через Zapret».')) : '',
-			results,
-			// Внизу — только предупреждение о конфликте с отдельной службой zapret.
-			svcBad ? E('div', { 'class': 'st-zfoot st-dim' }, svc) : ''
+			...sui.kv(_('Основная'), [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs') ]),
+			...sui.kv('YouTube', [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
+			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
+			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []),
+				needDefault ? sui.hint(_('Для игр и голоса Discord выберите вверху «Остальной трафик: через Zapret».')) : '' ]),
+			...sui.kv(_('Исключения'), [ exSel, sui.hint((exN.zms || exN.fs) ? _('Эти сайты всегда идут напрямую, без Zapret') : _('Обновите каталог')) ]),
+			...(results ? sui.kv(_('Результаты'), results) : []),
+			// Конфликт с отдельной службой zapret — только если он есть.
+			...(svcBad ? sui.kv(_('Служба zapret'), svc) : [])
 		]);
 	},
 
 	renderAll() {
 		const d = this.data;
 
+		const newest = Math.max(0, ...d.lists.map((l) => l.updated || 0));
 		dom.content(this.defaultBox, [
-			E('span', {}, _('Остальной трафик:')),
-			E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.call(callDefault(ev.target.value)) }, [
-				E('option', { 'value': 'vpn', 'selected': d.default_action == 'vpn' ? '' : null }, _('через VPN')),
-				E('option', { 'value': 'zapret', 'selected': d.default_action == 'zapret' ? '' : null }, _('через Zapret')),
-				E('option', { 'value': 'direct', 'selected': d.default_action == 'direct' ? '' : null }, _('напрямую'))
-			]),
-			E('span', { 'class': 'st-dim' }, _('Списки проверяются сверху вниз.'))
+			...sui.kv(_('Остальной трафик'), sui.select(d.default_action,
+				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.call(callDefault(v)))),
+			// Расписание, кнопка, когда обновлено (последний из скачанных списков) — как везде.
+			...sui.kv(_('Обновление списков'), [ sui.hours(this.cfg.lists_interval, (v) => sui.saveSettings({ lists_interval: v })),
+				d.updating ? E('em', { 'class': 'spinning' }, _('загружаю списки…')) :
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callUpdate(undefined))) }, _('Обновить сейчас')),
+				newest ? sui.dim(_('обновлено %s').format(sui.time(newest))) : '' ])
 		]);
 
 		this.renderZapret();
@@ -659,12 +617,12 @@ return view.extend({
 				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Ниже'), 'disabled': i == n - 1 ? '' : null,
 					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, 1))) }, sui.icon('down'))
 			]),
-			E('td', {}, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
+			E('td', { 'class': 'st-order' }, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
 				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, ev.target.checked)) })),
 			E('td', {}, [ E('div', {}, [ l.name ]), E('div', { 'class': 'st-dim' }, [ sourceLabel(l), this.scopeLabel(l) ]) ]),
 			E('td', { 'class': 'st-dim' }, [
 				E('div', {}, countLabel(l)),
-				l.updated ? E('div', {}, new Date(l.updated * 1000).toLocaleString('ru-RU')) : ''
+				l.updated ? E('div', {}, sui.time(l.updated)) : ''
 			]),
 			E('td', { 'class': 'st-act' }, [
 				l.urls.length ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
@@ -674,9 +632,9 @@ return view.extend({
 		]));
 
 		dom.content(this.tableBox, [
-			d.updating ? E('p', {}, E('em', { 'class': 'spinning' }, _('Загружаю списки…'))) : '',
 			E('table', { 'class': 'st-table' }, [
-				E('tr', {}, [ E('th', {}, ''), E('th', {}, ''), E('th', {}, _('Список')), E('th', {}, _('Содержимое')), E('th', {}, '') ]),
+				E('tr', {}, [ E('th', { 'colspan': 2, 'style': 'white-space:nowrap', 'title': _('Срабатывает первый подходящий список') }, _('Проверка сверху вниз')),
+					E('th', {}, _('Список')), E('th', {}, _('Содержимое')), E('th', {}, '') ]),
 				...rows
 			])
 		]);
@@ -688,9 +646,9 @@ return view.extend({
 		this.zi = zi;
 		this.zc = zc;
 		this.setDevices(dr);
-		this.defaultBox = E('div', { 'class': 'st-default' });
-		this.tableBox = E('div');
-		this.zapretBox = E('div', { 'class': 'st-zapret' });
+		this.defaultBox = E('div', { 'class': 'st-card' });
+		this.tableBox = E('div', { 'class': 'st-box' });
+		this.zapretBox = E('div', { 'class': 'st-card' });
 		this.renderAll();
 		if (data.updating || zc.testing || zc.updating)
 			this.refresh();
@@ -700,12 +658,10 @@ return view.extend({
 			E('h2', {}, _('Списки сайтов')),
 			this.defaultBox,
 			E('div', { 'class': 'st-bar' }, [
-				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showList(null) }, _('Добавить')),
-				E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.call(callUpdate(undefined))) }, _('Обновить все')),
-				E('span', { 'class': 'st-inline' }, [ _('автообновление'),
-					sui.combo(cfg.lists_interval, INTERVALS, (v) => sui.saveSettings({ lists_interval: v }), { custom_placeholder: _('часов…') }) ])
+				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showList(null) }, _('Добавить'))
 			]),
 			this.tableBox,
+			E('h3', {}, 'Zapret'),
 			this.zapretBox
 		]);
 	},

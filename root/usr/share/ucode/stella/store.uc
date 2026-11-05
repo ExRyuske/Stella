@@ -2,14 +2,45 @@
 
 'use strict';
 
-import { readfile, writefile, stat } from 'fs';
+import { readfile, writefile, stat, popen } from 'fs';
 import { parse } from 'stella.uri';
 import { parse_list } from 'stella.lists';
-import { try_json } from 'stella.util';
+import { try_json, mac_list } from 'stella.util';
 
 export const CACHE_DIR = getenv('STELLA_CACHE_DIR') || '/etc/stella/subs';
 export const RUN_DIR = getenv('STELLA_RUN_DIR') || '/var/run/stella';
 export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
+// Общее для CLI и rpcd: конфиг xray, который запускает служба, каталог и очереди Zapret
+// (своя — для работы, отдельная — для автоподбора).
+export const XRAY_CONF = '/var/etc/stella/config.json';
+export const ZAPRET_DIR = getenv('STELLA_ZAPRET_DIR') || '/etc/stella/zapret';
+export const ZAPRET_QNUM = 202;
+export const ZT_QNUM = 205;
+
+// PID xray, запущенного службой (null — не работает). «^» — чтобы pgrep не нашёл оболочку
+// с этой же строкой.
+export function xray_pid() {
+	let p = popen(`pgrep -f '^/usr/bin/xray run -c ${XRAY_CONF}'`, 'r');
+	let out = p ? p.read('all') : '';
+	p?.close();
+	return match(out || '', /^[0-9]+/)?.[0];
+};
+
+// Интерфейсы LAN, с которых перехватывается трафик. Если ни одного из заданных нет в системе
+// (LAN — не br-lan: один порт eth0, виртуальная машина), берётся устройство интерфейса lan
+// из netifd — иначе Stella молча не перехватывала бы ничего.
+export function lan_ifnames(uci) {
+	let v = uci.get('stella', 'main', 'lan_ifname') ?? [ 'br-lan' ];
+	let names = filter((type(v) == 'array') ? v : split(v, /[ ,]+/), (n) => match(n, /^[A-Za-z0-9._-]+$/) != null);
+	if (length(filter(names, (n) => stat(`/sys/class/net/${n}`) != null)))
+		return names;
+	let p = popen('ubus call network.interface.lan status 2>/dev/null', 'r');
+	let st = try_json((p ? p.read('all') : null) || 'null');
+	p?.close();
+	let dev = st?.l3_device || st?.device;
+	return (type(dev) == 'string' && match(dev, /^[A-Za-z0-9._-]+$/)) ? [ dev ] : names;
+};
+
 // Итоги проверки стабильности узлов — на флеше: после перезагрузки по ним выбирается
 // замена пропавшему узлу. Рядом с кэшем подписок, но не в нём (там чистятся *.json).
 export const STAB_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability.json';
@@ -83,7 +114,7 @@ export function load_lists(uci) {
 			updated: stat(path)?.mtime,
 			// Для каких устройств действует: all — для всех, only/except — MAC из списка.
 			devices_mode: (s.devices_mode in [ 'only', 'except' ] && length(as_array(s.mac))) ? s.devices_mode : 'all',
-			macs: map(filter(as_array(s.mac), (m) => match(m, /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/)), (m) => lc(m))
+			macs: mac_list(s.mac)
 		});
 	});
 	return res;
@@ -94,12 +125,13 @@ export function load_lists(uci) {
 export function load_devices(uci) {
 	let res = [];
 	uci.foreach('stella', 'device', (s) => {
-		if (!match(s.mac || '', /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/))
+		let mac = mac_list(s.mac)[0];
+		if (!mac)
 			return;
 		push(res, {
 			id: s['.name'],
 			name: s.name || '',
-			mac: lc(s.mac),
+			mac,
 			policy: (s.policy in [ 'vpn', 'direct' ]) ? s.policy : 'global'
 		});
 	});

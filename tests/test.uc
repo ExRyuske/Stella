@@ -274,10 +274,16 @@ let nft = nft_script({
 	devices: [ { mac: '11:22:33:44:55:66', policy: 'vpn' }, { mac: '11:22:33:44:55:77', policy: 'global' } ],
 	zapret: { qnum: 202, tcp_ports: '80,443', udp_ports: 'bad ports' }
 });
+// Подсети — в сете interval (только если есть), адреса доменов — в обычном сете _dns со сроком,
+// который продлевает трафик.
 let ok = index(nft, '\t\tip daddr @list_a goto act_vpn\n' +
-		'\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b goto act_zapret\n' +
-		'\t\tether saddr != { aa:bb:cc:dd:ee:01, aa:bb:cc:dd:ee:02 } ip daddr @list_c goto act_direct\n' +
+		'\t\tip daddr @list_a_dns update @list_a_dns { ip daddr } goto act_vpn\n' +
+		'\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b_dns update @list_b_dns { ip daddr } goto act_zapret\n' +
+		'\t\tether saddr != { aa:bb:cc:dd:ee:01, aa:bb:cc:dd:ee:02 } ip daddr @list_c_dns update @list_c_dns { ip daddr } goto act_direct\n' +
 		'\t\tgoto act_direct') >= 0 &&
+	index(nft, '\tset list_a {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n\t\telements = { 1.2.3.0/24 }\n\t}') >= 0 &&
+	index(nft, '\tset list_a_dns {\n\t\ttype ipv4_addr\n\t\tsize 262144\n\t\tflags dynamic, timeout\n\t\ttimeout 12h\n\t}') >= 0 &&
+	index(nft, 'set list_b {') < 0 && index(nft, '\tset zapret_excl {\n\t\ttype ipv4_addr\n\t\tsize 262144\n\t\tflags dynamic, timeout\n\t\ttimeout 12h\n\t}') >= 0 &&
 	index(nft, 'ether saddr { 11:22:33:44:55:66 } goto act_vpn') >= 0 &&
 	index(nft, '11:22:33:44:55:77') < 0 &&
 	index(nft, 'th dport 853 drop') >= 0 &&
@@ -296,7 +302,7 @@ let nb = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action:
 		{ id: 'list_b', action: 'block', cidrs: [], devices_mode: 'only', macs: [ 'aa:bb:cc:dd:ee:ff' ] }
 	],
 	devices: [ { mac: '11:22:33:44:55:66', policy: 'direct' } ] });
-if (index(nb, '\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b goto act_block\n\t\tgoto act_vpn\n\t}') >= 0 &&
+if (index(nb, '\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b_dns update @list_b_dns { ip daddr } goto act_block\n\t\tgoto act_vpn\n\t}') >= 0 &&
     index(nb, 'goto pol_global') < 0 && index(nb, '11:22:33:44:55:66') < 0)
 	passed++;
 else
@@ -322,10 +328,17 @@ else
 // dnsmasq: домен из двух списков — одна строка с двумя сетами.
 let dm = dnsmasq_conf({ dns_port: 10853, lists: [ { id: 'list_a', domains: [ 'x.com', 'y.com' ] }, { id: 'list_b', domains: [ 'x.com' ] } ] });
 if (index(dm, 'nftset=/x.com/4#inet#stella#list_a,4#inet#stella#list_b\n') >= 0 && index(dm, 'nftset=/y.com/4#inet#stella#list_a\n') >= 0 &&
-    index(dm, 'max-ttl=60\n') >= 0)
+    index(dm, 'max-ttl=60\n') >= 0 && index(dm, 'max-cache-ttl=300\n') >= 0)
 	passed++;
 else
 	fail(`dnsmasq_conf:\n${dm}`);
+
+// Обычный dnsmasq (не dnsmasq-full) со строками nftset= не запустился бы — их нет, остальное есть.
+let dp = dnsmasq_conf({ dns_port: 10853, nftset: false, lists: [ { id: 'list_a', domains: [ 'x.com' ] } ] });
+if (index(dp, 'nftset=') < 0 && index(dp, 'server=127.0.0.1#10853\n') >= 0)
+	passed++;
+else
+	fail(`dnsmasq_conf без nftset:\n${dp}`);
 
 // Каталог Zapret: три источника на реальных образцах.
 let fs = flowseal_strategy(readfile('tests/fixtures/flowseal-general-alt3.bat'), 'general (ALT3)', '/etc/stella/zapret/fake');
@@ -401,7 +414,7 @@ else
 let nz = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'zapret', lists: [], devices: [],
 	zapret: { qnum: 202, tcp_ports: '443', udp_ports: '443' } });
 let nn = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'direct', lists: [], devices: [], zapret: null });
-if (index(nz, 'set zapret_excl {') > 0 && index(nz, 'ip daddr @zapret_excl accept\n\t\tct mark set') > 0 && index(nn, 'zapret_excl') < 0)
+if (index(nz, 'set zapret_excl {') > 0 && index(nz, 'ip daddr @zapret_excl update @zapret_excl { ip daddr } accept\n\t\tct mark set') > 0 && index(nn, 'zapret_excl') < 0)
 	passed++;
 else
 	fail(`исключения zapret:\n${nz}`);

@@ -4,7 +4,7 @@
 'require ui';
 'require poll';
 'require dom';
-'require stella.ui as sui';
+'require stella.common as sui';
 
 const callNodes = rpc.declare({ object: 'stella', method: 'nodes' });
 const callSelect = rpc.declare({ object: 'stella', method: 'select', params: [ 'id' ] });
@@ -20,19 +20,11 @@ const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const PICK_INTERVALS = [ [ '0', _('только вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ],
 	[ '6', _('каждые 6 ч') ], [ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ] ];
 
-const INTERVALS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
-	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
-
 
 const PROTO = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'SS', hysteria: 'Hysteria2' };
 const NET = { raw: 'TCP', xhttp: 'XHTTP', ws: 'WS', httpupgrade: 'HTTPUpgrade', grpc: 'gRPC' };
 
 const CSS = `
-.st-current { display:flex; flex-wrap:wrap; gap:.5em 1em; align-items:center; padding:.6em .9em; border-radius:4px; background:rgba(128,128,128,.12); margin-bottom:.8em }
-.st-current .st-node { flex:1; min-width:16em }
-.st-current select { width:auto }
-.st-bar { display:flex; flex-wrap:wrap; gap:.4em; align-items:center; margin-bottom:.8em }
-.st-bar input[type=text] { flex:1; min-width:10em }
 .st-group { border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:.6em }
 .st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; padding:.45em .8em; cursor:pointer; list-style:none }
 .st-group > summary::-webkit-details-marker { display:none }
@@ -41,7 +33,7 @@ const CSS = `
 .st-group .st-title { font-weight:bold }
 .st-group .st-meta { opacity:.6; font-size:85% }
 .st-group .st-actions { margin-left:auto; display:flex; gap:.25em }
-.st-group .st-actions .btn, .st-act .btn { line-height:1.7em; min-height:0 }
+.st-group .st-actions .btn { line-height:1.7em; min-height:0 }
 .st-list { max-height:24em; overflow-y:auto; border-top:1px solid rgba(128,128,128,.3) }
 .st-list table { width:100%; border-collapse:collapse; margin:0 }
 .st-list td { padding:.3em .6em; border-bottom:1px solid rgba(128,128,128,.1); vertical-align:middle }
@@ -49,11 +41,9 @@ const CSS = `
 .st-list tr:hover td { background:rgba(128,128,128,.07) }
 .st-list .st-type { display:block; opacity:.5; font-size:80%; line-height:1.2 }
 .st-ping { white-space:nowrap; text-align:right; width:5.5em; font-size:90% }
-.st-act { text-align:right; width:1%; white-space:nowrap }
 @media (hover:hover) { .st-list tr:not(:hover) .st-act .btn { visibility:hidden } }
 .st-star { cursor:pointer; color:#d9a400; user-select:none; display:inline-flex }
 .st-star.off { color:inherit; opacity:.3 }
-.st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.5 }
 `;
 
 function typeLabel(n) {
@@ -74,7 +64,7 @@ function pingLabel(v, st) {
 	const el = pingValue(v);
 	if (!st || st.n < 2)
 		return el;
-	el.title = _('ответил %d из %d, разброс ±%d мс, проверено %s').format(st.ok, st.n, st.jit, new Date(st.at * 1000).toLocaleString('ru-RU'));
+	el.title = _('ответил %d из %d, разброс ±%d мс, проверено %s').format(st.ok, st.n, st.jit, sui.time(st.at));
 	if (st.ok && st.ok < st.n)
 		return E('span', { 'title': el.title }, [ el, ' ', E('span', { 'class': 'st-mid' }, '%d/%d'.format(st.ok, st.n)) ]);
 	return el;
@@ -105,7 +95,7 @@ return view.extend({
 	open: null,
 
 	load() {
-		return Promise.all([ callNodes(), callSettings() ]);
+		return sui.need(3).then(() => Promise.all([ callNodes(), callSettings() ]));
 	},
 
 	refresh() {
@@ -263,14 +253,11 @@ return view.extend({
 		else
 			node = [ E('span', { 'class': 'st-dim' }, _('Узел не выбран.')) ];
 
-		// Подбор по проверке: из каких узлов, как часто, и подобрать сейчас.
+		// Подбор по проверке — в той же строке, что и режим: из каких узлов, как часто, и подобрать сейчас.
 		const cfg = this.cfg, set = (key) => (v) => this.setting(key, v);
 		const subs = d.sources.filter((x) => x.kind == 'subscription');
-		const pick = best ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
-			_('из'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => set('best_from')(ev.target.value) }, [
-				E('option', { 'value': '', 'selected': cfg.best_from ? null : '' }, _('всех подписок и ссылок')),
-				...subs.map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.best_from ? '' : null }, [ x.name ]))
-			]),
+		const pick = best ? [
+			_('из'), sui.select(cfg.best_from, [ [ '', _('всех подписок и ссылок') ], ...subs.map((x) => [ x.id, x.name ]) ], set('best_from')),
 			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
 			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
 				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null,
@@ -279,42 +266,43 @@ return view.extend({
 						ui.addNotification(null, E('p', {}, r.error), 'warning');
 					return this.refresh();
 				})) }, _('Подобрать сейчас'))
-		]) : '';
+		] : [];
 
 		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него.
-		// Без mwan3 строки нет.
 		const ifs = d.mwan3 || [];
-		const save = (key, v) => this.setting(key, v).then(() => this.refresh()).then(() => this.renderCurrent());
+		const save = (key) => (v) => this.setting(key, v).then(() => this.refresh()).then(() => this.renderCurrent());
 		const bsel = cfg.backup_node && d.nodes.find((x) => x.id == cfg.backup_node);
-		const backup = (ifs.length || cfg.backup_iface) ? E('div', { 'class': 'st-bar', 'style': 'flex-basis:100%;margin:0' }, [
-			_('Резервный канал'), E('select', { 'class': 'cbi-input-select', 'change': (ev) => save('backup_iface', ev.target.value) }, [
-				E('option', { 'value': '', 'selected': cfg.backup_iface ? null : '' }, _('нет')),
-				...ifs.map((i) => E('option', { 'value': i.name, 'selected': i.name == cfg.backup_iface ? '' : null },
-					'%s (%s)'.format(i.name, i.online ? _('в сети') : _('не в сети')))),
-				(cfg.backup_iface && !ifs.find((i) => i.name == cfg.backup_iface)) ?
-					E('option', { 'value': cfg.backup_iface, 'selected': '' }, _('%s (нет в mwan3)').format(cfg.backup_iface)) : ''
-			]),
-			...(cfg.backup_iface ? [ _('через'), E('select', { 'class': 'cbi-input-select', 'style': 'max-width:22em', 'change': (ev) => save('backup_node', ev.target.value) }, [
-				E('option', { 'value': '', 'selected': bsel ? null : '' }, cfg.backup_node ? _('узел удалён') : _('выберите узел')),
-				...d.sources.map((src) => E('optgroup', { 'label': src.kind == 'subscription' ? src.name : _('Отдельные ссылки') },
-					d.nodes.filter((x) => x.source == src.id).map((x) => E('option', { 'value': x.id, 'selected': x.id == cfg.backup_node ? '' : null }, [ x.name ]))))
-			]), E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
-				E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn', ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
+		const srcName = (id) => { const src = d.sources.find((x) => x.id == id); return (src && src.kind == 'subscription') ? src.name : _('отдельная ссылка'); };
+		const backup = [
+			sui.select(cfg.backup_iface, [ [ '', _('нет') ],
+				...ifs.map((i) => [ i.name, '%s (%s)'.format(i.name, i.online ? _('в сети') : _('не в сети')) ]),
+				...((cfg.backup_iface && !ifs.find((i) => i.name == cfg.backup_iface)) ? [ [ cfg.backup_iface, _('%s (нет в mwan3)').format(cfg.backup_iface) ] ] : [])
+			], save('backup_iface')),
+			...(cfg.backup_iface ? [ _('через'), sui.select(bsel ? cfg.backup_node : '', [
+				[ '', cfg.backup_node ? _('узел удалён') : _('выберите узел') ],
+				...d.nodes.map((x) => [ x.id, sui.label(x.name, srcName(x.source)) ])
+			], save('backup_node')), E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
+				E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn')(ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
 			]) ] : []),
 			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) : ''
-		]) : '';
+		];
 
+		const newest = Math.max(0, ...d.sources.map((x) => x.updated || 0));
+		// Строка «Резервный канал» — только когда к месту (есть mwan3 или канал уже задан).
 		dom.content(this.currentBox, [
-			E('div', { 'class': 'st-node' }, node),
-			E('label', { 'style': 'white-space:nowrap' }, [ _('Выбор узла'), ' ', E('select', {
-				'class': 'cbi-input-select', 'change': (ev) => this.handleAuto(ev.target.value)
-			}, [
-				E('option', { 'value': 'single', 'selected': (auto || best) ? null : '' }, _('вручную')),
-				E('option', { 'value': 'auto', 'selected': auto ? '' : null }, _('самый быстрый из ★')),
-				E('option', { 'value': 'best', 'selected': best ? '' : null }, _('лучший по проверке'))
-			]) ]),
-			pick,
-			backup
+			...sui.kv(_('Узел'), node),
+			...sui.kv(_('Выбор узла'), [ sui.select(d.select_mode || 'single', [
+				[ 'single', _('вручную') ], [ 'auto', _('самый быстрый из ★') ], [ 'best', _('лучший по проверке') ]
+			], (v) => this.handleAuto(v)), ...pick ]),
+			...((ifs.length || cfg.backup_iface) ? sui.kv(_('Резервный канал'), backup) : []),
+			// Расписание, кнопка, когда обновлено (последняя из подписок) — как везде.
+			...sui.kv(_('Обновление подписок'), [ sui.hours(cfg.sub_interval, set('sub_interval')),
+				d.updating ? E('em', { 'class': 'spinning' }, _('обновляю подписки…')) :
+					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.handleUpdate(undefined)) }, _('Обновить сейчас')),
+				newest ? sui.dim(_('обновлено %s').format(sui.time(newest))) : '' ]),
+			...sui.kv(_('Если узел пропал'), sui.select(cfg.node_missing == 'best' ? 'best' : 'stop', [
+				[ 'stop', _('лучший из ★, иначе не запускать Stella') ], [ 'best', _('лучший из ★, иначе лучший из всех') ]
+			], set('node_missing')))
 		]);
 	},
 
@@ -323,22 +311,8 @@ return view.extend({
 		return sui.saveSettings({ [key]: v }).then((ok) => ok && (this.cfg[key] = v));
 	},
 
-	showOptions() {
-		const cfg = this.cfg;
-		ui.showModal(_('Настройки'), [
-			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Обновлять подписки')),
-				sui.combo(cfg.sub_interval, INTERVALS, (v) => this.setting('sub_interval', v), { custom_placeholder: _('часов…') }) ]),
-			E('div', { 'style': 'margin:.6em 0' }, [ E('b', { 'style': 'display:block;margin-bottom:.25em' }, _('Если узел пропал из подписки')),
-				E('select', { 'class': 'cbi-input-select', 'change': (ev) => this.setting('node_missing', ev.target.value) }, [
-					E('option', { 'value': 'stop', 'selected': cfg.node_missing != 'best' ? '' : null }, _('лучший из ★, иначе не запускать Stella')),
-					E('option', { 'value': 'best', 'selected': cfg.node_missing == 'best' ? '' : null }, _('лучший из ★, иначе лучший из всех'))
-				]) ]),
-			E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Закрыть')))
-		]);
-	},
-
 	signature(d) {
-		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.auto_nodes, d.backup, d.mwan3, d.errors.length, d.nodes.length,
+		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.updating, d.auto_nodes, d.backup, d.mwan3, d.errors.length, d.nodes.length,
 			d.sources.map((x) => [ x.id, x.count, x.updated, x.enabled, x.name ]) ]);
 	},
 
@@ -350,7 +324,7 @@ return view.extend({
 		if (tested)
 			meta.push(_('отвечают %d').format(all.filter((n) => d.ping[n.id] >= 0).length));
 		if (src.kind == 'subscription' && src.updated)
-			meta.push(_('обновлено %s').format(new Date(src.updated * 1000).toLocaleString('ru-RU')));
+			meta.push(_('обновлено %s').format(sui.time(src.updated)));
 		if (src.kind == 'subscription' && !src.enabled)
 			meta.push(_('выключена'));
 		return meta.join(' · ');
@@ -359,9 +333,7 @@ return view.extend({
 	renderBusy() {
 		const d = this.data;
 		dom.content(this.busyBox, [
-			d.updating ? E('em', { 'class': 'spinning' }, _('обновляю подписки…')) : '',
-			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : '',
-			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю узел…')) : ''
+			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : ''
 		]);
 	},
 
@@ -472,7 +444,7 @@ return view.extend({
 		const [ data, cfg ] = r;
 		this.data = data;
 		this.cfg = cfg;
-		this.currentBox = E('div', { 'class': 'st-current' });
+		this.currentBox = E('div', { 'class': 'st-card' });
 		this.busyBox = E('span', { 'style': 'white-space:nowrap' });
 		this.groupsBox = E('div');
 
@@ -489,9 +461,7 @@ return view.extend({
 			}),
 			this.busyBox,
 			sui.iconButton('ping', _('Проверить задержку всех узлов'), () => this.handlePing([])),
-			sui.iconButton('refresh', _('Обновить все подписки'), () => this.handleUpdate(undefined)),
-			sortBtn,
-			sui.iconButton('settings', _('Настройки'), () => this.showOptions())
+			sortBtn
 		]);
 
 		this.renderAll();

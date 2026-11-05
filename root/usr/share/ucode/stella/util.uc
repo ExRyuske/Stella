@@ -100,6 +100,12 @@ export function split_list(s) {
 	return length(res) ? res : null;
 };
 
+// MAC-адреса из списка — только правильные, в нижнем регистре.
+export function mac_list(v) {
+	v = (v == null) ? [] : (type(v) == 'array') ? v : [ v ];
+	return map(filter(v, (m) => type(m) == 'string' && match(trim(m), /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/)), (m) => lc(trim(m)));
+};
+
 // FNV-1a 32 бит — стабильный id узла по ссылке.
 export function fnv1a(s) {
 	let h = 2166136261;

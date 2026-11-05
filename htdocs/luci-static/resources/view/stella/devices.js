@@ -3,7 +3,7 @@
 'require rpc';
 'require ui';
 'require dom';
-'require stella.ui as sui';
+'require stella.common as sui';
 
 const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
@@ -18,19 +18,12 @@ const POLICIES = [
 ];
 
 const CSS = `
-.st-table { width:100%; border-collapse:collapse }
-.st-table td, .st-table th { padding:.35em .6em; border-bottom:1px solid rgba(128,128,128,.15); vertical-align:middle; text-align:left }
-.st-table th { font-weight:normal; opacity:.6; font-size:90% }
-.st-table select { width:auto; min-width:10em }
-.st-dim { opacity:.6; font-size:85% }
-.st-act { text-align:right; white-space:nowrap; width:1% }
-.st-act .btn { line-height:1.8em; min-height:0 }
-.st-bar { display:flex; gap:.5em; align-items:center; margin:.5em 0 1em }
+.st-table .cbi-dropdown { min-width:10em }
 `;
 
 return view.extend({
 	load() {
-		return Promise.all([ callDevices(), callLists(), callSettings() ]);
+		return sui.need(3).then(() => Promise.all([ callDevices(), callLists(), callSettings() ]));
 	},
 
 	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).
@@ -49,9 +42,8 @@ return view.extend({
 				});
 			}) }, _('Сохранить'));
 		input.addEventListener('input', () => save.style.display = '');
-		return E('div', { 'class': 'st-bar st-dim', 'style': 'margin-top:1em' }, [
-			_('Интерфейсы LAN:'), input, save
-		]);
+		return E('div', { 'class': 'st-card' }, sui.kv(_('Интерфейсы LAN'), [ input, save,
+			sui.hint(_('Трафик перехватывается только с этих интерфейсов, несколько указываются через пробел')) ]));
 	},
 
 	refresh() {
@@ -124,10 +116,7 @@ return view.extend({
 						sp ? E('div', { 'class': 'st-dim', 'title': _('+ только для этого устройства, − не действует на него') }, [ sp ]) : ''
 					]),
 					E('td', { 'class': 'st-dim' }, [ E('div', {}, dev.ip || ''), E('div', {}, dev.mac) ]),
-					E('td', {}, E('select', {
-						'class': 'cbi-input-select',
-						'change': (ev) => this.save(dev, undefined, ev.target.value)
-					}, POLICIES.map((p) => E('option', { 'value': p[0], 'selected': p[0] == dev.policy ? '' : null }, p[1])))),
+					E('td', {}, sui.select(dev.policy, POLICIES, (v) => this.save(dev, undefined, v))),
 					E('td', { 'class': 'st-act' }, [
 						sui.iconButton('edit', _('Название'), () => this.showEdit(dev)),
 						' ',
@@ -142,19 +131,19 @@ return view.extend({
 		this.devices = r[0].devices;
 		this.lists = r[1].lists;
 		this.cfg = r[2];
-		this.tableBox = E('div');
+		this.tableBox = E('div', { 'class': 'st-box' });
 		this.renderTable();
 
 		return E([], [
 			E('style', {}, CSS),
 			E('h2', {}, _('Устройства')),
+			this.renderLan(),
 			E('div', { 'class': 'st-bar' }, [
-				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showEdit(null) }, _('Добавить по MAC')),
-				E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'flex:1', 'placeholder': _('Поиск по имени, IP или MAC…'),
+				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showEdit(null) }, _('Добавить')),
+				E('input', { 'class': 'cbi-input-text', 'type': 'text', 'placeholder': _('Поиск по имени, IP или MAC…'),
 					'input': (ev) => { this.filter = ev.target.value; this.renderTable(); } })
 			]),
-			this.tableBox,
-			this.renderLan()
+			this.tableBox
 		]);
 	},
 
