@@ -33,18 +33,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Ревизия ucode — та же, что в OpenWrt 25.12 на роутере. Свежий ucode прощает
-  # то, на чём роутерный падает (например, `export function` без `;`), и тесты
-  # на нём пропустили бы ошибку, которая всплыла бы только на железе.
-  UCODE_REV: 85922056
-  # xray — та же версия, что в пакете xray-core OpenWrt 25.12: тесты прогоняют
-  # каждый сгенерированный конфиг через `xray run -test`.
-  XRAY_VERSION: 26.3.27
+  # Ветка OpenWrt, под которую пишется пакет. Всё остальное берётся из неё, своих версий
+  # и патчей здесь нет: ucode — ревизия и патчи пакета ucode, xray — версия пакета
+  # xray-core, SDK — сборка этой ветки, jsmin — из LuCI этой ветки. Обновит OpenWrt
+  # пакеты — CI подхватит их сам.
+  OPENWRT: openwrt-25.12
   # SDK под архитектуру OpenWrt One. Пакет noarch, но собирать его в SDK целевой
   # системы — значит проверить заодно, что его зависимости там существуют.
-  SDK_IMAGE: ghcr.io/openwrt/sdk:aarch64_cortex-a53-v25.12.5
-  # Ревизия LuCI из этого SDK: её jsmin сжимает виды при сборке пакета.
-  LUCI_REV: 128a7812f4be233c5dd7f7466f534fd888785caf
+  SDK_TARGET: aarch64_cortex-a53
 
 jobs:
   # Тесты разбора ссылок, генерации конфигов и правил, смоук плагина rpcd, сквозной
@@ -56,12 +52,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # ucode собирается так же, как в OpenWrt: ревизия и патчи — из пакета ucode ветки.
+      # Свежий ucode прощает то, на чём роутерный падает (например, `export function`
+      # без `;`), и тесты на нём пропустили бы ошибку, которая всплыла бы только на железе.
+      - name: ucode package
+        run: |
+          set -e
+          git clone -q --depth 1 --filter=blob:none --sparse -b "$OPENWRT" https://github.com/openwrt/openwrt.git openwrt
+          git -C openwrt sparse-checkout set package/utils/ucode
+          grep -E '^PKG_(SOURCE_VERSION|RELEASE):=' openwrt/package/utils/ucode/Makefile
+          ls openwrt/package/utils/ucode/patches 2>/dev/null || true
+
       - name: ucode cache
         id: ucode-cache
         uses: actions/cache@v6
         with:
           path: ucode/build
-          key: ucode-${{ env.UCODE_REV }}-${{ runner.os }}
+          key: ucode-${{ hashFiles('openwrt/package/utils/ucode/**') }}-${{ runner.os }}
 
       # Модули, которых нет в роутерной сборке по умолчанию или которые не нужны
       # тестам (ubus, uci, uloop…), выключены: uci заменяет заглушка tests/mock.
@@ -70,15 +77,18 @@ jobs:
         run: |
           set -e
           sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libjson-c-dev
+          pkg="$PWD/openwrt/package/utils/ucode"
+          rev="$(sed -n 's/^PKG_SOURCE_VERSION:=//p' "$pkg/Makefile")"
+          test -n "$rev"
           git clone -q https://github.com/jow-/ucode.git ucode
-          git -C ucode checkout -q "$UCODE_REV"
-          # В glibc 2.43 (Ubuntu 26) strchr/strrchr возвращают const char * для const-аргумента,
-          # а ucode этой ревизии собирается с -Werror — предупреждение discarded-qualifiers
-          # стало ошибкой. -Wno-error не помог бы: ucode добавляет -Werror позже, а само
-          # предупреждение ни -Wall, ни -Wextra обратно не включают.
+          git -C ucode checkout -q "$rev"
+          for p in "$pkg"/patches/*.patch; do
+            [ -e "$p" ] || continue
+            git -C ucode apply "$p"
+          done
           cmake -S ucode -B ucode/build -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
             -DDEBUG_SUPPORT=OFF -DRTNL_SUPPORT=OFF -DNL80211_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
-            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF -DCMAKE_C_FLAGS=-Wno-discarded-qualifiers >/dev/null
+            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF >/dev/null
           cmake --build ucode/build -j"$(nproc)"
 
       # Из кэша приезжает только сборка, а библиотека json-c нужна и ей. В образе раннера она
@@ -87,19 +97,24 @@ jobs:
         if: steps.ucode-cache.outputs.cache-hit == 'true'
         run: ldconfig -p | grep -q 'libjson-c\.so\.5 ' || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libjson-c5; }
 
+      # xray — та же версия, что в пакете xray-core ветки: тесты прогоняют каждый
+      # сгенерированный конфиг через `xray run -test`.
       - name: xray
         run: |
           set -e
-          curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v$XRAY_VERSION/Xray-linux-64.zip"
+          v="$(curl -fsSL "https://raw.githubusercontent.com/openwrt/packages/$OPENWRT/net/xray-core/Makefile" | sed -n 's/^PKG_VERSION:=//p')"
+          test -n "$v"
+          curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v$v/Xray-linux-64.zip"
           sudo unzip -o -q /tmp/xray.zip xray -d /usr/local/bin
           xray version | head -1
 
       - run: UCODE="$PWD/ucode/build/ucode" tests/run.sh
       - run: UCODE="$PWD/ucode/build/ucode" tests/cli.sh
+      # jsmin из LuCI ветки: он же сжимает виды при сборке пакета.
       - name: web
         run: |
           set -e
-          curl -fsSL -o /tmp/jsmin.c "https://raw.githubusercontent.com/openwrt/luci/$LUCI_REV/modules/luci-base/src/jsmin.c"
+          curl -fsSL -o /tmp/jsmin.c "https://raw.githubusercontent.com/openwrt/luci/$OPENWRT/modules/luci-base/src/jsmin.c"
           cc -O2 -o /tmp/jsmin /tmp/jsmin.c
           JSMIN=/tmp/jsmin scripts/check_web.sh
 
@@ -165,7 +180,7 @@ jobs:
           # запись всем, rpcd не загружает («world writable») — и это ещё и дыра.
           chmod -R a+rX feed
           chmod a+rwx out
-          docker run --rm -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "$SDK_IMAGE" bash -ec '
+          docker run --rm -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "ghcr.io/openwrt/sdk:$SDK_TARGET-$OPENWRT" bash -ec '
             [ -x ./scripts/feeds ] || ./setup.sh
             echo "src-link stella /feed" >> feeds.conf.default
             ./scripts/feeds update base packages luci stella >/dev/null

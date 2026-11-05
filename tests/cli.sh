@@ -28,10 +28,18 @@ cat > "$T/uci.json" <<EOF
 }
 EOF
 
+# dnsmasq как на роутере: строки nftset= Stella пишет, только если dnsmasq их понимает
+# (dnsmasq-full), — обычный с ними не запустился бы. На раннере dnsmasq нет — подставляем.
+mkdir -p "$T/dnsmasq-full" "$T/dnsmasq-plain"
+printf '#!/bin/sh\necho "Compile time options: IPv6 GNU-getopt UBus DHCP nftset auth"\n' > "$T/dnsmasq-full/dnsmasq"
+printf '#!/bin/sh\necho "Compile time options: IPv6 GNU-getopt UBus DHCP no-nftset auth"\n' > "$T/dnsmasq-plain/dnsmasq"
+chmod +x "$T/dnsmasq-full/dnsmasq" "$T/dnsmasq-plain/dnsmasq"
+DNSMASQ="$T/dnsmasq-full"
+
 # «--» перед скриптом: getopt из glibc переставляет аргументы и принял бы «--apply» команды
 # за ключ самого ucode (на роутере musl так не делает, а в CI — glibc).
 run() {
-	STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" "$UCODE" -S \
+	PATH="$DNSMASQ:$PATH" STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
 		-- root/usr/bin/stella "$@"
 }
@@ -139,6 +147,21 @@ grep -q '"protocol": "trojan"' "$T/config.json" || { echo "FAIL: на резер
 "$XRAY" run -test -c "$T/config.json" >/dev/null
 if run pick --apply 2>"$T/pick.err"; then echo "FAIL: подбор на резервном канале"; exit 1; fi
 grep -q 'резервный канал' "$T/pick.err" || { echo "FAIL: подбор на резервном канале: $(cat "$T/pick.err")"; exit 1; }
+# Подбор узла резервного канала — наоборот, только на нём: меряет через него и пишет свои
+# итоги (отдельная ссылка фиктивная — никто не ответил, узел не меняется).
+uci_main backup_best_from='"manual"'
+cp "$T/stability.json" "$T/stability.before"
+if PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run pick --backup --apply >"$T/pick.out" 2>&1; then echo "FAIL: подбор для резервного канала без ответивших узлов"; exit 1; fi
+cmp -s "$T/stability.before" "$T/stability.json" || { echo "FAIL: подбор для резервного канала изменил основные итоги"; exit 1; }
+python3 - "$T" <<'PY' || exit 1
+import json, sys
+t = sys.argv[1]
+st = json.load(open(t + '/stability-backup.json')).get('n1')
+node = json.load(open(t + '/uci.json'))['main']['backup_node']
+if not st or st['ok'] != 0 or st['n'] != 5 or node != 'n1':
+    print('FAIL: pick --backup', st, node, open(t + '/pick.out').read()); sys.exit(1)
+PY
+uci_main backup_best_from=null
 # «Всё через VPN»: на резервном канале списки не действуют.
 run fw show | grep -q 'goto pol_global' || { echo "FAIL: на резервном канале без «всё через VPN» не действуют списки"; exit 1; }
 uci_main backup_vpn='"1"'
@@ -153,6 +176,8 @@ for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/reload.log" ] && break; sleep 0.2; do
 grep -q 'stella reload' "$T/reload.log" 2>/dev/null || { echo "FAIL: основной канал вернулся, а uplink не перезапустил Stella"; exit 1; }
 run gen "$T/config.json"
 grep -q '"protocol": "vless"' "$T/config.json" || { echo "FAIL: основной канал вернулся, а узел не основной"; exit 1; }
+if run pick --backup --apply 2>"$T/pick.err"; then echo "FAIL: подбор для резервного канала без него"; exit 1; fi
+grep -q 'резервный канал сейчас не работает' "$T/pick.err" || { echo "FAIL: подбор для резервного канала без него: $(cat "$T/pick.err")"; exit 1; }
 run fw show | grep -q 'goto pol_global' || { echo "FAIL: основной канал вернулся, а списки не действуют"; exit 1; }
 
 # Списки: скачивание по HTTP + записи вручную -> сет, правило и nftset для dnsmasq.
@@ -167,13 +192,18 @@ EOF
 run lists >/dev/null
 mkdir -p "$T/zapret" && printf 'ru\nsberbank.com\n' > "$T/zapret/hosts-exclude.txt"
 OUT=$(run fw show)
-for want in 'set list_yt' 'elements = { 91.108.4.0/22 }' 'ip daddr @list_yt goto act_zapret' 'goto act_direct' \
-	'nftset=/googlevideo.com/4#inet#stella#list_yt' 'nftset=/ytimg.com/4#inet#stella#list_yt' 'queue flags bypass to 202' \
-	'nftset=/sberbank.com/4#inet#stella#zapret_excl' 'ip daddr @zapret_excl accept'; do
+for want in 'set list_yt {' 'elements = { 91.108.4.0/22 }' 'ip daddr @list_yt goto act_zapret' 'goto act_direct' \
+	'set list_yt_dns {' 'ip daddr @list_yt_dns update @list_yt_dns { ip daddr } goto act_zapret' 'max-cache-ttl=300' \
+	'nftset=/googlevideo.com/4#inet#stella#list_yt_dns' 'nftset=/ytimg.com/4#inet#stella#list_yt_dns' 'queue flags bypass to 202' \
+	'nftset=/sberbank.com/4#inet#stella#zapret_excl' 'ip daddr @zapret_excl update @zapret_excl { ip daddr } accept'; do
 	echo "$OUT" | grep -qF "$want" || { echo "FAIL: fw show без «$want»"; exit 1; }
 done
 if echo "$OUT" | grep -q 'list_off'; then echo "FAIL: выключенный список попал в правила"; exit 1; fi
 if echo "$OUT" | grep -q 'dport 853'; then echo "FAIL: DoH блокируется, хотя по умолчанию выключено"; exit 1; fi
+# Обычный dnsmasq: строк nftset= нет (с ними он не запустился бы), DNS через xray — есть.
+DNSMASQ="$T/dnsmasq-plain"; OUT=$(run fw show 2>/dev/null); DNSMASQ="$T/dnsmasq-full"
+if echo "$OUT" | grep -q '^nftset='; then echo "FAIL: nftset= для dnsmasq без nftset"; exit 1; fi
+echo "$OUT" | grep -qF 'server=127.0.0.1#10853' || { echo "FAIL: без nftset пропал DNS через xray"; exit 1; }
 
 # Имена наборов meta-rules-dat: только файлы .list, без подкаталогов и других форматов;
 # не скачалось — прежние имена остаются.
