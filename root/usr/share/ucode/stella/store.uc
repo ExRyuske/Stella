@@ -10,6 +10,14 @@ import { try_json, mac_list } from 'stella.util';
 export const CACHE_DIR = getenv('STELLA_CACHE_DIR') || '/etc/stella/subs';
 export const RUN_DIR = getenv('STELLA_RUN_DIR') || '/var/run/stella';
 export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
+// Тайминги и пределы, общие для CLI и rpcd (секунды). Скачивание — подписки, списки,
+// каталоги, пакеты; проверка — один запрос: задержка узла, «Проверить связь».
+export const TIMEOUT = { connect: 10, fetch: 60, probe: 8 };
+// Узлов в автовыборе ★: у каждого свой outbound, и xray проверяет их раз в минуту.
+export const AUTO_MAX = 30;
+// Порт socks-входа xray, если в настройках он не задан.
+export const SOCKS_PORT = 10808;
+
 // Общее для CLI и rpcd: конфиг xray, который запускает служба, каталог и очереди Zapret
 // (своя — для работы, отдельная — для автоподбора).
 export const XRAY_CONF = '/var/etc/stella/config.json';
@@ -44,6 +52,9 @@ export function lan_ifnames(uci) {
 // Итоги проверки стабильности узлов — на флеше: после перезагрузки по ним выбирается
 // замена пропавшему узлу. Рядом с кэшем подписок, но не в нём (там чистятся *.json).
 export const STAB_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability.json';
+// Такие же итоги, но через резервный канал mwan3: там отвечают другие узлы, и основным они
+// не мешают.
+export const STAB_BACKUP_PATH = replace(CACHE_DIR, /\/[^\/]+\/?$/, '') + '/stability-backup.json';
 
 // JSON из файла; нет файла или он битый (оборвалась запись) — def.
 export function read_json(path, def) {

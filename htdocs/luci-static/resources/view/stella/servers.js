@@ -14,12 +14,8 @@ const callAdd = rpc.declare({ object: 'stella', method: 'add', params: [ 'text',
 const callEdit = rpc.declare({ object: 'stella', method: 'edit', params: [ 'id', 'name', 'url', 'user_agent', 'enabled' ] });
 const callRemove = rpc.declare({ object: 'stella', method: 'remove', params: [ 'id' ] });
 const callAuto = rpc.declare({ object: 'stella', method: 'auto_set', params: [ 'mode', 'id', 'on' ] });
-const callPick = rpc.declare({ object: 'stella', method: 'node_pick' });
+const callPick = rpc.declare({ object: 'stella', method: 'node_pick', params: [ 'backup' ] });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-
-const PICK_INTERVALS = [ [ '0', _('только вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ],
-	[ '6', _('каждые 6 ч') ], [ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ] ];
-
 
 const PROTO = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'SS', hysteria: 'Hysteria2' };
 const NET = { raw: 'TCP', xhttp: 'XHTTP', ws: 'WS', httpupgrade: 'HTTPUpgrade', grpc: 'gRPC' };
@@ -253,37 +249,52 @@ return view.extend({
 		else
 			node = [ E('span', { 'class': 'st-dim' }, _('Узел не выбран.')) ];
 
-		// Подбор по проверке — в той же строке, что и режим: из каких узлов, как часто, и подобрать сейчас.
+		// Подбор по проверке — в той же строке, что и режим: из каких узлов, как часто, и подобрать
+		// сейчас. Одинаково для основного узла и узла резервного канала (тот меряется через свой
+		// канал — пока он не работает, подбирать не через что).
 		const cfg = this.cfg, set = (key) => (v) => this.setting(key, v);
 		const subs = d.sources.filter((x) => x.kind == 'subscription');
-		const pick = best ? [
-			_('из'), sui.select(cfg.best_from, [ [ '', _('всех подписок и ссылок') ], ...subs.map((x) => [ x.id, x.name ]) ], set('best_from')),
-			sui.combo(cfg.best_interval, PICK_INTERVALS, set('best_interval'), { custom_placeholder: _('часов…') }),
-			d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
-				E('button', { 'class': 'btn cbi-button', 'disabled': d.pinging ? '' : null,
-					'title': _('5 запросов через каждый узел; узел меняется, только если новый заметно лучше'), 'click': ui.createHandlerFn(this, () => callPick().then((r) => {
-					if (r && r.error)
-						ui.addNotification(null, E('p', {}, r.error), 'warning');
-					return this.refresh();
-				})) }, _('Подобрать сейчас'))
-		] : [];
+		const pickRow = (fromKey, everyKey, forBackup) => {
+			const wait = forBackup && !d.backup;
+			return [
+				_('из'), sui.select(cfg[fromKey], [ [ '', _('всех подписок и ссылок') ], ...subs.map((x) => [ x.id, x.name ]) ], set(fromKey)),
+				sui.hours(cfg[everyKey], set(everyKey)),
+				d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
+					E('button', { 'class': 'btn cbi-button', 'disabled': (d.pinging || wait) ? '' : null,
+						'title': wait ? _('Подбирается через резервный канал, когда он работает') : _('5 запросов через каждый узел; узел меняется, только если новый заметно лучше'),
+						'click': ui.createHandlerFn(this, () => callPick(forBackup || undefined).then((r) => {
+							if (r && r.error)
+								ui.addNotification(null, E('p', {}, r.error), 'warning');
+							return this.refresh();
+						})) }, _('Подобрать сейчас'))
+			];
+		};
+		const pick = best ? pickRow('best_from', 'best_interval', false) : [];
 
-		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него.
+		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него:
+		// вручную или лучший по проверке, как основной, только без автовыбора из ★.
 		const ifs = d.mwan3 || [];
 		const save = (key) => (v) => this.setting(key, v).then(() => this.refresh()).then(() => this.renderCurrent());
 		const bsel = cfg.backup_node && d.nodes.find((x) => x.id == cfg.backup_node);
+		const bbest = cfg.backup_mode == 'best';
 		const srcName = (id) => { const src = d.sources.find((x) => x.id == id); return (src && src.kind == 'subscription') ? src.name : _('отдельная ссылка'); };
 		const backup = [
 			sui.select(cfg.backup_iface, [ [ '', _('нет') ],
 				...ifs.map((i) => [ i.name, '%s (%s)'.format(i.name, i.online ? _('в сети') : _('не в сети')) ]),
 				...((cfg.backup_iface && !ifs.find((i) => i.name == cfg.backup_iface)) ? [ [ cfg.backup_iface, _('%s (нет в mwan3)').format(cfg.backup_iface) ] ] : [])
 			], save('backup_iface')),
-			...(cfg.backup_iface ? [ _('через'), sui.select(bsel ? cfg.backup_node : '', [
-				[ '', cfg.backup_node ? _('узел удалён') : _('выберите узел') ],
-				...d.nodes.map((x) => [ x.id, sui.label(x.name, srcName(x.source)) ])
-			], save('backup_node')), E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
-				E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn')(ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
-			]) ] : []),
+			...(cfg.backup_iface ? [
+				_('через'),
+				sui.select(bbest ? 'best' : 'single', [ [ 'single', _('вручную') ], [ 'best', _('лучший по проверке') ] ], save('backup_mode')),
+				...(bbest ? [ ...pickRow('backup_best_from', 'backup_best_interval', true), bsel ? sui.dim(_('подобран: %s').format(bsel.name)) : '' ] :
+					[ sui.select(bsel ? cfg.backup_node : '', [
+						[ '', (cfg.backup_node && !bsel) ? _('узел удалён') : _('выберите узел') ],
+						...d.nodes.map((x) => [ x.id, sui.label(x.name, srcName(x.source)) ])
+					], save('backup_node')) ]),
+				E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
+					E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn')(ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
+				])
+			] : []),
 			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) : ''
 		];
 

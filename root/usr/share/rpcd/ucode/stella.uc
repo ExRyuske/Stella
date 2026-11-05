@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, unlink, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, read_json, load_nodes, sub_label, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, AUTO_MAX, SOCKS_PORT, read_json, load_nodes, sub_label, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a, mac_list, try_json } from 'stella.util';
 import { dns_set, ACTIONS } from 'stella.firewall';
@@ -81,6 +81,10 @@ const SETTINGS = {
 	backup_iface: { title: 'Резервный канал', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_.-]*$/) != null },
 	backup_node: { title: 'Узел резервного канала', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
 	backup_vpn: { title: 'Резервный канал через VPN', def: '0', apply: 'reload', check: (v) => v in [ '0', '1' ] },
+	// Узел резервного канала: вручную (backup_node) или лучший по проверке через этот канал.
+	backup_mode: { title: 'Выбор узла резервного канала', def: 'single', apply: 'reload', check: (v) => v in [ 'single', 'best' ] },
+	backup_best_from: { title: 'Из каких узлов подбирать для резервного канала', def: '', apply: 'reload', check: (v) => match(v, /^[A-Za-z0-9_]*$/) != null },
+	backup_best_interval: { title: 'Подбор узла резервного канала', def: '6', apply: 'reload', check: HOURS },
 	lists_interval: { title: 'Обновление списков', def: '24', apply: 'reload', check: HOURS },
 	// Планировщик читает настройки сам — применять нечего.
 	upgrade_interval: { title: 'Автообновление', def: '24', check: HOURS },
@@ -282,8 +286,8 @@ const methods = {
 				let ids = str_list(uci.get('stella', 'main', 'auto_node'));
 				ids = filter(ids, (x) => x != a.id);
 				if (a.on) {
-					if (length(ids) >= 30)
-						return { error: 'в автовыборе не больше 30 узлов' };
+					if (length(ids) >= AUTO_MAX)
+						return { error: `в автовыборе не больше ${AUTO_MAX} узлов` };
 					push(ids, a.id);
 				}
 				length(ids) ? uci.set('stella', 'main', 'auto_node', ids) : uci.delete('stella', 'main', 'auto_node');
@@ -418,11 +422,16 @@ const methods = {
 	},
 
 	// Подобрать лучший узел сейчас (режим «лучший по проверке»).
+	// backup — подобрать узел резервного канала: мерить можно только через тот канал, для
+	// которого выбирается узел.
 	node_pick: {
-		call: function() {
-			if (on_backup(cursor()))
-				return { error: 'работает резервный канал — подбор узла отложен до возвращения основного' };
-			return { started: !busy('ping') && spawn('pick', '/usr/bin/stella pick --apply') };
+		args: { backup: true },
+		call: function(req) {
+			let backup = !!req.args?.backup;
+			if (backup != (on_backup(cursor()) != null))
+				return { error: backup ? 'резервный канал сейчас не работает — подбор для него пройдёт, когда он включится' :
+					'работает резервный канал — подбор узла отложен до возвращения основного' };
+			return { started: !busy('ping') && spawn('pick', `/usr/bin/stella pick${backup ? ' --backup' : ''} --apply`) };
 		}
 	},
 
@@ -455,7 +464,7 @@ const methods = {
 			let bk = on_backup(uci);
 			let up = map(filter(mwan3_ifaces(uci), (i) => i.online), (i) => i.name);
 			let via = bk ? `резервный канал ${bk}` : length(up) ? `канал ${join(', ', up)}` : '';
-			let dm = match(cmd_output(`curl -sk -o /dev/null --max-time 6 -w '%{http_code} %{time_total}' ${DIRECT_PROBE}`) || '', /^([0-9]{3}) ([0-9.]+)/);
+			let dm = match(cmd_output(`curl -sk -o /dev/null --max-time ${TIMEOUT.probe} -w '%{http_code} %{time_total}' ${DIRECT_PROBE}`) || '', /^([0-9]{3}) ([0-9.]+)/);
 			if (dm && dm[1] != '000')
 				step('Напрямую', true, `77.88.8.8 отвечает, ${int(+dm[2] * 1000)} мс${via ? `, ${via}` : ''}`);
 			else
@@ -466,8 +475,8 @@ const methods = {
 				return { steps };
 			}
 
-			let port = +(uci.get('stella', 'main', 'socks_port') || 10808);
-			let out = cmd_output(`curl -s --max-time 8 -w '\\n%{time_total}' --socks5-hostname 127.0.0.1:${port} https://ipinfo.io/json`);
+			let port = +(uci.get('stella', 'main', 'socks_port') || SOCKS_PORT);
+			let out = cmd_output(`curl -s --max-time ${TIMEOUT.probe} -w '\\n%{time_total}' --socks5-hostname 127.0.0.1:${port} https://ipinfo.io/json`);
 			let lines = split(trim(out || ''), '\n');
 			let t = +pop(lines);
 			let info = try_json(join('\n', lines) || 'null');
@@ -933,6 +942,9 @@ const methods = {
 			uci.commit('stella');
 			if (action)
 				apply_if_enabled(uci, action);
+			// Подбор узла резервного канала включили, пока он работает, — первый подбор сразу.
+			if (v.backup_mode == 'best' && on_backup(uci) && !busy('ping'))
+				spawn('pick', '/usr/bin/stella pick --backup --apply');
 			return { ok: true };
 		}
 	},

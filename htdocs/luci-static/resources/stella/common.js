@@ -28,10 +28,13 @@ const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', 
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
 const API = 3;
 
-// Расписания в часах: обновление подписок, списков, автообновление.
-const HOURS = [ [ '0', _('вручную') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
+// Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
+const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
 	[ '12', _('каждые 12 ч') ], [ '24', _('раз в сутки') ], [ '168', _('раз в неделю') ] ];
 
+// Пункт «-- Please choose --» Combobox добавляет всегда (optional у него не отключить), а
+// значение у наших списков есть всегда — в раскрытом списке он скрыт (правило темы с
+// !important перебивается тем же селектором с body впереди; стили — только на страницах Stella).
 // Один шаблон для всех страниц: заголовок; рамка с настройками страницы (st-card: подписи
 // слева, под значением — серое пояснение st-hint); строка кнопок (st-bar: «Добавить» слева,
 // поиск растягивается, значки справа); содержимое в рамке (st-box); дальше разделы — h3 и
@@ -54,6 +57,7 @@ const CSS = `
 .st-table tr:last-child td { border-bottom:0 }
 .st-table th { font-weight:normal; opacity:.6; font-size:90% }
 .st-table .st-dim { font-size:85% }
+body .cbi-dropdown[optional][open] > ul.dropdown > li[placeholder] { display:none !important }
 .st-act { text-align:right; white-space:nowrap; width:1% }
 .st-act .btn { line-height:1.8em; min-height:0 }
 .st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.55 }

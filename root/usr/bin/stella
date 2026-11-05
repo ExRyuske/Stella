@@ -12,7 +12,7 @@ import { fnv1a, try_json } from 'stella.util';
 import { nft_script, dnsmasq_conf, restore_script, dns_set, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
-import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, XRAY_CONF, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, on_backup } from 'stella.store';
+import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, STAB_BACKUP_PATH, XRAY_CONF, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, AUTO_MAX, SOCKS_PORT, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, on_backup } from 'stella.store';
 
 const DEFAULT_UA = 'v2rayN/7.0';
 const PING_URL = 'https://www.gstatic.com/generate_204';
@@ -30,6 +30,9 @@ const DPI_SUITE = 'https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/ma
 // в очередь теста попадает только его собственный трафик.
 const ZT_PORTS = '20000-20999';
 const ZT_PARALLEL = 4;
+// Свои тайминги: короткое подключение отличает обрыв DPI от просто медленного сайта.
+const ZT_CONNECT = 3;
+const ZT_MAX = 6;
 const YT_TARGETS = [ 'www.youtube.com', 'i.ytimg.com', 'yt3.ggpht.com', 'redirector.googlevideo.com', 'youtubei.googleapis.com', 'play.google.com' ];
 
 const uci = cursor();
@@ -76,8 +79,8 @@ let fetch_seq = 0;
 
 function fetch(url, ua, proxy) {
 	let tmp = `/tmp/stella-fetch.${time()}.${fnv1a(url)}.${fetch_seq++}`;
-	let cmd = sprintf('curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 -A %s %s-o %s %s',
-		shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(tmp), shq(url));
+	let cmd = sprintf('curl -fsSL --connect-timeout %d --max-time %d --retry 2 -A %s %s-o %s %s',
+		TIMEOUT.connect, TIMEOUT.fetch, shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(tmp), shq(url));
 	let rc = system(cmd);
 	let body = (rc == 0) ? readfile(tmp) : null;
 	unlink(tmp);
@@ -86,7 +89,7 @@ function fetch(url, ua, proxy) {
 
 // socks-вход xray: через него — то, что напрямую недоступно.
 function socks_proxy() {
-	return `127.0.0.1:${opt('main', 'socks_port', '10808')}`;
+	return `127.0.0.1:${opt('main', 'socks_port', SOCKS_PORT)}`;
 }
 
 // Напрямую, а не вышло — через VPN.
@@ -561,8 +564,6 @@ function cmd_fw(action) {
 	return usage();
 }
 
-const AUTO_MAX = 30;
-
 // Конфиг xray для текущих настроек; 'stop' — выбранный узел пропал, а замены нет.
 function current_config() {
 	let nodes = load_nodes();
@@ -588,6 +589,12 @@ function current_config() {
 	writefile(`${RUN_DIR}/uplink`, backup || '');
 	if (backup) {
 		let bn = by_id[opt('main', 'backup_node', '')];
+		// «Лучший по проверке», а узел ещё не подобран (или пропал) — лучший по прошлым проверкам
+		// через резервный канал.
+		if (!bn && opt('main', 'backup_mode', 'single') == 'best') {
+			let from = opt('main', 'backup_best_from', '');
+			bn = best_node(filter(nodes, (n) => from == '' || n.source_id == from), read_json(STAB_BACKUP_PATH, {}));
+		}
 		if (bn) {
 			node = bn;
 			auto_nodes = [];
@@ -619,7 +626,7 @@ function current_config() {
 		node,
 		auto_nodes,
 		log_level: opt('main', 'log_level', 'warning'),
-		socks_port: +opt('main', 'socks_port', '10808'),
+		socks_port: +opt('main', 'socks_port', SOCKS_PORT),
 		intercept: true,
 		tproxy_port: TPROXY_PORT,
 		dns_port: DNS_PORT,
@@ -718,8 +725,8 @@ function ping_chunk(nodes, results, rounds, stab) {
 		let cmd = '';
 		for (let i = 0; i < length(nodes); i++) {
 			let port = PING_PORT + i;
-			cmd += sprintf("curl -s -o /dev/null --max-time 6 -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
-				port, PING_URL, shq(RUN_DIR), port);
+			cmd += sprintf("curl -s -o /dev/null --max-time %d -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
+				TIMEOUT.probe, port, PING_URL, shq(RUN_DIR), port);
 		}
 		system(cmd + 'wait');
 		for (let i = 0; i < length(nodes); i++) {
@@ -745,7 +752,7 @@ function ping_chunk(nodes, results, rounds, stab) {
 
 // Проверка пачками по PING_CHUNK; задержки — в $RUN_DIR/ping.json, итоги стабильности
 // (если stab задан) — в STAB_PATH.
-function measure(nodes, rounds, stab) {
+function measure(nodes, rounds, stab, stab_path) {
 	system(`mkdir -p ${shq(RUN_DIR)}`);
 	let path = `${RUN_DIR}/ping.json`;
 	let results = read_json(path, {});
@@ -754,7 +761,7 @@ function measure(nodes, rounds, stab) {
 		save_file(path, sprintf('%J', results));
 	}
 	if (stab) {
-		save_file(STAB_PATH, sprintf('%J', stab));
+		save_file(stab_path || STAB_PATH, sprintf('%J', stab));
 	}
 	return results;
 }
@@ -774,22 +781,26 @@ function cmd_ping(...ids) {
 // иначе id подписки) по PICK_ROUNDS запросов; лучший — с наибольшей долей ответов, при
 // равной — с меньшими задержкой и разбросом. Текущий меняется, только если новый заметно
 // лучше. --apply — сохранить выбор (reload перезапустит xray, раз изменился конфиг).
+// --backup — то же для узла резервного канала mwan3: свои «из каких узлов», итоги и узел.
 function cmd_pick(...argv) {
-	// Через резервный канал (например, мобильный с белыми списками) не отвечал бы почти никто —
-	// итоги проверки и выбор узла испортились бы.
-	if (on_backup(uci)) {
-		warn('работает резервный канал — подбор узла отложен до возвращения основного\n');
+	let backup = ('--backup' in argv);
+	// Мерить можно только через тот канал, для которого выбирается узел: через резервный
+	// (например, мобильный с белыми списками) отвечают совсем другие узлы, чем через основной.
+	if (backup != (on_backup(uci) != null)) {
+		warn(backup ? 'резервный канал сейчас не работает — подбор для него пройдёт, когда он включится\n' :
+			'работает резервный канал — подбор узла отложен до возвращения основного\n');
 		return 1;
 	}
 	let all = load_nodes();
-	let from = opt('main', 'best_from', '');
+	let from = opt('main', backup ? 'backup_best_from' : 'best_from', '');
 	let nodes = filter(all, (n) => from == '' || n.source_id == from);
 	if (!length(nodes)) {
 		warn('нет узлов для подбора\n');
 		return 1;
 	}
 	// Итоги узлов, которых больше нет, не копим.
-	let stab = read_json(STAB_PATH, {});
+	let stab_path = backup ? STAB_BACKUP_PATH : STAB_PATH;
+	let stab = read_json(stab_path, {});
 	let alive = {};
 	for (let n in all)
 		alive[n.id] = true;
@@ -797,13 +808,14 @@ function cmd_pick(...argv) {
 		if (!alive[id])
 			delete stab[id];
 
-	measure(nodes, PICK_ROUNDS, stab);
+	measure(nodes, PICK_ROUNDS, stab, stab_path);
 	let best = best_node(nodes, stab);
 	if (!best) {
 		warn('ни один узел не ответил — выбор не меняю\n');
 		return 1;
 	}
-	let cur_id = opt('main', 'node', '');
+	let key = backup ? 'backup_node' : 'node';
+	let cur_id = opt('main', key, '');
 	let cur = filter(nodes, (n) => n.id == cur_id)[0];
 	if (best.id == cur_id || (cur && !stab_better(stab[best.id], stab[cur_id]))) {
 		printf('Текущий узел не хуже лучшего: %s\n', cur.name);
@@ -811,8 +823,11 @@ function cmd_pick(...argv) {
 	}
 	let e = stab[best.id];
 	printf('Лучший узел: %s — ответил %d из %d, %d мс ±%d\n', best.name, e.ok, e.n, e.ms, e.jit);
-	if ('--apply' in argv)
-		set_main({ node: best.id });
+	if ('--apply' in argv) {
+		let v = {};
+		v[key] = best.id;
+		set_main(v);
+	}
 	return 0;
 }
 
@@ -955,8 +970,8 @@ function zt_targets(family) {
 function zt_probe(hosts) {
 	let cmd = '';
 	for (let i, h in hosts) {
-		cmd += sprintf("(curl -s -o /dev/null --local-port %s --connect-timeout 3 --max-time 6 -r 0-65535 -w '%%{size_download}' https://%s/ >%s/zt.%d 2>/dev/null; echo \" $?\" >>%s/zt.%d) & ",
-			ZT_PORTS, h, RUN_DIR, i, RUN_DIR, i);
+		cmd += sprintf("(curl -s -o /dev/null --local-port %s --connect-timeout %d --max-time %d -r 0-65535 -w '%%{size_download}' https://%s/ >%s/zt.%d 2>/dev/null; echo \" $?\" >>%s/zt.%d) & ",
+			ZT_PORTS, ZT_CONNECT, ZT_MAX, h, RUN_DIR, i, RUN_DIR, i);
 		if ((i + 1) % ZT_PARALLEL == 0)
 			cmd += 'wait; ';
 	}
@@ -1444,8 +1459,8 @@ const SPEED_TIME = 10;
 function speed_run(url, proxy) {
 	let cmd = '';
 	for (let i = 0; i < SPEED_STREAMS; i++)
-		cmd += sprintf("curl -s -o /dev/null --connect-timeout 5 --max-time %d -w '%%{http_code} %%{size_download} %%{time_total} %%{time_starttransfer}' %s%s >%s/speed.%d 2>/dev/null & ",
-			SPEED_TIME, proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(url), shq(RUN_DIR), i);
+		cmd += sprintf("curl -s -o /dev/null --connect-timeout %d --max-time %d -w '%%{http_code} %%{size_download} %%{time_total} %%{time_starttransfer}' %s%s >%s/speed.%d 2>/dev/null & ",
+			TIMEOUT.connect, SPEED_TIME, proxy ? `--socks5-hostname ${shq(proxy)} ` : '', shq(url), shq(RUN_DIR), i);
 	system(cmd + 'wait');
 	let bps = 0;
 	for (let i = 0; i < SPEED_STREAMS; i++) {
@@ -1508,6 +1523,9 @@ function cmd_tick() {
 	let hour = +trim(cmd_out('date +%H') || '12');
 	// Автоподбор Zapret по категориям — ночью (3–5 ч), только если Zapret используется; общая
 	// задача ztest — одна проверка за раз.
+	// Расписания в часах (подписки, списки, подбор узла, автообновление) — одинаково; автоподбор
+	// Zapret — в днях и только ночью: он долгий и грузит процессор.
+	let hours = (key, def) => +opt('main', key, def) * 3600;
 	let ztest = (scope, key) => ({ name: `ztest_${scope}`, task: 'ztest',
 		every: +opt('main', key, '0') * 86400 - 3600,
 		since: () => +(read_json(`${ZAPRET_DIR}/results.json`, null)?.at || now),
@@ -1517,20 +1535,24 @@ function cmd_tick() {
 	// чего отсчитывать, пока состояния нет (после загрузки); when — дополнительное условие;
 	// task — общая блокировка, если не своя.
 	let jobs = [
-		{ name: 'update', every: +opt('main', 'sub_interval', '12') * 3600,
+		{ name: 'update', every: hours('sub_interval', '12'),
 		  since: () => newest_mtime(`${CACHE_DIR}/*.json`), cmd: '/usr/bin/stella update', reload: true },
-		{ name: 'lists', every: +opt('main', 'lists_interval', '24') * 3600,
+		{ name: 'lists', every: hours('lists_interval', '24'),
 		  since: () => newest_mtime(`${LISTS_DIR}/*.json`), cmd: '/usr/bin/stella lists', reload: true },
 		// Режим «лучший по проверке»; проверка задержки занимает те же порты — тогда позже, как
 		// и на резервном канале: подбор ждёт возвращения основного.
-		{ name: 'pick', every: (opt('main', 'select_mode', 'single') == 'best') ? +opt('main', 'best_interval', '6') * 3600 : 0,
+		{ name: 'pick', every: (opt('main', 'select_mode', 'single') == 'best') ? hours('best_interval', '6') : 0,
 		  since: () => stat(STAB_PATH)?.mtime ?? 0, when: () => !task_busy('ping') && !on_backup(uci), cmd: '/usr/bin/stella pick --apply' },
+		// То же для резервного канала — пока он работает: мерить можно только через него.
+		{ name: 'pick_backup', task: 'pick', every: (opt('main', 'backup_mode', 'single') == 'best') ? hours('backup_best_interval', '6') : 0,
+		  since: () => stat(STAB_BACKUP_PATH)?.mtime ?? 0, when: () => !task_busy('ping') && on_backup(uci) != null,
+		  cmd: '/usr/bin/stella pick --backup --apply' },
 		ztest('main', 'zapret_test_main'),
 		ztest('yv', 'zapret_test_yt'),
 		// Автообновление: первое — вскоре после загрузки, дальше по интервалу; не во время
 		// автоподбора Zapret. Блокировка общая с установкой из интерфейса; установка
 		// перезапускает службу, а с ней и планировщик, — поэтому отвязанно.
-		{ name: 'upgrade', every: +opt('main', 'upgrade_interval', '24') * 3600,
+		{ name: 'upgrade', every: hours('upgrade_interval', '24'),
 		  since: () => 0, when: () => !task_busy('ztest'), cmd: '/usr/bin/stella upgrade auto', detach: true }
 	];
 	// После обновлений — reload: init передаёт procd контрольную сумму конфига xray, и тот
@@ -1570,6 +1592,14 @@ function cmd_uplink() {
 	writefile(path, now);
 	system(`logger -t stella ${shq(now ? `работает резервный канал ${now} — переключаюсь на его узел` : 'основной канал снова в сети — возвращаюсь на основной узел')}`);
 	system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
+	// Узел резервного канала подбирается по проверке — сразу, а не по расписанию: до этого
+	// мерить было не через что. «Вручную» в расписании — только кнопкой.
+	if (now && opt('main', 'backup_mode', 'single') == 'best' && +opt('main', 'backup_best_interval', '6') > 0 &&
+	    run_locked('pick', '/usr/bin/stella pick --backup --apply', true)) {
+		let st = read_json(`${RUN_DIR}/updater.json`, {});
+		st.pick_backup = time();
+		writefile(`${RUN_DIR}/updater.json`, sprintf('%J', st));
+	}
 	return 0;
 }
 

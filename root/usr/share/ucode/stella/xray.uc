@@ -2,6 +2,8 @@
 
 'use strict';
 
+import { SOCKS_PORT } from 'stella.store';
+
 const NET_NAMES = {
 	raw: 'raw', xhttp: 'xhttp', ws: 'websocket', httpupgrade: 'httpupgrade',
 	grpc: 'grpc', hysteria: 'hysteria'
@@ -189,7 +191,7 @@ export function build_config(opts) {
 	let inbounds = [{
 		tag: 'socks-in',
 		listen: '127.0.0.1',
-		port: opts.socks_port || 10808,
+		port: opts.socks_port || SOCKS_PORT,
 		protocol: 'socks',
 		settings: { udp: true },
 		sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true }

@@ -72,9 +72,13 @@ jobs:
           sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libjson-c-dev
           git clone -q https://github.com/jow-/ucode.git ucode
           git -C ucode checkout -q "$UCODE_REV"
+          # В glibc 2.43 (Ubuntu 26) strchr/strrchr возвращают const char * для const-аргумента,
+          # а ucode этой ревизии собирается с -Werror — предупреждение discarded-qualifiers
+          # стало ошибкой. -Wno-error не помог бы: ucode добавляет -Werror позже, а само
+          # предупреждение ни -Wall, ни -Wextra обратно не включают.
           cmake -S ucode -B ucode/build -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
             -DDEBUG_SUPPORT=OFF -DRTNL_SUPPORT=OFF -DNL80211_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
-            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF >/dev/null
+            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF -DCMAKE_C_FLAGS=-Wno-discarded-qualifiers >/dev/null
           cmake --build ucode/build -j"$(nproc)"
 
       # Из кэша приезжает только сборка, а библиотека json-c нужна и ей. В образе раннера она

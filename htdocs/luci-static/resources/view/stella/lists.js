@@ -516,7 +516,7 @@ return view.extend({
 				];
 			return [
 				sui.dim(_('автоподбор')),
-				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
+				sui.combo(cfg[key] || '0', [ [ '0', _('вручную') ], [ '1', _('раз в сутки, ночью') ], [ '7', _('раз в неделю, ночью') ], [ '30', _('раз в месяц, ночью') ] ],
 					(v) => sui.saveSettings({ [key]: v }), { custom_placeholder: _('дней…') }),
 				E('button', { 'class': 'btn cbi-button', 'disabled': zc.strategies.some(has) ? null : '',
 					'title': _('Проверить стратегии и применить лучшую'),

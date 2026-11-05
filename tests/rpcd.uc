@@ -81,7 +81,14 @@ check('backup status', r.ok && st.backup == 'wwan' && st.node?.id == 'node_1', s
 let nd = methods.nodes.call({ args: {} });
 check('backup nodes', nd.backup == 'wwan' && length(nd.mwan3) == 2 && nd.mwan3[1].online, nd.mwan3);
 check('backup pick', methods.node_pick.call({ args: {} }).error != null, null);
+// Узел резервного канала подбирается через него — пока он работает, можно, без него — нет.
+check('backup_mode bad', methods.settings_set.call({ args: { values: { backup_mode: 'auto' } } }).error != null, null);
+r = methods.settings_set.call({ args: { values: { backup_mode: 'best', backup_best_interval: '3' } } });
+check('backup_mode', r.ok && methods.settings.call({ args: {} }).backup_mode == 'best', r);
+r = methods.node_pick.call({ args: { backup: true } });
+check('backup pick on backup', r.error == null, r);
 writefile(`${ms}/wan`, 'online\n');
+check('backup pick off backup', methods.node_pick.call({ args: { backup: true } }).error != null, null);
 st = methods.status.call({ args: {} });
 check('backup off', st.backup == null && st.node == null, st);
 methods.remove.call({ args: { id: 'node_1' } });
