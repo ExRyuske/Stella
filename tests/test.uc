@@ -206,11 +206,20 @@ else
 	fail(`прямой резолв адреса сервера: ${sprintf('%J', dns0)}`);
 
 // Адрес сервера — IP: прямого DNS для него не нужно; в конце — запасной DNS напрямую.
+// DNS через VPN ждём 3 с, истёкшие записи отдаются из кэша (туннель может упасть).
 c = build_config({ node: parse(CASES[0].link), ...INTERCEPT });
-if (sprintf('%J', c.dns.servers) == sprintf('%J', [ INTERCEPT.dns_remote, { address: INTERCEPT.dns_direct, tag: 'dns-direct' } ]))
+if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_remote, timeoutMs: 3000 }, { address: INTERCEPT.dns_direct, tag: 'dns-direct' } ]) &&
+    c.dns.serveStale === true && c.dns.serveExpiredTTL == 86400)
 	passed++;
 else
-	fail(`DNS-серверы для IP-адреса: ${sprintf('%J', c.dns.servers)}`);
+	fail(`DNS-серверы для IP-адреса: ${sprintf('%J', c.dns)}`);
+
+// Без узла запасного DNS нет — ждать основной столько, сколько xray ждёт по умолчанию.
+c = build_config({ node: null, ...INTERCEPT });
+if (sprintf('%J', c.dns.servers) == sprintf('%J', [ INTERCEPT.dns_remote ]))
+	passed++;
+else
+	fail(`DNS без узла: ${sprintf('%J', c.dns.servers)}`);
 
 // Автовыбор: outbound на каждый узел, balancer с запасным ручным узлом, observatory; xray принимает.
 c = build_config({ node: parse(CASES[0].link), auto_nodes: [ parse(CASES[1].link), parse(CASES[11].link), parse(CASES[7].link) ], ...INTERCEPT });
@@ -246,6 +255,13 @@ if (length(filter(c.routing.rules, (r) => r.ip && r.outboundTag == 'direct' && r
 	passed++;
 else
 	fail(`DNS с одним IP: ${sprintf('%J', c.routing.rules)}`);
+
+// Один и тот же сервер в обоих полях: запасной напрямую всё равно есть.
+c = build_config({ node: parse(CASES[0].link), ...INTERCEPT, dns_direct: INTERCEPT.dns_remote });
+if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_remote, timeoutMs: 3000 }, { address: INTERCEPT.dns_remote, tag: 'dns-direct' } ]))
+	passed++;
+else
+	fail(`один DNS в обоих полях: ${sprintf('%J', c.dns.servers)}`);
 
 // Разбор списков: форматы itdoginfo, meta-rules-dat, clash, dnsmasq, yaml.
 let pl = parse_list(join('\n', [

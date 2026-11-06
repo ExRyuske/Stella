@@ -17,15 +17,11 @@ const callUpdateInfo = rpc.declare({ object: 'stella', method: 'update_info' });
 const callUpdateCheck = rpc.declare({ object: 'stella', method: 'update_check' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
 
-const DNS_REMOTE = [
+const DNS_SERVERS = [
 	[ 'https://1.1.1.1/dns-query', 'Cloudflare (DoH) — https://1.1.1.1/dns-query' ],
 	[ 'https://8.8.8.8/dns-query', 'Google (DoH) — https://8.8.8.8/dns-query' ],
-	[ 'https://9.9.9.9/dns-query', 'Quad9 (DoH) — https://9.9.9.9/dns-query' ]
-];
-const DNS_DIRECT = [
-	[ 'https://77.88.8.8/dns-query', _('Яндекс (DoH) — https://77.88.8.8/dns-query') ],
-	[ 'https://1.1.1.1/dns-query', 'Cloudflare (DoH) — https://1.1.1.1/dns-query' ],
-	[ 'https://8.8.8.8/dns-query', 'Google (DoH) — https://8.8.8.8/dns-query' ]
+	[ 'https://9.9.9.9/dns-query', 'Quad9 (DoH) — https://9.9.9.9/dns-query' ],
+	[ 'https://77.88.8.8/dns-query', _('Яндекс (DoH) — https://77.88.8.8/dns-query') ]
 ];
 
 const CSS = `
@@ -127,8 +123,8 @@ return view.extend({
 	renderDns(cfg) {
 		const dns = (key, choices, hint) => [ sui.combo(cfg[key], choices, (v) => this.save({ [key]: v })), sui.hint(hint) ];
 		return E('div', { 'class': 'st-card st-dns' }, [
-			...sui.kv(_('Через VPN'), dns('dns_remote', DNS_REMOTE, _('Основной DNS для всех устройств, запросы идут через VPN'))),
-			...sui.kv(_('Напрямую'), dns('dns_direct', DNS_DIRECT, _('Запасной, если основной не ответил. Запросы идут мимо VPN'))),
+			...sui.kv(_('Через VPN'), dns('dns_remote', DNS_SERVERS, _('Основной DNS для всех устройств, запросы идут через VPN'))),
+			...sui.kv(_('Напрямую'), dns('dns_direct', DNS_SERVERS, _('Запасной, если основной не ответил. Запросы идут мимо VPN'))),
 			...sui.kv('', [
 				this.flag('dns_hijack', cfg.dns_hijack, _('Перехватывать DNS устройств'), _('Запросы к сторонним DNS-серверам (порт 53) уходят на роутер')),
 				this.flag('block_doh', cfg.block_doh, _('Блокировать DNS-over-HTTPS'),
@@ -268,13 +264,10 @@ return view.extend({
 		this.autoUpd = sui.hours(cfg.upgrade_interval, (v) => this.save({ upgrade_interval: v }));
 		this.upd = upd;
 		this.renderUpdates(upd);
-		// Обновления проверяются при открытии страницы, но не чаще раза в час: у GitHub API лимит
-		// 60 запросов в час на адрес (один на всю домашнюю сеть), а проверка — три запроса. Пока
-		// проверка или установка уже идут — только следим за ними.
+		// Сама страница обновления не проверяет — только кнопка «Проверить сейчас» и расписание
+		// автообновления. Проверка или установка уже идут — следим за ними.
 		if (upd.checking || upd.installing)
 			this.pollUpdates();
-		else if (!upd.info || Date.now() / 1000 - upd.info.at > 3600)
-			this.handleUpdateCheck();
 		this.logBox = E('textarea', { 'class': 'cbi-input-textarea', 'readonly': 'readonly', 'wrap': 'off', 'rows': 15 });
 
 		this.renderStatus(st);

@@ -14,6 +14,14 @@ const PRIVATE_NETS = [
 	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4'
 ];
 
+// Сколько ждать DNS через VPN, прежде чем спросить запасной напрямую. У xray по умолчанию 4 с:
+// при упавшем туннеле так ждал каждый запрос, и клиенты успевали сдаться. Меньше 3 с нельзя:
+// первый запрос через медленный узел (подключение к серверу и TLS до DNS) идёт около 1,5 с.
+const DNS_REMOTE_TIMEOUT_MS = 3000;
+// Истёкшую запись xray отдаёт сразу (с TTL 1) и обновляет её в фоне, но не дольше суток после
+// срока: при упавшем туннеле знакомые имена отвечают без ожидания.
+const DNS_STALE_TTL = 86400;
+
 function compact(o) {
 	for (let k in o)
 		if (o[k] == null)
@@ -223,16 +231,18 @@ export function build_config(opts) {
 		push(outbounds, { tag: 'dns-out', protocol: 'dns' });
 
 		// Запросы к прямому DNS помечены своим тегом и идут напрямую по нему, а не по IP:
-		// иначе при одном IP у обоих DNS (1.1.1.1 есть в обоих списках) мимо VPN уходили бы
+		// иначе при одном IP у обоих DNS (например, 1.1.1.1 в обоих полях) мимо VPN уходили бы
 		// и запросы устройств.
 		let servers = [];
 		if (length(servers_of))
 			push(servers, { address: opts.dns_direct, domains: servers_of, skipFallback: true, tag: 'dns-direct' });
-		push(servers, opts.dns_remote);
-		if (has_proxy && opts.dns_direct != opts.dns_remote)
+		// Запасной нужен и при том же сервере: через VPN и напрямую — разные пути, при упавшем
+		// туннеле тот же сервер ответит напрямую.
+		push(servers, has_proxy ? { address: opts.dns_remote, timeoutMs: DNS_REMOTE_TIMEOUT_MS } : opts.dns_remote);
+		if (has_proxy)
 			push(servers, { address: opts.dns_direct, tag: 'dns-direct' });
 
-		cfg.dns = { tag: 'dns-internal', queryStrategy: 'UseIPv4', servers };
+		cfg.dns = { tag: 'dns-internal', queryStrategy: 'UseIPv4', serveStale: true, serveExpiredTTL: DNS_STALE_TTL, servers };
 
 		push(rules, { inboundTag: ['dns-in'], outboundTag: 'dns-out' });
 		push(rules, { inboundTag: ['dns-direct'], outboundTag: 'direct' });
