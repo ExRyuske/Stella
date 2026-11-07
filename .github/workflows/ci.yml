@@ -180,7 +180,12 @@ jobs:
           # запись всем, rpcd не загружает («world writable») — и это ещё и дыра.
           chmod -R a+rX feed
           chmod a+rwx out
+          # SDK образ докачивает сам (setup.sh, wget). По умолчанию wget ждёт молчащее
+          # соединение 15 минут: однажды зеркало OpenWrt замолчало посреди SDK, и задача
+          # простояла до таймаута. Теперь после минуты тишины он переподключается и
+          # докачивает с того же места.
           docker run --rm -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "ghcr.io/openwrt/sdk:$SDK_TARGET-$OPENWRT" bash -ec '
+            printf "%s\n" "read_timeout = 60" "tries = 10" "waitretry = 10" "retry_connrefused = on" > ~/.wgetrc
             [ -x ./scripts/feeds ] || ./setup.sh
             echo "src-link stella /feed" >> feeds.conf.default
             ./scripts/feeds update base packages luci stella >/dev/null
