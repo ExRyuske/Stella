@@ -39,7 +39,7 @@ function ver(v) {
 
 return view.extend({
 	load() {
-		return sui.need(3).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
+		return sui.need(4).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
 	},
 
 	renderStatus(st) {

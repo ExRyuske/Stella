@@ -26,7 +26,7 @@ const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', 
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 3;
+const API = 4;
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -58,7 +58,7 @@ const CSS = `
 .st-table th { font-weight:normal; opacity:.6; font-size:90% }
 .st-table .st-dim { font-size:85% }
 body .cbi-dropdown[optional][open] > ul.dropdown > li[placeholder] { display:none !important }
-.st-act { text-align:right; white-space:nowrap; width:1% }
+.st-act, .st-table td.st-act { text-align:right; white-space:nowrap; width:1% }
 .st-act .btn { line-height:1.8em; min-height:0 }
 .st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.55 }
 .st-ico { display:inline-block; vertical-align:middle; line-height:1 }

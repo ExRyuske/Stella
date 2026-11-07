@@ -91,7 +91,7 @@ return view.extend({
 	open: null,
 
 	load() {
-		return sui.need(3).then(() => Promise.all([ callNodes(), callSettings() ]));
+		return sui.need(4).then(() => Promise.all([ callNodes(), callSettings() ]));
 	},
 
 	refresh() {

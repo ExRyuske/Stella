@@ -23,7 +23,7 @@ const CSS = `
 
 return view.extend({
 	load() {
-		return sui.need(3).then(() => Promise.all([ callDevices(), callLists(), callSettings() ]));
+		return sui.need(4).then(() => Promise.all([ callDevices(), callLists(), callSettings() ]));
 	},
 
 	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).

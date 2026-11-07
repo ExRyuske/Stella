@@ -194,6 +194,16 @@ function dnsmasq_nftset() {
 	return match(out || '', /[ \t]nftset/) != null;
 }
 
+// Перезапуск dnsmasq с короткой паузой в DNS. Его restart при остановке стирает отметки
+// проверки чужого DHCP-сервера, и при запуске udhcpc ищет такой сервер около 3 с — всё это
+// время DNS не отвечает. Отметки возвращаются перед запуском, как при reload (тот их не стирает).
+function dnsmasq_restart() {
+	let keep = `${RUN_DIR}/dnsmasq-dhcp`;
+	system(`mkdir -p ${keep} && cp -p /var/run/dnsmasq.*.dhcp ${keep}/ 2>/dev/null; ` +
+	       `/etc/init.d/dnsmasq stop >/dev/null 2>&1; cp -p ${keep}/* /var/run/ 2>/dev/null; rm -rf ${keep}; ` +
+	       '/etc/init.d/dnsmasq start >/dev/null 2>&1');
+}
+
 function fw_down() {
 	system('nft delete table inet stella 2>/dev/null');
 	system(sprintf('while ip rule del fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done', FW_MARK, FW_MARK, ROUTE_TABLE));
@@ -206,7 +216,7 @@ function fw_down() {
 			changed = true;
 		}
 	if (changed)
-		system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
+		dnsmasq_restart();
 	return 0;
 }
 
@@ -427,10 +437,18 @@ function fw_up() {
 	}
 	writefile(state, sprintf('%J', cur));
 
-	system(sprintf('while ip rule del fwmark 0x%x/0x%x table %d 2>/dev/null; do :; done', FW_MARK, FW_MARK, ROUTE_TABLE));
+	// Правило, которое уже стоит (одно и с нашим приоритетом), не трогаем: между удалением и
+	// добавлением пакеты открытых соединений VPN ушли бы мимо xray.
+	let rule = sprintf('fwmark 0x%x/0x%x table %d', FW_MARK, FW_MARK, ROUTE_TABLE);
+	let p = popen(`ip rule list ${rule} 2>/dev/null`, 'r');
+	let have = filter(split(trim(p?.read('all') || ''), '\n'), (l) => l != '');
+	p?.close();
+	let rule_ok = length(have) == 1 && index(have[0], `${ROUTE_TABLE}:`) == 0;
+	if (!rule_ok)
+		system(`while ip rule del ${rule} 2>/dev/null; do :; done`);
 	// Без этого маршрута перехваченный трафик VPN никуда не уходит — молчать нельзя.
 	// (ip из busybox не принимает таблицы больше 255, поэтому в зависимостях ip-full.)
-	if (system(sprintf('ip rule add fwmark 0x%x/0x%x table %d priority %d', FW_MARK, FW_MARK, ROUTE_TABLE, ROUTE_TABLE)) != 0 ||
+	if ((!rule_ok && system(`ip rule add ${rule} priority ${ROUTE_TABLE}`) != 0) ||
 	    system(`ip route replace local 0.0.0.0/0 dev lo table ${ROUTE_TABLE}`) != 0)
 		warn('не удалось добавить маршрут для VPN (нужен пакет ip-full) — трафик списков VPN не пойдёт\n');
 
@@ -444,7 +462,7 @@ function fw_up() {
 			changed = true;
 		}
 	if (changed)
-		system('/etc/init.d/dnsmasq restart >/dev/null 2>&1');
+		dnsmasq_restart();
 	// Из кэша dnsmasq адреса в сеты не кладёт: без сброса кэша сайты невернувшихся сетов шли бы
 	// мимо правил, пока не истечёт их TTL (бывает, часами).
 	else if (skipped)

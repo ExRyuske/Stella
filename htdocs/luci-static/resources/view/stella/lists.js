@@ -29,7 +29,6 @@ const FAMILIES = { v: 'Zapret Manager', yv: 'YouTube', fs: 'Flowseal', dv: 'Disc
 
 const ITD = 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/';
 const META = 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/';
-const ZMS_EXCLUDE = 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main/zapret-hosts-user-exclude.txt';
 
 // Готовые списки itdoginfo/allow-domains; у сервисов с известными подсетями — оба файла.
 const CATALOG = [
@@ -60,6 +59,9 @@ const CATALOG = [
 		[ _('Хостинги (Hetzner, OVH, DO, Cloudflare, AWS, Akamai)'), [ 'Categories/hodca.lst' ] ]
 	] ]
 ];
+
+// Сколько секунд удалённый список можно вернуть.
+const REMOVE_DELAY = 10;
 
 const ACTIONS = [
 	[ 'vpn', _('VPN') ],
@@ -112,20 +114,6 @@ function countLabel(l) {
 	return p.length ? p.join(' · ') : (l.urls.length ? _('не загружен') : _('пусто'));
 }
 
-function sourceLabel(l) {
-	if (!l.urls.length)
-		return _('свои сайты');
-	const u = l.urls[0];
-	if (u.indexOf(ITD) == 0)
-		return 'itdoginfo';
-	if (u.indexOf(META) == 0)
-		return 'meta-rules-dat';
-	if (u == ZMS_EXCLUDE)
-		return 'Zapret Manager';
-	const m = u.match(/^https?:\/\/([^\/]+)/);
-	return m ? m[1] : u;
-}
-
 function lines(text) {
 	return text.split(/\r?\n/).map((s) => s.trim()).filter((s) => s);
 }
@@ -156,7 +144,7 @@ function listName(url) {
 
 return view.extend({
 	load() {
-		return sui.need(3).then(() => Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]));
+		return sui.need(4).then(() => Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]));
 	},
 
 	setDevices(dr) {
@@ -392,16 +380,37 @@ return view.extend({
 		]);
 	},
 
+	// Удаление без подтверждения, но не сразу: REMOVE_DELAY секунд список остаётся на роутере
+	// как был, а в таблице на его месте — «удалён» и «Вернуть», которая просто отменяет удаление.
 	handleRemove(l) {
-		if (confirm(_('Удалить список «%s»?').format(l.name)))
-			return this.call(callRemove(l.id));
+		this.pending[l.id] = window.setTimeout(() => this.commitRemove(l.id), REMOVE_DELAY * 1000);
+		this.renderAll();
+	},
+
+	commitRemove(id) {
+		window.clearTimeout(this.pending[id]);
+		delete this.pending[id];
+		return this.call(callRemove(id));
+	},
+
+	handleRestore(id) {
+		window.clearTimeout(this.pending[id]);
+		delete this.pending[id];
+		this.renderAll();
+	},
+
+	goneRow(l) {
+		return E('tr', {}, [
+			E('td', { 'colspan': 4, 'class': 'st-dim' }, _('Список «%s» удалён').format(l.name)),
+			E('td', { 'class': 'st-act' }, E('button', { 'class': 'btn cbi-button', 'click': () => this.handleRestore(l.id) }, _('Вернуть')))
+		]);
 	},
 
 	scopeLabel(l) {
 		if (l.devices_mode == 'all')
 			return '';
 		const names = l.macs.map((m) => this.devNames[m] || m);
-		return E('span', { 'class': 'st-scope' }, [ ' · ' + (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')) ]);
+		return E('div', { 'class': 'st-dim st-scope' }, [ (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')) ]);
 	},
 
 	/* Zapret */
@@ -610,7 +619,7 @@ return view.extend({
 		}
 
 		const n = d.lists.length;
-		const rows = d.lists.map((l, i) => E('tr', { 'class': l.enabled ? '' : 'st-off' }, [
+		const rows = d.lists.map((l, i) => (l.id in this.pending) ? this.goneRow(l) : E('tr', { 'class': l.enabled ? '' : 'st-off' }, [
 			E('td', { 'class': 'st-order' }, [
 				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Выше'), 'disabled': i == 0 ? '' : null,
 					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, -1))) }, sui.icon('up')),
@@ -619,7 +628,7 @@ return view.extend({
 			]),
 			E('td', { 'class': 'st-order' }, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
 				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, ev.target.checked)) })),
-			E('td', {}, [ E('div', {}, [ l.name ]), E('div', { 'class': 'st-dim' }, [ sourceLabel(l), this.scopeLabel(l) ]) ]),
+			E('td', {}, [ E('div', {}, [ l.name ]), this.scopeLabel(l) ]),
 			E('td', { 'class': 'st-dim' }, [
 				E('div', {}, countLabel(l)),
 				l.updated ? E('div', {}, sui.time(l.updated)) : ''
@@ -627,7 +636,9 @@ return view.extend({
 			E('td', { 'class': 'st-act' }, [
 				l.urls.length ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
 				' ',
-				sui.iconButton('edit', _('Изменить'), () => this.showList(l))
+				sui.iconButton('edit', _('Изменить'), () => this.showList(l)),
+				' ',
+				sui.iconButton('close', _('Удалить'), () => this.handleRemove(l))
 			])
 		]));
 
@@ -646,6 +657,13 @@ return view.extend({
 		this.zi = zi;
 		this.zc = zc;
 		this.setDevices(dr);
+		this.pending = {};
+		// Ушли со страницы раньше — удалить сейчас: обычный запрос при уходе может не дойти.
+		window.addEventListener('pagehide', () => {
+			for (const id in this.pending)
+				navigator.sendBeacon(rpc.getBaseURL(), JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'call',
+					params: [ rpc.getSessionID(), 'stella', 'list_remove', { id } ] }));
+		});
 		this.defaultBox = E('div', { 'class': 'st-card' });
 		this.tableBox = E('div', { 'class': 'st-box' });
 		this.zapretBox = E('div', { 'class': 'st-card' });
