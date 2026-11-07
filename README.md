@@ -2,7 +2,26 @@
 
 Приложение LuCI для OpenWrt 25.12, которое пускает трафик домашней сети через
 [xray-core](https://github.com/XTLS/Xray-core), Zapret или напрямую — по спискам
-сайтов и по устройствам. Проверяется на OpenWrt One.
+сайтов и по устройствам.
+
+## Установка
+
+В консоли роутера:
+
+```sh
+wget -qO- https://yeru.cc/stella.sh | sh
+```
+
+Или напрямую с GitHub:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
+```
+
+Обе команды запускают один и тот же скрипт [install.sh](install.sh). Он ставит последний [релиз](../../releases) с зависимостями
+(`xray-core`, `curl`, модули ucode). Пакет не подписан, поэтому ставится с `--allow-untrusted`.
+Дальше — LuCI → Службы → Stella: dnsmasq-full (без него не работают списки по доменам), zapret
+и mwan3 ставятся на «Обзоре» в «Обновлениях», там же обновляется сама Stella.
 
 ## Что умеет
 
@@ -40,17 +59,6 @@
 | `root/usr/share/rpcd/ucode/stella.uc` | объект ubus `stella` для интерфейса |
 | `htdocs/luci-static/resources/view/stella/` | страницы LuCI |
 | `tests/` | тесты на ucode той же ревизии, что в OpenWrt 25.12 |
-
-## Установка
-
-Пакет `.apk` — в [релизах](../../releases). Он не подписан, поэтому:
-
-```sh
-apk add --allow-untrusted ./luci-app-stella-*.apk
-```
-
-Зависимости (`xray-core`, `curl`, модули ucode) ставятся из репозитория OpenWrt. Для
-действия «Zapret» нужен установленный пакет zapret.
 
 ## Разработка
 
