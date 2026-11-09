@@ -4,15 +4,14 @@
 'require ui';
 'require poll';
 'require dom';
+'require uci';
 'require stella.common as sui';
 
 const callStatus = rpc.declare({ object: 'stella', method: 'status' });
 const callCheck = rpc.declare({ object: 'stella', method: 'check' });
 const callRestart = rpc.declare({ object: 'stella', method: 'restart' });
 const callSpeedtest = rpc.declare({ object: 'stella', method: 'speedtest' });
-const callSetEnabled = rpc.declare({ object: 'stella', method: 'set_enabled', params: [ 'enabled' ] });
 const callLog = rpc.declare({ object: 'stella', method: 'log', expect: { log: '' } });
-const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callUpdateInfo = rpc.declare({ object: 'stella', method: 'update_info' });
 const callUpdateCheck = rpc.declare({ object: 'stella', method: 'update_check' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
@@ -39,7 +38,7 @@ function ver(v) {
 
 return view.extend({
 	load() {
-		return sui.need(4).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
+		return sui.need(6).then(() => Promise.all([ callStatus(), uci.load('stella'), callUpdateInfo() ]));
 	},
 
 	renderStatus(st) {
@@ -69,11 +68,14 @@ return view.extend({
 		else
 			node = [ E('a', { 'href': href, 'class': 'st-bad' }, _('узел не выбран')) ];
 
+		// Включение — настройка: применяется, как и остальные, кнопкой «Сохранить и применить».
+		const want = this.cfg.enabled == '1';
 		dom.content(this.statusBox, E('div', { 'class': 'st-card' }, [
 			E('div', { 'class': 'st-wide st-row' }, [
 				state, E('span', {}, [ '(', ...node, ')' ]), E('span', { 'style': 'flex:1' }),
+				(want != !!st.enabled) ? sui.dim(want ? _('включится после применения') : _('выключится после применения')) : '',
 				st.enabled ? E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, 'handleRestart') }, _('Перезапустить')) : '',
-				st.enabled ?
+				want ?
 					E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleEnable', false) }, _('Выключить')) :
 					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'))
 			]),
@@ -105,7 +107,7 @@ return view.extend({
 	},
 
 	save(values) {
-		return sui.saveSettings(values).then((ok) => ok && ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info'));
+		return sui.saveSettings(values);
 	},
 
 	// Флажок настройки с пояснением под ним.
@@ -220,7 +222,7 @@ return view.extend({
 	},
 
 	handleEnable(on) {
-		return callSetEnabled(on).then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
+		return this.save({ enabled: on ? '1' : '0' }).then(() => this.poll());
 	},
 
 	handleSpeed() {
@@ -252,7 +254,8 @@ return view.extend({
 	},
 
 	render(r) {
-		const [ st, cfg, upd ] = r;
+		const [ st, , upd ] = r;
+		const cfg = this.cfg = sui.cfg();
 		// Карточки перерисовываются при опросе, а кнопки, итоги проверок и выбор интервала
 		// создаются один раз — чтобы не терять их состояние.
 		this.statusBox = E('div');
@@ -297,7 +300,13 @@ return view.extend({
 		]);
 	},
 
-	handleSave: null,
-	handleSaveApply: null,
-	handleReset: null
+	// Как в формах OpenWrt: «Сохранить» отдаёт правки роутеру, «Сохранить и применить» ещё и
+	// применяет их, «Сбросить» отменяет несохранённые.
+	handleSave() {
+		return sui.push();
+	},
+
+	handleReset() {
+		location.reload();
+	}
 });

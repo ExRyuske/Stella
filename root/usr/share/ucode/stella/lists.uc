@@ -1,6 +1,6 @@
 // Разбор списков сайтов в домены и подсети IPv4.
-// Понимает: домен в строке (itdoginfo), "+.domain" / "domain:" / "full:" (meta-rules-dat,
-// v2ray), "DOMAIN-SUFFIX,x" / "DOMAIN,x" / "IP-CIDR,x" (clash), nftset=/a/b/…, CIDR и IP.
+// Понимает: домен в строке (itdoginfo), "+.domain" / "domain:" / "full:" (v2ray,
+// mihomo), "DOMAIN-SUFFIX,x" / "DOMAIN,x" / "IP-CIDR,x" (clash), nftset=/a/b/…, CIDR и IP.
 // Домен всегда означает «он и все поддомены» — так работает nftset в dnsmasq.
 // Ключевые слова и регулярные выражения dnsmasq не поддерживает — они пропускаются.
 

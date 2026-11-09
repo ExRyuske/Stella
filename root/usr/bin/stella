@@ -8,9 +8,11 @@ import { readfile, writefile, rename, unlink, glob, popen, stat } from 'fs';
 import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config, outbound } from 'stella.xray';
-import { fnv1a, try_json } from 'stella.util';
+import { fnv1a, try_json, b64dec_loose } from 'stella.util';
+import { warp_link, random_endpoints, iso_time, WARP_API, WARP_PORT } from 'stella.warp';
 import { nft_script, dnsmasq_conf, restore_script, dns_set, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
 import { parse_list } from 'stella.lists';
+import { parse_srs } from 'stella.srs';
 import { flowseal_strategy, zms_strategies, block_strategies, strategy_text, compose, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list, HOSTLISTS } from 'stella.zapret';
 import { CACHE_DIR, RUN_DIR, LISTS_DIR, STAB_PATH, STAB_BACKUP_PATH, XRAY_CONF, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, AUTO_MAX, SOCKS_PORT, read_json, stab_entry, stab_better, best_node, sub_label, load_nodes as store_load_nodes, load_lists, load_devices, lan_ifnames, xray_pid, task_busy, task_script, on_backup } from 'stella.store';
 
@@ -57,18 +59,20 @@ function set_main(values) {
 
 function usage() {
 	warn('Использование: stella <команда>\n' +
-		'  update [подписка]  обновить подписки\n' +
+		'  update [id ...]    обновить подписки\n' +
 		'  nodes              список узлов (* — выбранный)\n' +
 		'  gen [файл|-]       сгенерировать конфиг xray\n' +
 		'  ping [id ...]      проверить задержку узлов (все, если id не заданы)\n' +
 		'  pick [--apply]     подобрать лучший узел по задержке и стабильности\n' +
 		'  fw up|down|show    включить/снять перехват трафика LAN, показать правила\n' +
-		'  lists [id]         обновить списки сайтов\n' +
-		'  meta-index         скачать имена наборов meta-rules-dat для поиска\n' +
+		'  lists [id ...]     обновить списки сайтов\n' +
+		'  stale              скачать новые списки и подписки (вызывается из init)\n' +
+		'  geo-index          скачать имена наборов geosite и geoip для поиска\n' +
 		'  upgrade check|auto|stella|xray|zapret|dnsmasq|mwan3  проверить или установить обновления\n' +
 		'  speedtest          скорость загрузки напрямую и через VPN\n' +
 		'  uplink             сверить узел с каналом mwan3 (вызывается из hotplug)\n' +
 		'  migrate            переименовать анонимные секции в постоянные\n' +
+		'  warp [название]    создать узел Cloudflare WARP\n' +
 		'  parse <ссылка>     разобрать ссылку\n');
 	return 2;
 }
@@ -106,14 +110,15 @@ function save_file(path, data) {
 	rename(`${path}.tmp`, path);
 }
 
-// Обновление подписок. При неудаче остаётся прежний список (последний удачный).
-function cmd_update(only) {
+// Обновление подписок (всех или перечисленных). При неудаче остаётся прежний список (последний
+// удачный).
+function cmd_update(...only) {
 	let failed = 0;
 
 	system(`mkdir -p ${shq(CACHE_DIR)}`);
 
 	uci.foreach('stella', 'subscription', (s) => {
-		if ((only && s['.name'] != only) || s.enabled == '0' || !s.url)
+		if ((length(only) && !(s['.name'] in only)) || s.enabled == '0' || !s.url)
 			return;
 
 		let ua = s.user_agent || DEFAULT_UA;
@@ -304,15 +309,13 @@ function zapret_localize(args) {
 }
 
 // Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
-// Наборы выбираются по имени; старое «1» — первый вариант набора, «0»/пусто — выключено.
+// Наборы выбираются по имени; пусто — выключено.
 function zapret_parts() {
 	let cat = read_json(`${ZAPRET_DIR}/catalog.json`, []);
 	let pick = (key, family) => {
 		let v = opt('main', key, '');
-		if (v == '' || v == '0')
-			return null;
 		for (let st in cat)
-			if (st.family == family && (st.name == v || v == '1'))
+			if (v != '' && st.family == family && st.name == v)
 				return st;
 		return null;
 	};
@@ -480,17 +483,50 @@ function fw_up() {
 	return 0;
 }
 
-// Обновление списков по URL. Неудача — остаётся прежнее содержимое.
-function cmd_lists(only) {
+// Наборы geosite и geoip (опция geo списка: geosite:имя, geoip:имя) — из russia-v2ray-rules-dat
+// (runetfreedom), в формате sing-box (.srs): текстом он их не раздаёт.
+const GEO_BASE = getenv('STELLA_GEO_BASE') || 'https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/';
+const GEO_TREES = getenv('STELLA_GEO_TREES') || 'https://api.github.com/repos/runetfreedom/russia-v2ray-rules-dat/git/trees/release:sing-box/rule-set-';
+
+function as_list(v) {
+	return (type(v) == 'array') ? v : (v ? [ v ] : []);
+}
+
+// Что скачивается для списка: его ссылки и наборы.
+function list_sources(s) {
+	let res = [ ...as_list(s.url) ];
+	for (let g in as_list(s.geo)) {
+		let m = match(g, /^(geosite|geoip):([a-z0-9@!_.-]+)$/);
+		if (m)
+			push(res, `${GEO_BASE}rule-set-${m[1]}/${m[1]}-${m[2]}.srs`);
+	}
+	return res;
+}
+
+// Слить разобранные части списка в одну, без повторов.
+function merge_lists(parts) {
+	let domains = {}, cidrs = {};
+	for (let p in parts) {
+		for (let d in p.domains) domains[d] = true;
+		for (let c in p.cidrs) cidrs[c] = true;
+	}
+	return { domains: sort(keys(domains)), cidrs: sort(keys(cidrs)) };
+}
+
+// Обновление списков (всех или перечисленных) по ссылкам и наборам. Неудача — остаётся прежнее
+// содержимое. Рядом с содержимым — .src: откуда оно скачано (по нему видно, что ссылки сменились).
+function cmd_lists(...only) {
 	let failed = 0;
 	system(`mkdir -p ${shq(LISTS_DIR)}`);
 
 	uci.foreach('stella', 'list', (s) => {
-		let urls = (type(s.url) == 'array') ? s.url : (s.url ? [ s.url ] : []);
-		if ((only && s['.name'] != only) || !length(urls))
+		let urls = list_sources(s);
+		if ((length(only) && !(s['.name'] in only)) || !length(urls))
 			return;
 
-		let text = [];
+		// Наборы .srs разбираются сразу: в них уже готовые домены и подсети, общий разбор
+		// текста на сотнях тысяч строк был бы в разы дольше.
+		let text = [], parts = [];
 		for (let u in urls) {
 			let body = fetch_any(u, 'stella');
 			if (body == null) {
@@ -498,48 +534,55 @@ function cmd_lists(only) {
 				failed++;
 				return;
 			}
-			push(text, body);
+			let srs = parse_srs(body);
+			if (srs?.error) {
+				warn(`${s.name}: ${u}: ${srs.error}\n`);
+				failed++;
+				return;
+			}
+			srs ? push(parts, srs) : push(text, body);
 		}
 
-		let res = parse_list(join('\n', text));
+		let res = merge_lists([ parse_list(join('\n', text)), ...parts ]);
 		if (!length(res.domains) && !length(res.cidrs)) {
 			warn(`${s.name}: список пуст, оставляю прежний\n`);
 			failed++;
 			return;
 		}
 		save_file(`${LISTS_DIR}/${s['.name']}.json`, sprintf('%J', res));
+		save_file(`${LISTS_DIR}/${s['.name']}.src`, join('\n', urls));
 		print(`${s.name}: доменов ${length(res.domains)}, подсетей ${length(res.cidrs)}\n`);
 	});
 
 	let known = {};
-	uci.foreach('stella', 'list', (s) => { known[`${LISTS_DIR}/${s['.name']}.json`] = true; });
-	for (let f in glob(`${LISTS_DIR}/*.json`) || [])
+	uci.foreach('stella', 'list', (s) => {
+		known[`${LISTS_DIR}/${s['.name']}.json`] = true;
+		known[`${LISTS_DIR}/${s['.name']}.src`] = true;
+	});
+	for (let f in [ ...(glob(`${LISTS_DIR}/*.json`) || []), ...(glob(`${LISTS_DIR}/*.src`) || []) ])
 		if (!known[f])
 			unlink(f);
 
 	return failed ? 1 : 0;
 }
 
-// Имена наборов meta-rules-dat для поиска в интерфейсе: geosite — сайты, geoip — подсети.
-// Берутся из дерева репозитория через API GitHub; лежат в RUN_DIR — флеш не трогают, после
-// перезагрузки скачаются заново.
-const META_TREES = getenv('STELLA_META_TREES') || 'https://api.github.com/repos/MetaCubeX/meta-rules-dat/git/trees/meta:geo/';
-
-function cmd_meta_index() {
+// Имена наборов для поиска в интерфейсе: geosite — сайты, geoip — подсети. Берутся из дерева
+// репозитория через API GitHub; лежат в RUN_DIR — флеш не трогают, после перезагрузки
+// скачаются заново.
+function cmd_geo_index() {
 	let res = { at: time() };
 	for (let kind in [ 'geosite', 'geoip' ]) {
-		let url = META_TREES + kind;
-		let tree = try_json(fetch_any(url, 'stella') ?? 'null')?.tree;
+		let tree = try_json(fetch_any(GEO_TREES + kind, 'stella') ?? 'null')?.tree;
 		if (type(tree) != 'array') {
-			warn(`meta-rules-dat: не удалось получить наборы ${kind}\n`);
+			warn(`russia-v2ray-rules-dat: не удалось получить наборы ${kind}\n`);
 			return 1;
 		}
-		res[kind] = sort(map(filter(tree, (e) => e.type == 'blob' && match(e.path, /^[a-z0-9@!_.-]+\.list$/)),
-			(e) => replace(e.path, /\.list$/, '')));
+		let re = regexp(`^${kind}-([a-z0-9@!_.-]+)\\.srs$`);
+		res[kind] = sort(map(filter(tree, (e) => e.type == 'blob' && match(e.path, re)), (e) => match(e.path, re)[1]));
 	}
 	system(`mkdir -p ${shq(RUN_DIR)}`);
-	save_file(`${RUN_DIR}/meta-index.json`, sprintf('%J', res));
-	printf('meta-rules-dat: geosite %d, geoip %d\n', length(res.geosite), length(res.geoip));
+	save_file(`${RUN_DIR}/geo-index.json`, sprintf('%J', res));
+	printf('russia-v2ray-rules-dat: geosite %d, geoip %d\n', length(res.geosite), length(res.geoip));
 	return 0;
 }
 
@@ -707,34 +750,50 @@ function queue_bound(qnum) {
 	return false;
 }
 
-function ping_chunk(nodes, results, rounds, stab) {
-	let cfg_path = `${RUN_DIR}/ping.json.cfg.json`;
-	let cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [], routing: { rules: [] } };
-
-	for (let i, n in nodes) {
-		push(cfg.inbounds, { tag: `in${i}`, listen: '127.0.0.1', port: PING_PORT + i, protocol: 'socks' });
-		push(cfg.outbounds, outbound(n, `out${i}`));
-		push(cfg.routing.rules, { inboundTag: [ `in${i}` ], outboundTag: `out${i}` });
-	}
+// Временный xray рядом с основным: свои файлы по base (первому порту), поэтому проверка узлов,
+// подбор адреса WARP и обход DPI для API WARP друг другу не мешают. Ждёт, пока откроются
+// ports: запросы раньше дали бы ложный «✕». pid — или null, если xray не принял конфиг.
+function xray_start(cfg, base, ports) {
+	let cfg_path = `${RUN_DIR}/xray.${base}.json`;
+	let pid_path = `${RUN_DIR}/xray.${base}.pid`;
+	system(`mkdir -p ${shq(RUN_DIR)}`);
 	writefile(cfg_path, sprintf('%J', cfg));
-
-	system(`xray run -c ${shq(cfg_path)} >/dev/null 2>&1 & echo $! > ${shq(RUN_DIR)}/ping.xray.pid`);
-	let pid = trim(readfile(`${RUN_DIR}/ping.xray.pid`) || '');
-	// Запросы до того, как временный xray начал слушать порты, дали бы ложный «✕».
-	let ports = [];
-	for (let i = 0; i < length(nodes); i++)
-		push(ports, PING_PORT + i);
+	system(`xray run -c ${shq(cfg_path)} >/dev/null 2>&1 & echo $! > ${shq(pid_path)}`);
+	let pid = trim(readfile(pid_path) || '');
+	unlink(pid_path);
 	let alive = () => system(`kill -0 ${pid} 2>/dev/null`) == 0;
 	wait_until(() => !alive() || listening(ports), 5000);
+	unlink(cfg_path);
+	return alive() ? pid : null;
+}
 
-	if (!alive()) {
+// Следующий запуск займёт те же порты — ждём, пока xray их освободит.
+function xray_stop(pid) {
+	system(`kill ${pid} 2>/dev/null`);
+	for (let i = 0; i < 30 && system(`kill -0 ${pid} 2>/dev/null`) == 0; i++)
+		sleep(100);
+}
+
+function ping_chunk(nodes, results, rounds, stab, base) {
+	base ??= PING_PORT;
+	let cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [], routing: { rules: [] } };
+	let ports = [];
+
+	for (let i, n in nodes) {
+		push(cfg.inbounds, { tag: `in${i}`, listen: '127.0.0.1', port: base + i, protocol: 'socks' });
+		push(cfg.outbounds, outbound(n, `out${i}`));
+		push(cfg.routing.rules, { inboundTag: [ `in${i}` ], outboundTag: `out${i}` });
+		push(ports, base + i);
+	}
+
+	let pid = xray_start(cfg, base, ports);
+	if (!pid) {
 		// xray не принял конфиг целиком — помечаем пачку, но не останавливаемся.
 		for (let n in nodes) {
 			results[n.id] = -2;
 			if (stab)
 				stab[n.id] = { ok: 0, n: rounds, ms: -1, jit: 0, at: time() };
 		}
-		unlink(cfg_path);
 		return;
 	}
 
@@ -742,22 +801,19 @@ function ping_chunk(nodes, results, rounds, stab) {
 	for (let r = 0; r < rounds; r++) {
 		let cmd = '';
 		for (let i = 0; i < length(nodes); i++) {
-			let port = PING_PORT + i;
+			let port = base + i;
 			cmd += sprintf("curl -s -o /dev/null --max-time %d -w '%%{http_code} %%{time_total}' --socks5-hostname 127.0.0.1:%d %s > %s/ping.%d 2>/dev/null & ",
 				TIMEOUT.probe, port, PING_URL, shq(RUN_DIR), port);
 		}
 		system(cmd + 'wait');
 		for (let i = 0; i < length(nodes); i++) {
-			let out = `${RUN_DIR}/ping.${PING_PORT + i}`;
+			let out = `${RUN_DIR}/ping.${base + i}`;
 			let m = match(readfile(out) || '', /^(200|204) ([0-9.]+)/);
 			push(samples[i], m ? int(+m[2] * 1000) : -1);
 			unlink(out);
 		}
 	}
-	system(`kill ${pid} 2>/dev/null`);
-	// Следующая пачка займёт те же порты — ждём, пока xray их освободит.
-	for (let i = 0; i < 30 && system(`kill -0 ${pid} 2>/dev/null`) == 0; i++)
-		sleep(100);
+	xray_stop(pid);
 
 	for (let i, n in nodes) {
 		let e = stab_entry(samples[i]);
@@ -765,7 +821,6 @@ function ping_chunk(nodes, results, rounds, stab) {
 		if (stab)
 			stab[n.id] = { ...e, at: time() };
 	}
-	unlink(cfg_path);
 }
 
 // Проверка пачками по PING_CHUNK; задержки — в $RUN_DIR/ping.json, итоги стабильности
@@ -1027,8 +1082,9 @@ function zt_nft(on) {
 	return system(`nft -f ${RUN_DIR}/ztest.nft`);
 }
 
-// Открытые цели или { error: почему nfqws не запустился }.
-function zt_run(bin, args, hosts) {
+// nfqws со стратегией на очереди проверки: трафик роутера с портов ZT_PORTS (правила zt_nft)
+// идёт через неё. { pid } или { error: почему nfqws не запустился }.
+function zt_start(bin, args) {
 	args = zapret_localize(args);
 	let missing = missing_files(args, (f) => stat(f) != null);
 	if (length(missing))
@@ -1049,10 +1105,22 @@ function zt_run(bin, args, hosts) {
 		let lines = filter(split(trim(readfile(log) || ''), '\n'), (l) => trim(l) != '');
 		return { error: length(lines) ? `nfqws: ${trim(lines[length(lines) - 1])}` : 'nfqws не запустился' };
 	}
-	let ok = zt_probe(hosts);
+	return { pid };
+}
+
+function zt_stop(pid) {
 	system(`kill ${pid} 2>/dev/null`);
 	sleep(200);
 	system(`kill -9 ${pid} 2>/dev/null`);
+}
+
+// Открытые цели или { error: почему nfqws не запустился }.
+function zt_run(bin, args, hosts) {
+	let z = zt_start(bin, args);
+	if (z.error)
+		return z;
+	let ok = zt_probe(hosts);
+	zt_stop(z.pid);
 	return ok;
 }
 
@@ -1130,11 +1198,8 @@ function cmd_zapret_test(...argv) {
 		// в основную. Меняется, только если лучшая открывает больше текущей и больше, чем
 		// без обхода. Выключенная категория — «текущей» нет; по расписанию её не включаем.
 		let yt_cur = opt('main', 'zapret_yt', '');
-		// Старое «1» — первый вариант набора, как в zapret_parts.
-		if (yt_cur == '1')
-			yt_cur = filter(zapret_catalog(), (s) => s.family == 'yv')[0]?.name || '';
 		for (let yt in [ false, true ]) {
-			let on = yt ? !(yt_cur in [ '', '0' ]) : length(cur_args) > 0;
+			let on = yt ? yt_cur != '' : length(cur_args) > 0;
 			if (scheduled && !on)
 				continue;
 			let best = null;
@@ -1522,6 +1587,38 @@ function run_locked(name, cmd, detach) {
 	return true;
 }
 
+// Новые списки и подписки (и списки, у которых сменились ссылки или наборы) скачиваются сразу, не
+// дожидаясь расписания: init вызывает это при каждом запуске и reload — после «Сохранить и
+// применить». Неудачная попытка до перезагрузки роутера не повторяется, иначе битая ссылка
+// гоняла бы reload по кругу.
+function cmd_stale() {
+	let tried_path = `${RUN_DIR}/stale.json`;
+	let tried = read_json(tried_path, {});
+	let lists = {}, subs = {};
+	uci.foreach('stella', 'list', (s) => {
+		let src = join('\n', list_sources(s));
+		if (src != '' && readfile(`${LISTS_DIR}/${s['.name']}.src`) != src && tried[s['.name']] != src)
+			lists[s['.name']] = src;
+	});
+	uci.foreach('stella', 'subscription', (s) => {
+		if (s.enabled != '0' && s.url && !stat(`${CACHE_DIR}/${s['.name']}.json`) && tried[s['.name']] != s.url)
+			subs[s['.name']] = s.url;
+	});
+	let reload = (opt('main', 'enabled', '0') == '1') ? '; /etc/init.d/stella reload' : '';
+	let started = false;
+	for (let job in [ [ 'update', subs ], [ 'lists', lists ] ])
+		if (length(job[1]) && run_locked(job[0], `/usr/bin/stella ${job[0]} ${join(' ', keys(job[1]))}${reload}`, true)) {
+			for (let id, v in job[1])
+				tried[id] = v;
+			started = true;
+		}
+	if (started) {
+		system(`mkdir -p ${shq(RUN_DIR)}`);
+		writefile(tried_path, sprintf('%J', tried));
+	}
+	return 0;
+}
+
 function newest_mtime(pattern) {
 	let t = 0;
 	for (let f in glob(pattern) || [])
@@ -1621,6 +1718,163 @@ function cmd_uplink() {
 	return 0;
 }
 
+/* ---- Cloudflare WARP ---- */
+
+// Сколько адресов WARP проверять при создании узла и с какого порта временный xray (у каждого
+// адреса во временном xray свой WireGuard — память роутера не резиновая).
+const WARP_TRY = 8;
+const WARP_PING_PORT = 21100;
+
+// В России API WARP провайдер глушит по имени сайта в TLS: TCP открывается, рукопожатие
+// виснет. Без VPN его открывает Zapret: стратегии по очереди — выбранная в Stella, затем из
+// каталога — на очереди автоподбора, пока одна не пропустит запрос (подходит почти любая).
+const WARP_API_TIME = 15;
+const WARP_ZAPRET_TRY = 12;
+const WARP_ROUTE_TEXT = { direct: 'напрямую', zapret: 'через Zapret', vpn: 'через VPN' };
+
+// Пути к API по порядку; сработавший пробуется первым и в следующем запросе.
+let warp_routes = [ 'direct', 'zapret', 'vpn' ];
+// nfqws, который открыл API: null — ещё не искали, false — не нашли.
+let warp_nfqws = null;
+
+function warp_zapret_find() {
+	let bin = opt('main', 'zapret_bin', ZAPRET_BIN);
+	// Очередь и правила — те же, что у автоподбора: вместе им нельзя.
+	if (!stat(bin) || task_busy('ztest'))
+		return false;
+	let own = filter(map(split(opt('main', 'zapret_opts', ''), /\r?\n/), (l) => trim(l)), (l) => l != '' && substr(l, 0, 1) != '#');
+	let cands = [ ...(length(own) ? [ own ] : []),
+		...map(filter(zapret_catalog(), (s) => s.family in [ 'v', 'fs', 'yv' ]), (s) => s.args) ];
+	zt_nft(true);
+	for (let args in slice(cands, 0, WARP_ZAPRET_TRY)) {
+		// Хостлисты не нужны: через очередь идёт только запрос к API.
+		let z = zt_start(bin, filter(args, (a) => !match(a, /^--(hostlist|ipset)/)));
+		if (z.error)
+			continue;
+		let code = cmd_out(`curl -s -o /dev/null --local-port ${ZT_PORTS} --connect-timeout ${ZT_CONNECT} --max-time ${ZT_MAX} -w '%{http_code}' ${shq(WARP_API + '/')} 2>/dev/null`);
+		if (match(code || '', /^[1-9]/))
+			return z.pid;
+		zt_stop(z.pid);
+	}
+	zt_nft(false);
+	return false;
+}
+
+function warp_zapret_stop() {
+	if (warp_nfqws) {
+		zt_stop(warp_nfqws);
+		zt_nft(false);
+	}
+	warp_nfqws = null;
+}
+
+// Ключи curl для пути; false — путь недоступен.
+function warp_route_args(route) {
+	if (route == 'vpn')
+		return ` --socks5-hostname ${shq(socks_proxy())}`;
+	if (route == 'zapret') {
+		warp_nfqws ??= warp_zapret_find();
+		return warp_nfqws ? ` --local-port ${ZT_PORTS}` : false;
+	}
+	return '';
+}
+
+function warp_api(method, path, token, body) {
+	let tmp = `/tmp/stella-warp.${time()}.${fetch_seq++}`;
+	writefile(tmp, sprintf('%J', body));
+	let cmd = sprintf("curl -sS --connect-timeout %d --max-time %d -X %s -H 'Content-Type: application/json' -H 'User-Agent: okhttp/3.12.1'%s --data-binary @%s",
+		TIMEOUT.connect, WARP_API_TIME, method, token ? ' -H ' + shq(`Authorization: Bearer ${token}`) : '', shq(tmp));
+	let res = null, err = null, tried = [];
+	for (let route in warp_routes) {
+		let args = warp_route_args(route);
+		if (args === false)
+			continue;
+		push(tried, WARP_ROUTE_TEXT[route]);
+		let j = try_json(cmd_out(`${cmd}${args} ${shq(WARP_API + path)} 2>/dev/null`) || 'null');
+		res = j?.result;
+		if (type(res) == 'object') {
+			warp_routes = uniq([ route, ...warp_routes ]);
+			break;
+		}
+		err = j?.errors?.[0]?.message ?? err;
+	}
+	unlink(tmp);
+	return (type(res) == 'object') ? res : { error: err || `API Cloudflare не отвечает (${join(', ', tried)})` };
+}
+
+// Новый узел WARP: ключи даёт xray, учётную запись — Cloudflare (как официальному клиенту), а
+// адрес выбирается проверкой нескольких случайных через временный xray: часть адресов WARP у
+// провайдеров закрыта. Узел — обычная отдельная ссылка wireguard:// с маской QUIC.
+function warp_create(argv) {
+	let keys = cmd_out('xray wg 2>/dev/null');
+	let priv = match(keys, /PrivateKey: *([A-Za-z0-9+\/=]+)/)?.[1];
+	let pub = match(keys, /PublicKey\)?: *([A-Za-z0-9+\/=]+)/)?.[1];
+	if (!priv || !pub) {
+		warn('xray не выдал ключи WireGuard (xray wg)\n');
+		return 1;
+	}
+
+	let reg = warp_api('POST', '/reg', null, { install_id: '', tos: iso_time(), key: pub, fcm_token: '', type: 'ios', locale: 'en_US' });
+	if (reg.error || !reg.id || !reg.token) {
+		warn(`регистрация в WARP не удалась: ${reg.error || 'нет учётной записи в ответе'}\n`);
+		return 1;
+	}
+	let acc = warp_api('PATCH', `/reg/${reg.id}`, reg.token, { warp_enabled: true });
+	let conf = acc.config, peer = acc.config?.peers?.[0], ifa = acc.config?.interface?.addresses;
+	if (acc.error || !peer?.public_key || !ifa?.v4) {
+		warn(`WARP не выдал настройки: ${acc.error || 'нет адреса в ответе'}\n`);
+		return 1;
+	}
+	warp_zapret_stop();
+	if (warp_routes[0] != 'direct')
+		printf('API Cloudflare напрямую закрыт, учётная запись создана %s\n', WARP_ROUTE_TEXT[warp_routes[0]]);
+	let raw = b64dec_loose(conf.client_id || '') || '';
+	let w = { secret_key: priv, public_key: peer.public_key, v4: ifa.v4, v6: ifa.v6,
+		reserved: (length(raw) == 3) ? [ ord(raw, 0), ord(raw, 1), ord(raw, 2) ] : null };
+
+	// Адрес из ответа (порт — из имени engage.cloudflareclient.com:2408) и случайные.
+	let host = match(peer.endpoint?.v4 || '', /^([0-9.]+)/)?.[1];
+	let port = +(match(peer.endpoint?.host || '', /:([0-9]+)$/)?.[1] || WARP_PORT);
+	let cands = slice(uniq([ ...(host ? [ `${host}:${port}` ] : []), ...random_endpoints(WARP_TRY) ]), 0, WARP_TRY);
+	let nodes = map(cands, (ep, i) => ({ ...parse(warp_link({ ...w, endpoint: ep })), id: `warp${i}` }));
+	let results = {}, stab = {};
+	system(`mkdir -p ${shq(RUN_DIR)}`);
+	ping_chunk(nodes, results, 2, stab, WARP_PING_PORT);
+	if (results[nodes[0].id] == -2) {
+		warn('xray не принял конфиг WARP\n');
+		return 1;
+	}
+	let best = best_node(nodes, stab);
+	let ep = best ? `${best.address}:${best.port}` : cands[0];
+
+	let name = join(' ', argv);
+	if (name == '') {
+		let taken = {};
+		uci.foreach('stella', 'node', (s) => { taken[s.name] = true; });
+		name = 'WARP';
+		for (let i = 2; taken[name]; i++)
+			name = `WARP ${i}`;
+	}
+	let link = warp_link({ ...w, endpoint: ep, name });
+	let sid = `node_${fnv1a(link)}`;
+	uci.load('stella');
+	uci.set('stella', sid, 'node');
+	uci.set('stella', sid, 'name', name);
+	uci.set('stella', sid, 'link', link);
+	uci.commit('stella');
+	if (best)
+		printf('Узел «%s»: адрес %s, %d мс\n', name, ep, stab[best.id].ms);
+	else
+		printf('Узел «%s» добавлен, но ни один из %d адресов WARP не ответил: похоже, WARP закрыт у провайдера\n', name, length(cands));
+	return 0;
+}
+
+function cmd_warp(...argv) {
+	let rc = warp_create(argv);
+	warp_zapret_stop();
+	return rc;
+}
+
 function cmd_parse(link) {
 	let n = parse(link);
 	print(sprintf('%.J\n', n));
@@ -1637,7 +1891,7 @@ const CMDS = {
 	fw: cmd_fw,
 	migrate: cmd_migrate,
 	lists: cmd_lists,
-	'meta-index': cmd_meta_index,
+	'geo-index': cmd_geo_index,
 	tick: cmd_tick,
 	'zapret-catalog': cmd_zapret_catalog,
 	'zapret-test': cmd_zapret_test,
@@ -1647,6 +1901,8 @@ const CMDS = {
 	updater: cmd_updater,
 	'zapret-cmd': cmd_zapret_cmd,
 	uplink: cmd_uplink,
+	warp: cmd_warp,
+	stale: cmd_stale,
 	parse: (link) => link ? cmd_parse(link) : usage()
 };
 

@@ -1,10 +1,15 @@
 'use strict';
 'require baseclass';
-'require rpc';
+'require uci';
 'require ui';
 
 // Общее для страниц Stella: стили, иконки, выпадающие списки с готовыми вариантами, время,
-// склонение, сохранение настроек.
+// склонение, настройки.
+//
+// Настройки меняются, как в формах OpenWrt: правка поля копится в uci браузера, «Сохранить» отдаёт
+// её роутеру, «Сохранить и применить» — применяет (служба перезагружается сама). Добавление,
+// удаление и «Сохранить» в окне, как у таблиц LuCI, отдаются роутеру сразу (push) и видны в
+// «Unsaved Changes».
 //
 // Иконки — свои SVG одного размера и цвета текста: символы Юникода (⏱ ⟳ ⚙) в каждом
 // шрифте рисуются по-своему, и кнопки выходили разной высоты.
@@ -21,12 +26,55 @@ const PATHS = {
 	star: '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/>'
 };
 
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
+// Значения по умолчанию и проверка настроек main.
+const IPV4_DNS = (v) => (/^([a-z+]+:\/\/)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/).test(v);
+const PORTS = (v) => v == '' || (/^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$/).test(v);
+const HOURS_OK = (v) => (/^[0-9]{1,4}$/).test(v) && +v <= 8760;
+const DAYS_OK = (v) => (/^[0-9]{1,3}$/).test(v);
+const SETTINGS = {
+	enabled: [ '0' ],
+	default_action: [ 'vpn' ],
+	dns_remote: [ 'https://1.1.1.1/dns-query', (v) => v != '', _('DNS через VPN') ],
+	dns_direct: [ 'https://77.88.8.8/dns-query', IPV4_DNS, _('DNS напрямую: нужен адрес IPv4') ],
+	dns_hijack: [ '1' ],
+	block_doh: [ '0' ],
+	log_level: [ 'warning' ],
+	select_mode: [ 'single' ],
+	sub_interval: [ '12', HOURS_OK, _('Обновление подписок') ],
+	best_from: [ '' ],
+	best_interval: [ '6', HOURS_OK, _('Подбор узла') ],
+	node_missing: [ 'stop' ],
+	backup_iface: [ '' ],
+	backup_node: [ '' ],
+	backup_vpn: [ '0' ],
+	backup_mode: [ 'single' ],
+	backup_best_from: [ '' ],
+	backup_best_interval: [ '6', HOURS_OK, _('Подбор узла резервного канала') ],
+	lists_interval: [ '24', HOURS_OK, _('Обновление списков') ],
+	upgrade_interval: [ '24', HOURS_OK, _('Автообновление') ],
+	zapret_bin: [ '' ],
+	zapret_opts: [ '' ],
+	zapret_strategy: [ '' ],
+	zapret_yt: [ '' ],
+	zapret_discord: [ '' ],
+	zapret_games: [ '' ],
+	zapret_games_fake: [ '' ],
+	zapret_discord_fake: [ '' ],
+	zapret_exclude: [ '' ],
+	zapret_test_main: [ '0', DAYS_OK, _('Автоподбор основной') ],
+	zapret_test_yt: [ '0', DAYS_OK, _('Автоподбор YouTube') ],
+	zapret_tcp_ports: [ '80,443', PORTS, _('Порты TCP') ],
+	zapret_udp_ports: [ '443', PORTS, _('Порты UDP') ]
+};
 
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 4;
+const API = 6;
+
+// Идущая отправка правок роутеру (push): пока она не закончилась, uci браузера перечитывает
+// конфиг и бывает пуст.
+let saving = Promise.resolve();
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -174,15 +222,46 @@ return baseclass.extend({
 		return E('span', {}, [ text, ' ', this.dim(note) ]);
 	},
 
-	// Сохранить настройки (rpc settings_set); ошибку — уведомлением. Промис — сохранилось ли.
+	// Настройки main с несохранёнными правками; нет значения — по умолчанию.
+	cfg() {
+		return new Proxy({}, { get: (t, k) => uci.get('stella', 'main', k) ?? (SETTINGS[k] || [])[0] });
+	},
+
+	// Изменить настройки main (до «Сохранить»). Неверное значение — уведомление, и ничего не
+	// меняется. Промис — изменилось ли.
 	saveSettings(values) {
-		return callSettingsSet(values).then((r) => {
-			if (r && r.error) {
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-				return false;
+		for (const k in values) {
+			const v = Array.isArray(values[k]) ? values[k] : String(values[k] ?? '').trim();
+			const check = (SETTINGS[k] || [])[1];
+			if (check && !Array.isArray(v) && !check(v)) {
+				ui.addNotification(null, E('p', {}, [ _('%s: некорректное значение').format(SETTINGS[k][2]) ]), 'danger');
+				return Promise.resolve(false);
 			}
-			return true;
+		}
+		for (const k in values) {
+			const v = Array.isArray(values[k]) ? values[k] : String(values[k] ?? '').trim();
+			(v === '' || (Array.isArray(v) && !v.length)) ? uci.unset('stella', 'main', k) : uci.set('stella', 'main', k, v);
+		}
+		return Promise.resolve(true);
+	},
+
+	// Отдать правки роутеру без применения — как LuCI после «Добавить», «Удалить» и «Сохранить» в
+	// окне таблицы. Отправки идут по очереди; ошибка — уведомление.
+	push() {
+		saving = saving.then(() => uci.save()).catch((e) => {
+			ui.addNotification(null, E('p', {}, [ _('Не удалось сохранить: %s').format(e.message || e) ]), 'danger');
 		});
+		return saving;
+	},
+
+	// Перед чтением uci: дождаться идущей отправки.
+	saved() {
+		return saving;
+	},
+
+	// Имя новой секции: постоянное (на нём держатся id узлов, кэш подписки, содержимое списка).
+	newId(prefix) {
+		return prefix + '_' + ('0000000' + (Math.random() * 0xffffffff >>> 0).toString(16)).slice(-8);
 	},
 
 	plural(n, one, few, many) {

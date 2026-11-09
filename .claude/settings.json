@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -o BatchMode=yes -i ~/.ssh/stella_router root@192.168.2.238 stella warp)"
+    ]
+  }
+}

@@ -3,6 +3,7 @@
 'use strict';
 
 import { SOCKS_PORT } from 'stella.store';
+import { quic_noise } from 'stella.warp';
 
 const NET_NAMES = {
 	raw: 'raw', xhttp: 'xhttp', ws: 'websocket', httpupgrade: 'httpupgrade',
@@ -144,11 +145,37 @@ export function outbound(n, tag) {
 		ob.settings = { version: 2, address: n.address, port: n.port };
 		break;
 
+	case 'wireguard':
+		ob.settings = compact({
+			secretKey: n.secret_key,
+			address: n.ifaddr,
+			peers: [ compact({
+				publicKey: n.public_key,
+				preSharedKey: n.psk,
+				endpoint: (index(n.address, ':') >= 0) ? `[${n.address}]:${n.port}` : `${n.address}:${n.port}`,
+				keepAlive: n.keepalive,
+				allowedIPs: [ '0.0.0.0/0', '::/0' ]
+			}) ],
+			mtu: n.mtu || 1280,
+			reserved: n.reserved,
+			// Иначе xray от root поднимет в системе свой интерфейс с маршрутами и правилами.
+			noKernelTun: true
+		});
+		break;
+
 	default:
 		die(`unsupported protocol ${n.protocol}`);
 	}
 
-	if (n.protocol != 'shadowsocks')
+	// У WireGuard транспорта нет — только маски пакетов (finalmask), маска QUIC — первой.
+	if (n.protocol == 'wireguard') {
+		let fm = n.fm ? { ...n.fm } : {};
+		if (n.noise == 'quic')
+			fm.udp = [ quic_noise(n), ...(fm.udp || []) ];
+		if (length(fm))
+			ob.streamSettings = { finalmask: fm };
+	}
+	else if (n.protocol != 'shadowsocks')
 		ob.streamSettings = stream_settings(n);
 
 	return ob;

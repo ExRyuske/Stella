@@ -26,8 +26,13 @@ wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
 ## Что умеет
 
 - **Серверы** — подписки и отдельные ссылки: VLESS (REALITY, XHTTP, Vision, gRPC, WS),
-  VMess, Trojan, Shadowsocks 2022, Hysteria2. Проверка задержки, автовыбор самого
+  VMess, Trojan, Shadowsocks 2022, Hysteria2, WireGuard. Проверка задержки, автовыбор самого
   быстрого из отмеченных узлов, обновление подписок по расписанию.
+- **WARP** — бесплатный узел Cloudflare WARP одной кнопкой: роутер сам регистрируется,
+  проверяет несколько адресов WARP и берёт лучший. API Cloudflare в России закрыт — без VPN
+  регистрация идёт через Zapret (стратегии по очереди, пока одна не пропустит запрос). Перед рукопожатием WireGuard xray шлёт
+  пакет QUIC, чтобы DPI не узнал WireGuard (идея и маски — из
+  [warp-config-generator-vercel](https://github.com/nellimonix/warp-config-generator-vercel)).
 - **Резервный канал (mwan3)** — когда основной провайдер падает и mwan3 пускает трафик через
   резервный канал (например, мобильного оператора с белыми списками), xray работает через узел,
   выбранный для этого канала; вернулся основной — через прежний. Пока работает резервный канал,
@@ -36,7 +41,7 @@ wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
   ([mwan3-nft](https://openwrt.org/docs/guide-user/network/wan/multiwan/mwan3-nft)) — Stella
   ставит её в «Обновлениях».
 - **Списки** — готовые списки [itdoginfo/allow-domains](https://github.com/itdoginfo/allow-domains),
-  поиск по наборам geosite и geoip из [meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat),
+  поиск по наборам geosite и geoip из [russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat),
   ссылки на любые списки и свои сайты. Для каждого списка — действие: VPN, Zapret, напрямую
   или блок, и для каких устройств он действует.
 - **Устройства** — «по спискам», «всё через VPN» или «всё напрямую».
@@ -50,13 +55,16 @@ wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
 
 Трафик устройств LAN перехватывается в своей таблице nftables (`inet stella`): dnsmasq
 кладёт IP доменов из списков в сеты, по ним пакет уходит в TPROXY → xray, в очередь nfqws,
-напрямую или в блок. Всё, что делает интерфейс, идёт через плагин rpcd на ucode.
+напрямую или в блок. Настройки на страницах LuCI меняются, как везде в OpenWrt: правки полей копятся
+до «Сохранить», добавление, удаление и «Сохранить» в окне сразу видны в «Unsaved Changes»,
+а применяются кнопкой «Сохранить и применить» (служба перезагружается сама); состояние и действия
+(проверки, обновления, WARP) — через плагин rpcd на ucode.
 
 | Путь | Что там |
 |---|---|
 | `root/usr/share/ucode/stella/` | разбор ссылок, подписок и списков, генерация конфигов xray, nftables и dnsmasq, каталог Zapret |
 | `root/usr/bin/stella` | CLI: обновления, проверка задержки, правила, автоподбор Zapret |
-| `root/usr/share/rpcd/ucode/stella.uc` | объект ubus `stella` для интерфейса |
+| `root/usr/share/rpcd/ucode/stella.uc` | объект ubus `stella`: состояние и действия для страниц |
 | `htdocs/luci-static/resources/view/stella/` | страницы LuCI |
 | `tests/` | тесты на ucode той же ревизии, что в OpenWrt 25.12 |
 
@@ -68,4 +76,4 @@ UCODE=/путь/к/ucode tests/cli.sh    # сквозной сценарий CLI
 scripts/check_web.sh                # синтаксис страниц LuCI
 ```
 
-Нужны ucode ревизии `85922056` и xray `26.3.27` — как в CI.
+Нужны ucode ревизии `85922056` с модулем zlib и xray из пакета `xray-core` OpenWrt 25.12 — как в CI.

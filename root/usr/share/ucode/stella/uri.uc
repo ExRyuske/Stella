@@ -7,6 +7,8 @@
 //     network, security, sni, fp, alpn, pbk, sid, spx, pqv,
 //     ech, pcs, vcn, path, host, mode, extra, service_name,
 //     authority, header_type, ports, obfs, obfs_password,  — транспорт
+//     secret_key, public_key, psk, ifaddr, reserved, mtu,
+//     keepalive, noise,                                    — WireGuard
 //     fm, warnings }
 // При ошибке parse() возвращает { error: '...' }.
 
@@ -312,6 +314,66 @@ function parse_hysteria2(u) {
 	return node;
 }
 
+// Ключ WireGuard — base64 от 32 байт. «+» в query мог стать пробелом (и в конце ключа тоже —
+// поэтому без trim).
+function wg_key(v) {
+	v = replace(v || '', / /g, '+');
+	return (length(b64dec_loose(v) || '') == 32) ? v : null;
+}
+
+// wireguard://секретный_ключ@адрес:порт?publickey=&address=&reserved=&mtu=&keepalive=
+//   &presharedkey=&noise=quic#имя  (как у v2rayN; noise=quic — маска QUIC, см. stella.warp)
+function parse_wireguard(u) {
+	let q = u.query;
+	let node = new_node('wireguard', u);
+	node.secret_key = wg_key(pctdecode(u.userinfo || '') || q.privatekey || q.secretkey);
+	if (!node.secret_key)
+		return { error: 'нет секретного ключа WireGuard' };
+	node.public_key = wg_key(q.publickey || q.peerpublickey || q.pbk);
+	if (!node.public_key)
+		return { error: 'нет publickey' };
+	if (q.presharedkey || q.psk) {
+		node.psk = wg_key(q.presharedkey || q.psk);
+		if (!node.psk)
+			return { error: 'некорректный presharedkey' };
+	}
+
+	let err = check_endpoint(node);
+	if (err)
+		return { error: err };
+
+	node.ifaddr = split_list(q.address || q.ip);
+	if (!node.ifaddr)
+		return { error: 'не указан address' };
+	for (let a in node.ifaddr)
+		if (!match(a, /^[0-9a-fA-F.:]+(\/[0-9]+)?$/))
+			return { error: `некорректный адрес ${a}` };
+
+	// reserved — три байта: «1,2,3» или base64 (client_id WARP).
+	if (q.reserved) {
+		let r = split_list(q.reserved);
+		if (length(r) == 1) {
+			let raw = b64dec_loose(r[0]);
+			r = (raw && length(raw) == 3) ? [ ord(raw, 0), ord(raw, 1), ord(raw, 2) ] : null;
+		}
+		else
+			r = map(r, (x) => match(x, /^[0-9]+$/) && +x < 256 ? +x : null);
+		if (length(r) != 3 || null in r)
+			return { error: 'reserved — три байта' };
+		node.reserved = r;
+	}
+
+	node.mtu = +q.mtu || null;
+	if (node.mtu != null && (node.mtu < 576 || node.mtu > 9000))
+		return { error: 'некорректный mtu' };
+	node.keepalive = +q.keepalive || null;
+	node.noise = (q.noise == 'quic') ? 'quic' : null;
+	if (q.noise && !node.noise)
+		push(node.warnings, `маска «${q.noise}» неизвестна, пропущена`);
+	node.fm = json_param(node, q, 'fm');
+	return node;
+}
+
 export function parse(s) {
 	s = trim(s || '');
 	let sm = match(s, /^([a-zA-Z0-9]+):\/\//);
@@ -338,6 +400,10 @@ export function parse(s) {
 	case 'hysteria2':
 	case 'hy2':
 		node = u ? parse_hysteria2(u) : { error: 'некорректная ссылка' };
+		break;
+	case 'wireguard':
+	case 'wg':
+		node = u ? parse_wireguard(u) : { error: 'некорректная ссылка' };
 		break;
 	default:
 		node = { error: `протокол ${scheme} не поддерживается` };

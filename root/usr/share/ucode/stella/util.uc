@@ -39,6 +39,11 @@ export function pctdecode(s) {
 	return replace(s, /%([0-9A-Fa-f]{2})/g, (m, h) => chr(hex(h)));
 };
 
+// Кодирование для ссылок: всё, кроме букв, цифр и «-._~».
+export function pctenc(s) {
+	return replace(`${s ?? ''}`, /[^A-Za-z0-9._~-]/g, (c) => sprintf('%%%02X', ord(c)));
+};
+
 export function parse_query(q) {
 	let res = {};
 	if (!q)

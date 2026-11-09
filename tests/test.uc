@@ -9,12 +9,17 @@ import { decode } from 'stella.subscription';
 import { build_config } from 'stella.xray';
 import { stab_entry, stab_better, best_node, read_json } from 'stella.store';
 import { parse_list } from 'stella.lists';
+import { parse_srs } from 'stella.srs';
+import { warp_link, random_endpoints, iso_time } from 'stella.warp';
 import { nft_script, dnsmasq_conf, restore_script } from 'stella.firewall';
 import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
 const PCS = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+// Ключи WireGuard: секретный — от `xray wg`, публичный — сервера WARP.
+const WGK = 'iAUkyvpedMvtQtwPEbJGkWIwC2eVUKlCHiLB/z2S+2I=';
+const WARP_PK = 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
 const TMP = getenv('TMPDIR') || '/tmp';
 const XRAY = getenv('XRAY') || 'xray';
 
@@ -94,6 +99,20 @@ const CASES = [
 	},
 	{ link: `vmess://${b64enc('not json')}`, error: true },
 	{ link: `hysteria2://pw@hy.example.com:-1#bad port`, error: true },
+	// WARP, как его создаёт Stella: ключи и адреса закодированы, маска QUIC.
+	{
+		link: warp_link({ secret_key: WGK, v4: '172.16.0.2', v6: '2606:4700:110:8a36::1', reserved: [ 1, 2, 3 ], endpoint: '162.159.192.1:2408', name: 'Мой WARP' }),
+		expect: { name: 'Мой WARP', protocol: 'wireguard', address: '162.159.192.1', port: 2408, secret_key: WGK, public_key: WARP_PK,
+			ifaddr: [ '172.16.0.2/32', '2606:4700:110:8a36::1/128' ], reserved: [ 1, 2, 3 ], mtu: 1280, noise: 'quic' }
+	},
+	// Ссылка другого клиента: ключи не закодированы («+» в query стал пробелом), reserved в base64.
+	{
+		link: `wireguard://${WGK}@engage.cloudflareclient.com:2408/?publickey=${WARP_PK}&address=172.16.0.2/32&reserved=AQID&keepalive=25#wg`,
+		expect: { public_key: WARP_PK, reserved: [ 1, 2, 3 ], keepalive: 25, noise: null, ifaddr: [ '172.16.0.2/32' ], mtu: null }
+	},
+	{ link: `wireguard://${WGK}@1.1.1.1:51820?address=10.0.0.2/32`, error: true },
+	{ link: `wireguard://${WGK}@1.1.1.1:51820?publickey=${WARP_PK}&address=10.0.0.2/32&reserved=1,2`, error: true },
+	{ link: `wg://${WGK}@1.1.1.1:51820?publickey=${WARP_PK}`, error: true },
 ];
 
 let failed = 0, passed = 0;
@@ -192,6 +211,29 @@ else
 	fail('read_json: битый файл');
 unlink(`${TMP}/stella-bad.json`);
 
+// WireGuard в конфиге xray: без системного интерфейса, маска QUIC первой и одна и та же при
+// каждой сборке (иначе xray перезапускался бы на каждый reload), с перехватом — и UseIPv4.
+let wn = parse(CASES[length(CASES) - 5].link);
+let wc = build_config({ node: wn, ...INTERCEPT });
+let wo = wc.outbounds[0];
+let wfm = wo.streamSettings?.finalmask?.udp?.[0];
+if (wo.protocol == 'wireguard' && wo.settings.noKernelTun === true && wo.settings.peers[0].endpoint == '162.159.192.1:2408' &&
+    sprintf('%J', wo.settings.reserved) == '[ 1, 2, 3 ]' && wfm?.type == 'noise' && length(wfm.settings.noise) == 9 &&
+    match(wfm.settings.noise[0].packet, /^c[0-9a-f]+$/) && wo.streamSettings.sockopt?.domainStrategy == 'UseIPv4' &&
+    sprintf('%J', build_config({ node: wn, ...INTERCEPT })) == sprintf('%J', wc) &&
+    !build_config({ node: parse(CASES[length(CASES) - 4].link) }).outbounds[0].streamSettings)
+	passed++;
+else
+	fail(`wireguard: ${sprintf('%J', wo)}`);
+
+// Случайные адреса WARP — без повторов и из своих подсетей; время регистрации — ISO 8601.
+let eps = random_endpoints(8);
+if (length(eps) == 8 && length(uniq(eps)) == 8 && length(filter(eps, (e) => match(e, /^(162\.159|188\.114|8\.[0-9]+)\.[0-9]+\.[0-9]+:[0-9]+$/))) == 8 &&
+    iso_time(0) == '1970-01-01T00:00:00.000Z')
+	passed++;
+else
+	fail(`warp: ${sprintf('%J', eps)} ${iso_time(0)}`);
+
 // Конфиг без узла — всё напрямую, должен быть валиден.
 if (xray_test(null, 'без узла'))
 	passed++;
@@ -263,7 +305,7 @@ if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_rem
 else
 	fail(`один DNS в обоих полях: ${sprintf('%J', c.dns.servers)}`);
 
-// Разбор списков: форматы itdoginfo, meta-rules-dat, clash, dnsmasq, yaml.
+// Разбор списков: форматы itdoginfo, v2ray, clash, dnsmasq, yaml.
 let pl = parse_list(join('\n', [
 	'# комментарий', 'youtube.com', '.ua', '+.googlevideo.com', 'full:www.example.org',
 	'DOMAIN-SUFFIX,Twitter.com', 'DOMAIN-KEYWORD,ads', 'keyword:tracker', 'regexp:^a.*$',
@@ -278,6 +320,20 @@ if (sprintf('%J', pl.domains) == sprintf('%J', want_d) && sprintf('%J', pl.cidrs
 	passed++;
 else
 	fail(`parse_list: ${sprintf('%J', pl)}`);
+
+// Наборы sing-box из russia-v2ray-rules-dat (фикстуры — telegram): домены из дерева, подсети
+// IPv4 из диапазонов (IPv6 пропускается); не набор — null, битый — ошибка.
+const FIX = replace(sourcepath(), /[^\/]+$/, '') + 'fixtures/';
+let gs = parse_srs(readfile(FIX + 'geosite-telegram.srs'));
+let gi = parse_srs(readfile(FIX + 'geoip-telegram.srs'));
+let gbad = parse_srs(substr(readfile(FIX + 'geosite-telegram.srs'), 0, 100));
+if (length(gs?.domains) == 21 && 't.me' in gs.domains && 'telegram.org' in gs.domains && !length(gs.cidrs) &&
+    sprintf('%J', gi?.cidrs) == sprintf('%J', [ '149.154.160.0/20', '185.76.151.0/24', '91.105.192.0/23', '91.108.16.0/21',
+	'91.108.4.0/22', '91.108.56.0/22', '91.108.8.0/21', '95.161.64.0/20' ]) && !length(gi.domains) &&
+    parse_srs('youtube.com\n') == null && gbad?.error)
+	passed++;
+else
+	fail(`parse_srs: ${sprintf('%J', [ gs, gi, gbad ])}`);
 
 // nft: порядок списков, списки для части устройств, устройства в обход списков, DoH.
 let nft = nft_script({

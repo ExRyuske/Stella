@@ -7,7 +7,7 @@ XRAY="${XRAY:-xray}"
 UCODE_LIB="${UCODE_LIB:-$(dirname "$(command -v "$UCODE")")}"
 T="$(mktemp -d)"
 # Код остановленного сервера (143) не должен стать кодом всего скрипта.
-trap 'rc=$?; kill $HTTP_PID 2>/dev/null; wait $HTTP_PID 2>/dev/null || true; rm -rf "$T"; exit $rc' EXIT
+trap 'rc=$?; kill $HTTP_PID $WARP_PID 2>/dev/null; wait $HTTP_PID 2>/dev/null || true; rm -rf "$T"; exit $rc' EXIT
 
 UUID=48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d
 PBK=VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY
@@ -205,18 +205,18 @@ DNSMASQ="$T/dnsmasq-plain"; OUT=$(run fw show 2>/dev/null); DNSMASQ="$T/dnsmasq-
 if echo "$OUT" | grep -q '^nftset='; then echo "FAIL: nftset= для dnsmasq без nftset"; exit 1; fi
 echo "$OUT" | grep -qF 'server=127.0.0.1#10853' || { echo "FAIL: без nftset пропал DNS через xray"; exit 1; }
 
-# Имена наборов meta-rules-dat: только файлы .list, без подкаталогов и других форматов;
+# Имена наборов russia-v2ray-rules-dat: только файлы .srs своего вида, без подкаталогов;
 # не скачалось — прежние имена остаются.
 mkdir -p "$T/trees"
-echo '{"tree":[{"path":"youtube.list","type":"blob"},{"path":"youtube.mrs","type":"blob"},{"path":"geolocation-!cn.list","type":"blob"},{"path":"classical","type":"tree"}]}' > "$T/trees/geosite"
-echo '{"tree":[{"path":"ru.list","type":"blob"}]}' > "$T/trees/geoip"
-STELLA_META_TREES=http://127.0.0.1:18765/trees/ run meta-index >/dev/null
-if STELLA_META_TREES=http://127.0.0.1:18765/missing/ run meta-index 2>/dev/null; then echo "FAIL: meta-index без ответа сервера"; exit 1; fi
-python3 - "$T/run/meta-index.json" <<'PY' || exit 1
+echo '{"tree":[{"path":"geosite-youtube.srs","type":"blob"},{"path":"geosite-ru-blocked.srs","type":"blob"},{"path":"geosite-geolocation-!cn.srs","type":"blob"},{"path":"geoip-ru.srs","type":"blob"},{"path":"youtube.json","type":"blob"},{"path":"geosite-x","type":"tree"}]}' > "$T/trees/rule-set-geosite"
+echo '{"tree":[{"path":"geoip-ru.srs","type":"blob"}]}' > "$T/trees/rule-set-geoip"
+STELLA_GEO_TREES=http://127.0.0.1:18765/trees/rule-set- run geo-index >/dev/null
+if STELLA_GEO_TREES=http://127.0.0.1:18765/missing/ run geo-index 2>/dev/null; then echo "FAIL: geo-index без ответа сервера"; exit 1; fi
+python3 - "$T/run/geo-index.json" <<'PY' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
-if d['geosite'] != ['geolocation-!cn', 'youtube'] or d['geoip'] != ['ru']:
-    print('FAIL: meta-index', d); sys.exit(1)
+if d['geosite'] != ['geolocation-!cn', 'ru-blocked', 'youtube'] or d['geoip'] != ['ru']:
+    print('FAIL: geo-index', d); sys.exit(1)
 PY
 
 # У стратегии Flowseal — свои исключения.
@@ -274,5 +274,118 @@ grep -q "\"${NEW}_deadbeef\"" "$T/cache/$NEW.json" || { echo "FAIL: migrate не
 [ ! -e "$T/cache/cfg0112ab.json" ] || { echo "FAIL: старый кэш остался"; exit 1; }
 AUTO=$(python3 -c "import json; print(' '.join(json.load(open('$T/uci.json'))['main']['auto_node']))")
 [ "$AUTO" = "${NEW}_deadbeef node_keep" ] || { echo "FAIL: migrate не обновил отметки автовыбора ($AUTO)"; exit 1; }
+
+# Наборы geosite и geoip (опция geo) в списке — вместе с обычным текстом по ссылке; не
+# скачавшийся список не мешает остальным. Откуда скачано — в .src рядом.
+mkdir -p "$T/geo/rule-set-geosite" "$T/geo/rule-set-geoip"
+cp tests/fixtures/geosite-telegram.srs "$T/geo/rule-set-geosite/"
+cp tests/fixtures/geoip-telegram.srs "$T/geo/rule-set-geoip/"
+cat > "$T/uci.json" <<EOF
+{
+	"main": { ".type": "stella", "default_action": "direct", "enabled": "1" },
+	"list_tg": { ".type": "list", "name": "tg", "action": "vpn", "geo": [ "geosite:telegram", "geoip:telegram", "bad" ], "url": "http://127.0.0.1:18765/list.txt" },
+	"list_gone": { ".type": "list", "name": "gone", "action": "vpn", "geo": "geosite:missing" }
+}
+EOF
+export STELLA_GEO_BASE=http://127.0.0.1:18765/geo/
+if run lists >"$T/lists.out" 2>&1; then echo "FAIL: список с несуществующим набором обновился"; exit 1; fi
+python3 - "$T" <<'PY' || exit 1
+import json, sys
+t = sys.argv[1]
+d = json.load(open(t + '/lists/list_tg.json'))
+if len(d['domains']) != 23 or 't.me' not in d['domains'] or 'youtube.com' not in d['domains'] or \
+   d['cidrs'][:2] != ['149.154.160.0/20', '185.76.151.0/24'] or len(d['cidrs']) != 8:
+    print('FAIL: список из наборов', d, open(t + '/lists.out').read()); sys.exit(1)
+if open(t + '/lists/list_tg.src').read().split('\n')[1:] != ['http://127.0.0.1:18765/geo/rule-set-geosite/geosite-telegram.srs', 'http://127.0.0.1:18765/geo/rule-set-geoip/geoip-telegram.srs']:
+    print('FAIL: .src', open(t + '/lists/list_tg.src').read()); sys.exit(1)
+PY
+
+# stale: скачивается то, что добавили или поменяли (у list_gone .src нет, list_new новый), и по
+# одному разу — неудачная попытка не повторяется до перезагрузки.
+python3 - "$T/uci.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d['list_new'] = { '.type': 'list', 'name': 'new', 'entry': 'x.com', 'url': 'http://127.0.0.1:18765/list.txt' }
+d['list_entries'] = { '.type': 'list', 'name': 'only entries', 'entry': 'y.com' }
+d['sub_new'] = { '.type': 'subscription', 'name': 's', 'url': 'http://127.0.0.1:18765/sub.txt' }
+json.dump(d, open(sys.argv[1], 'w'))
+PY
+rm -f "$T/reload.log"
+PATH="$T/bin:$PATH" run stale
+grep -qx 'sh .*/lists.sh' "$T/reload.log" && grep -qx 'sh .*/update.sh' "$T/reload.log" || { echo "FAIL: stale не запустил задачи: $(cat "$T/reload.log")"; exit 1; }
+grep -q '/usr/bin/stella lists list_gone list_new; /etc/init.d/stella reload' "$T/run/lists.sh" ||
+	{ echo "FAIL: stale: $(cat "$T/run/lists.sh")"; exit 1; }
+grep -q '/usr/bin/stella update sub_new; /etc/init.d/stella reload' "$T/run/update.sh" || { echo "FAIL: stale: $(cat "$T/run/update.sh")"; exit 1; }
+rm -f "$T/reload.log" "$T/run/lists.running" "$T/run/update.running"
+PATH="$T/bin:$PATH" run stale
+[ ! -s "$T/reload.log" ] || { echo "FAIL: stale повторил попытку: $(cat "$T/reload.log")"; exit 1; }
+unset STELLA_GEO_BASE
+
+# WARP: ключи от xray, регистрация в API (здесь — поддельном), узел — отдельная ссылка; занятое
+# название получает номер. Адреса фиктивные — никто не отвечает, остаётся адрес из ответа API.
+cat > "$T/warp_api.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+log = open(sys.argv[2], 'a')
+class H(BaseHTTPRequestHandler):
+    def reply(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def body(self):
+        return json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+    def do_POST(self):
+        b = self.body()
+        log.write('POST %s %s %s %s\n' % (self.path, b.get('key'), b.get('tos', '')[:4], self.headers.get('User-Agent')))
+        log.flush()
+        self.reply({'result': {'id': 'abc', 'token': 'tok'}})
+    def do_PATCH(self):
+        b = self.body()
+        log.write('PATCH %s %s %s\n' % (self.path, b.get('warp_enabled'), self.headers.get('Authorization')))
+        log.flush()
+        self.reply({'result': {'config': {'client_id': 'AQID',
+            'peers': [{'public_key': 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'endpoint': {'v4': '162.159.192.1:0', 'host': 'engage.cloudflareclient.com:2408'}}],
+            'interface': {'addresses': {'v4': '172.16.0.2', 'v6': '2606:4700:110:8a36::1'}}}}})
+    def log_message(self, *a):
+        pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+python3 "$T/warp_api.py" 18766 "$T/warp_api.log" &
+WARP_PID=$!
+sleep 1
+cat > "$T/uci.json" <<EOF
+{
+	"main": { ".type": "stella", "node": "" },
+	"node_a": { ".type": "node", "name": "WARP", "link": "trojan://pw@tr.example.com:443#t" }
+}
+EOF
+STELLA_WARP_API=http://127.0.0.1:18766/v0 PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run warp >"$T/warp.out" 2>&1 || { echo "FAIL: warp: $(cat "$T/warp.out")"; exit 1; }
+grep -Eqx 'POST /v0/reg [A-Za-z0-9+/]{43}= 20[0-9]{2} okhttp/3.12.1' "$T/warp_api.log" && grep -qxF 'PATCH /v0/reg/abc True Bearer tok' "$T/warp_api.log" ||
+	{ echo "FAIL: запросы к API WARP: $(cat "$T/warp_api.log")"; exit 1; }
+WID=$(python3 - "$T" <<'PY'
+import json, sys
+t = sys.argv[1]
+d = json.load(open(t + '/uci.json'))
+w = [k for k, v in d.items() if v.get('name') == 'WARP 2']
+link = d[w[0]]['link'] if w else ''
+if not link.startswith('wireguard://') or '@162.159.192.1:2408?' not in link or 'reserved=1,2,3' not in link or 'noise=quic' not in link:
+    print('FAIL: узел WARP', d, open(t + '/warp.out').read(), file=sys.stderr); sys.exit(1)
+print(w[0])
+PY
+) || exit 1
+uci_main node="\"$WID\""
+run gen "$T/config.json"
+grep -q '"protocol": "wireguard"' "$T/config.json" || { echo "FAIL: узел WARP не попал в конфиг"; exit 1; }
+"$XRAY" run -test -c "$T/config.json" >/dev/null || { echo "FAIL: xray отклонил конфиг WARP"; exit 1; }
+kill $WARP_PID 2>/dev/null; WARP_PID=
+
+# API недоступен: Zapret не установлен — путь пропускается, в ошибке — испробованные пути.
+if STELLA_WARP_API=http://127.0.0.1:18766/v0 PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run warp >"$T/warp.out" 2>&1; then
+	echo "FAIL: warp без API завершился успешно"; exit 1
+fi
+grep -qF 'API Cloudflare не отвечает (напрямую, через VPN)' "$T/warp.out" || { echo "FAIL: warp без API: $(cat "$T/warp.out")"; exit 1; }
 
 echo "cli: OK"

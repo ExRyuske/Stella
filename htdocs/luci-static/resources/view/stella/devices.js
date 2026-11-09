@@ -1,153 +1,67 @@
 'use strict';
 'require view';
-'require rpc';
-'require ui';
-'require dom';
-'require stella.common as sui';
+'require form';
+'require uci';
+'require network';
+'require tools.widgets as widgets';
 
-const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
-const callLists = rpc.declare({ object: 'stella', method: 'lists' });
-const callSet = rpc.declare({ object: 'stella', method: 'device_set', params: [ 'mac', 'name', 'policy' ] });
-const callRemove = rpc.declare({ object: 'stella', method: 'device_remove', params: [ 'id' ] });
-const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
-
-const POLICIES = [
-	[ 'global', _('По спискам') ],
-	[ 'vpn', _('Всё через VPN') ],
-	[ 'direct', _('Всё напрямую') ]
-];
-
-const CSS = `
-.st-table .cbi-dropdown { min-width:10em }
-`;
-
+// Устройства с особым режимом и интерфейсы LAN. Таблица без своего заголовка — как в
+// «Система → LED»: заголовок страницы и есть её название.
 return view.extend({
 	load() {
-		return sui.need(4).then(() => Promise.all([ callDevices(), callLists(), callSettings() ]));
+		return network.getHostHints();
 	},
 
-	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).
-	renderLan() {
-		const ifs = [].concat(this.cfg.lan_ifname || [ 'br-lan' ]);
-		const input = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': ifs.join(' '), 'style': 'width:14em' });
-		const save = E('button', { 'class': 'btn cbi-button', 'style': 'display:none',
-			'click': ui.createHandlerFn(this, () => {
-				const list = input.value.split(/[\s,]+/).filter((x) => x);
-				return sui.saveSettings({ lan_ifname: list }).then((ok) => {
-					if (!ok)
-						return;
-					this.cfg.lan_ifname = list;
-					save.style.display = 'none';
-					ui.addTimeLimitedNotification(null, E('p', {}, _('Применено.')), 3000, 'info');
-				});
-			}) }, _('Сохранить'));
-		input.addEventListener('input', () => save.style.display = '');
-		return E('div', { 'class': 'st-card' }, sui.kv(_('Интерфейсы LAN'), [ input, save,
-			sui.hint(_('Трафик перехватывается только с этих интерфейсов, несколько указываются через пробел')) ]));
-	},
+	render(hosts) {
+		const m = new form.Map('stella', _('Устройства'));
 
-	refresh() {
-		return Promise.all([ callDevices(), callLists() ]).then((r) => {
-			this.devices = r[0].devices;
-			this.lists = r[1].lists;
-			this.renderTable();
-		});
-	},
+		let s = m.section(form.GridSection, 'device', '');
+		s.addremove = true;
+		s.anonymous = true;
+		s.nodescriptions = true;
 
-	save(dev, name, policy) {
-		return callSet(dev.mac, name, policy).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-			return this.refresh();
-		});
-	},
+		let o = s.option(form.Value, 'mac', 'MAC');
+		o.datatype = 'macaddr';
+		o.rmempty = false;
+		for (const [ mac, hint ] of hosts.getMACHints())
+			o.value(mac, hint ? '%s (%s)'.format(mac, hint) : mac);
+		o.textvalue = function(sid) {
+			const mac = this.cfgvalue(sid) || '';
+			const hint = hosts.getHostnameByMACAddr(mac) || hosts.getIPAddrByMACAddr(mac);
+			return '%h'.format(hint ? '%s (%s)'.format(mac, hint) : mac);
+		};
 
-	showEdit(dev) {
-		const mac = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': dev ? dev.mac : '', 'placeholder': 'AA:BB:CC:DD:EE:FF', 'disabled': dev ? '' : null });
-		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': dev ? (dev.name || '') : '', 'placeholder': dev ? (dev.hostname || '') : '' });
-		ui.showModal(dev ? _('Устройство') : _('Добавить устройство'), [
-			E('p', {}, [ E('b', {}, 'MAC'), mac ]),
-			E('p', {}, [ E('b', {}, _('Название')), name ]),
-			E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')), ' ',
-				E('button', {
-					'class': 'btn cbi-button-positive',
-					'click': ui.createHandlerFn(this, () => {
-						ui.hideModal();
-						return this.save({ mac: mac.value.trim() }, name.value.trim(), dev ? undefined : 'global');
-					})
-				}, _('Сохранить'))
-			])
-		]);
-	},
+		o = s.option(form.Value, 'name', _('Название'));
+		o.placeholder = _('необязательно');
 
-	// Списки, которые действуют на устройство особо: «только для него» или «кроме него».
-	special(dev) {
-		const res = [];
-		for (const l of this.lists) {
-			if (!l.enabled || l.devices_mode == 'all' || l.macs.indexOf(dev.mac) < 0)
-				continue;
-			res.push((l.devices_mode == 'only' ? '+ ' : '− ') + l.name);
-		}
-		return res.join(', ');
-	},
+		o = s.option(form.ListValue, 'policy', _('Режим'));
+		o.value('global', _('по спискам'));
+		o.value('vpn', _('всё через VPN'));
+		o.value('direct', _('всё напрямую'));
+		o.default = 'global';
+		o.editable = true;
 
-	renderTable() {
-		const label = (d) => d.name || d.hostname || '';
-		const q = (this.filter || '').toLowerCase();
-		const devs = this.devices.filter((d) => !q ||
-			[ label(d), d.ip || '', d.mac ].some((v) => v.toLowerCase().indexOf(q) >= 0)
-		).sort((a, b) =>
-			(b.configured - a.configured) || (!label(a) - !label(b)) ||
-			label(a).localeCompare(label(b)) || String(a.ip).localeCompare(String(b.ip), undefined, { numeric: true }));
+		// Списки, которые действуют на устройство особо: «только для него» или «кроме него».
+		o = s.option(form.DummyValue, '_lists', _('Особые списки'));
+		o.modalonly = false;
+		o.cfgvalue = function(sid) {
+			const mac = String(uci.get('stella', sid, 'mac') || '').toLowerCase();
+			const res = [];
+			for (const l of uci.sections('stella', 'list')) {
+				const macs = L.toArray(l.mac).map((x) => String(x).toLowerCase());
+				if (mac && l.enabled != '0' && (l.devices_mode == 'only' || l.devices_mode == 'except') && macs.indexOf(mac) >= 0)
+					res.push((l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(l.name || l['.name']));
+			}
+			return res.join(', ') || '—';
+		};
 
-		if (!devs.length) {
-			dom.content(this.tableBox, E('p', {}, _('Устройства не найдены.')));
-			return;
-		}
+		s = m.section(form.NamedSection, 'main', 'stella');
+		o = s.option(widgets.DeviceSelect, 'lan_ifname', _('Интерфейсы LAN'), _('Трафик перехватывается только с этих интерфейсов.'));
+		o.multiple = true;
+		o.noaliases = true;
+		o.default = 'br-lan';
+		o.rmempty = false;
 
-		dom.content(this.tableBox, E('table', { 'class': 'st-table' }, [
-			E('tr', {}, [ E('th', {}, _('Устройство')), E('th', {}, _('Адрес')), E('th', {}, _('Режим')), E('th', {}, '') ]),
-			...devs.map((dev) => {
-				const sp = (dev.policy == 'global') ? this.special(dev) : '';
-				return E('tr', {}, [
-					E('td', {}, [
-						E('div', {}, [ label(dev) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
-						sp ? E('div', { 'class': 'st-dim', 'title': _('+ только для этого устройства, − не действует на него') }, [ sp ]) : ''
-					]),
-					E('td', { 'class': 'st-dim' }, [ E('div', {}, dev.ip || ''), E('div', {}, dev.mac) ]),
-					E('td', {}, sui.select(dev.policy, POLICIES, (v) => this.save(dev, undefined, v))),
-					E('td', { 'class': 'st-act' }, [
-						sui.iconButton('edit', _('Название'), () => this.showEdit(dev)),
-						' ',
-						dev.configured ? sui.iconButton('close', _('Забыть устройство'), () => callRemove(dev.id).then(() => this.refresh())) : ''
-					])
-				]);
-			})
-		]));
-	},
-
-	render(r) {
-		this.devices = r[0].devices;
-		this.lists = r[1].lists;
-		this.cfg = r[2];
-		this.tableBox = E('div', { 'class': 'st-box' });
-		this.renderTable();
-
-		return E([], [
-			E('style', {}, CSS),
-			E('h2', {}, _('Устройства')),
-			this.renderLan(),
-			E('div', { 'class': 'st-bar' }, [
-				E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showEdit(null) }, _('Добавить')),
-				E('input', { 'class': 'cbi-input-text', 'type': 'text', 'placeholder': _('Поиск по имени, IP или MAC…'),
-					'input': (ev) => { this.filter = ev.target.value; this.renderTable(); } })
-			]),
-			this.tableBox
-		]);
-	},
-
-	handleSave: null,
-	handleSaveApply: null,
-	handleReset: null
+		return m.render();
+	}
 });

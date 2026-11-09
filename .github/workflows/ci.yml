@@ -68,15 +68,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ucode/build
-          key: ucode-${{ hashFiles('openwrt/package/utils/ucode/**') }}-${{ runner.os }}
+          key: ucode-zlib-${{ hashFiles('openwrt/package/utils/ucode/**') }}-${{ runner.os }}
 
       # Модули, которых нет в роутерной сборке по умолчанию или которые не нужны
-      # тестам (ubus, uci, uloop…), выключены: uci заменяет заглушка tests/mock.
+      # тестам (ubus, uci, uloop…), выключены: uci заменяет заглушка tests/mock. zlib нужен:
+      # им распаковываются наборы geosite и geoip (.srs).
       - name: build ucode
         if: steps.ucode-cache.outputs.cache-hit != 'true'
         run: |
           set -e
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libjson-c-dev
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libjson-c-dev zlib1g-dev
           pkg="$PWD/openwrt/package/utils/ucode"
           rev="$(sed -n 's/^PKG_SOURCE_VERSION:=//p' "$pkg/Makefile")"
           test -n "$rev"
@@ -88,7 +89,7 @@ jobs:
           done
           cmake -S ucode -B ucode/build -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
             -DDEBUG_SUPPORT=OFF -DRTNL_SUPPORT=OFF -DNL80211_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
-            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF >/dev/null
+            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF -DZLIB_SUPPORT=ON >/dev/null
           cmake --build ucode/build -j"$(nproc)"
 
       # Из кэша приезжает только сборка, а библиотека json-c нужна и ей. В образе раннера она
@@ -195,7 +196,7 @@ jobs:
               ./scripts/feeds list -r packages | sed "s/[[:space:]].*//" | grep -qx "$p" || { echo "в фиде packages нет $p"; exit 1; }
             done
             ./scripts/feeds install -p stella xray-core curl kmod-nft-tproxy kmod-nft-queue ip-full luci-app-stella
-            ./scripts/feeds install luci-base ucode ucode-mod-fs ucode-mod-uci >/dev/null
+            ./scripts/feeds install luci-base ucode ucode-mod-fs ucode-mod-uci ucode-mod-zlib >/dev/null
             make defconfig >/dev/null
             make package/luci-app-stella/compile -j"$(nproc)" V=s
             bad="$(find build_dir -path "*/ipkg-all/luci-app-stella/*" -perm -0002 ! -type l)"

@@ -4,31 +4,25 @@
 'require ui';
 'require poll';
 'require dom';
+'require uci';
+'require network';
 'require stella.common as sui';
 
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
-const callAdd = rpc.declare({ object: 'stella', method: 'list_add', params: [ 'items', 'action', 'devices_mode', 'macs' ] });
-const callEdit = rpc.declare({ object: 'stella', method: 'list_edit', params: [ 'id', 'name', 'urls', 'entries', 'action', 'enabled', 'devices_mode', 'macs' ] });
-const callRemove = rpc.declare({ object: 'stella', method: 'list_remove', params: [ 'id' ] });
-const callMove = rpc.declare({ object: 'stella', method: 'list_move', params: [ 'id', 'dir' ] });
 const callUpdate = rpc.declare({ object: 'stella', method: 'lists_update', params: [ 'id' ] });
-const callMetaIndex = rpc.declare({ object: 'stella', method: 'meta_index', params: [ 'update' ] });
-const callDefault = rpc.declare({ object: 'stella', method: 'set_default_action', params: [ 'action' ] });
-const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
-const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
+const callGeoIndex = rpc.declare({ object: 'stella', method: 'geo_index', params: [ 'update' ] });
 const callZapretInfo = rpc.declare({ object: 'stella', method: 'zapret_info' });
 const callZapretOff = rpc.declare({ object: 'stella', method: 'zapret_service_off' });
 const callZCatalog = rpc.declare({ object: 'stella', method: 'zapret_catalog' });
-const callZApply = rpc.declare({ object: 'stella', method: 'zapret_apply', params: [ 'name' ] });
 const callZCatalogUpdate = rpc.declare({ object: 'stella', method: 'zapret_catalog_update' });
 const callZTest = rpc.declare({ object: 'stella', method: 'zapret_test', params: [ 'scope', 'apply' ] });
 const callZTestStop = rpc.declare({ object: 'stella', method: 'zapret_test_stop' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
+const callUciRevert = rpc.declare({ object: 'uci', method: 'revert', params: [ 'config' ] });
 
 const FAMILIES = { v: 'Zapret Manager', yv: 'YouTube', fs: 'Flowseal', dv: 'Discord', gv: _('игры'), current: _('текущая') };
 
 const ITD = 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/';
-const META = 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/';
 
 // Готовые списки itdoginfo/allow-domains; у сервисов с известными подсетями — оба файла.
 const CATALOG = [
@@ -59,9 +53,6 @@ const CATALOG = [
 		[ _('Хостинги (Hetzner, OVH, DO, Cloudflare, AWS, Akamai)'), [ 'Categories/hodca.lst' ] ]
 	] ]
 ];
-
-// Сколько секунд удалённый список можно вернуть.
-const REMOVE_DELAY = 10;
 
 const ACTIONS = [
 	[ 'vpn', _('VPN') ],
@@ -106,12 +97,14 @@ function actionSelect(value, onchange) {
 }
 
 function countLabel(l) {
+	if (l.pending)
+		return _('после применения');
 	const p = [];
 	if (l.domains)
 		p.push('%d %s'.format(l.domains, sui.plural(l.domains, _('домен'), _('домена'), _('доменов'))));
 	if (l.cidrs)
 		p.push('%d %s'.format(l.cidrs, sui.plural(l.cidrs, _('подсеть'), _('подсети'), _('подсетей'))));
-	return p.length ? p.join(' · ') : (l.urls.length ? _('не загружен') : _('пусто'));
+	return p.length ? p.join(' · ') : ((l.urls.length || l.geo.length) ? _('не загружен') : _('пусто'));
 }
 
 function lines(text) {
@@ -144,26 +137,52 @@ function listName(url) {
 
 return view.extend({
 	load() {
-		return sui.need(4).then(() => Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]));
+		return sui.need(6).then(() => Promise.all([ callLists(), network.getHostHints(), uci.load('stella'), callZapretInfo(), callZCatalog() ]));
 	},
 
-	setDevices(dr) {
-		this.devices = dr.devices;
+	// Устройства для выбора в списке: известные в сети (DHCP, ARP) и заведённые на «Устройствах».
+	setDevices(hosts) {
+		const seen = {};
+		for (const [ mac, hint ] of hosts.getMACHints())
+			seen[mac.toLowerCase()] = { mac: mac.toLowerCase(), hostname: hint, ip: hosts.getIPAddrByMACAddr(mac) };
+		for (const s of uci.sections('stella', 'device')) {
+			const mac = String(s.mac || '').toLowerCase();
+			if (mac)
+				seen[mac] = Object.assign(seen[mac] || { mac }, { name: s.name });
+		}
+		this.devices = Object.values(seen);
 		this.devNames = {};
-		for (const d of dr.devices)
+		for (const d of this.devices)
 			this.devNames[d.mac] = d.name || d.hostname || d.ip || d.mac;
 	},
 
+	// Списки — из настроек с несохранёнными правками, сколько в них доменов — с роутера.
+	merge(raw) {
+		const counts = {};
+		for (const l of raw.lists)
+			counts[l.id] = l;
+		const d = Object.assign({}, raw);
+		d.default_action = this.cfg.default_action;
+		d.lists = uci.sections('stella', 'list').map((s) => {
+			const c = counts[s['.name']];
+			const macs = L.toArray(s.mac).map((m) => String(m).toLowerCase());
+			const mode = (s.devices_mode == 'only' || s.devices_mode == 'except') && macs.length ? s.devices_mode : 'all';
+			return { id: s['.name'], name: s.name || s['.name'], enabled: s.enabled != '0', action: s.action || 'vpn',
+				urls: L.toArray(s.url), geo: L.toArray(s.geo), entries: L.toArray(s.entry), devices_mode: mode, macs,
+				pending: !c, domains: c ? c.domains : 0, cidrs: c ? c.cidrs : 0, updated: c ? c.updated : null };
+		});
+		return d;
+	},
+
 	refresh() {
-		// Настройки тоже: стратегию меняют и выбор из каталога, и автоподбор.
-		return Promise.all([ callLists(), callDevices(), callZapretInfo(), callZCatalog(), callSettings() ]).then(([ d, dr, zi, zc, cfg ]) => {
+		return Promise.all([ callLists(), callZapretInfo(), callZCatalog() ]).then((r) => sui.saved().then(() => r)).then(([ raw, zi, zc ]) => {
+			this.raw = raw;
+			const d = this.merge(raw);
 			const was = this.data && this.data.updating;
 			const wasTesting = this.zc && this.zc.testing;
 			this.data = d;
-			this.cfg = cfg;
 			this.zi = zi;
 			this.zc = zc;
-			this.setDevices(dr);
 			// Во время автоподбора меняется только ход проверки — обновляем одну строку,
 			// иначе перерисовка каждые 2 с закрывала бы открытые списки.
 			const p = zc.progress || {};
@@ -189,9 +208,16 @@ return view.extend({
 		});
 	},
 
-	// Сохранить и перерисовать: refresh перечитывает и настройки.
+	// Правка настроек — до «Сохранить»; страница перерисовывается из них же.
 	saveSetting(values) {
-		return sui.saveSettings(values).then(() => this.refresh());
+		return sui.saveSettings(values).then(() => this.redraw());
+	},
+
+	redraw() {
+		return sui.saved().then(() => {
+			this.data = this.merge(this.raw);
+			this.renderAll();
+		});
 	},
 
 	call(p) {
@@ -205,7 +231,7 @@ return view.extend({
 	// Одно окно для создания и изменения. Для нового списка — ещё и каталог itdoginfo.
 	showList(l) {
 		const isNew = !l;
-		l = l || { name: '', action: 'vpn', urls: [], entries: [], devices_mode: 'all', macs: [] };
+		l = l || { name: '', action: 'vpn', urls: [], geo: [], entries: [], devices_mode: 'all', macs: [] };
 
 		// Каталог itdoginfo — и при создании, и при изменении: уже входящие в список пункты
 		// отмечены, а их ссылки не дублируются в поле ниже.
@@ -225,31 +251,24 @@ return view.extend({
 			}))
 		])));
 
-		// Наборы meta-rules-dat — поиском по именам, как geosite и geoip в 3x-ui. Хранятся ссылками
-		// на их файлы .list и обновляются вместе со списком.
-		const metaUrl = (p) => META + p[0] + '/' + p[1] + '.list';
-		const metaSel = [];
-		for (const u of l.urls) {
-			const m = u.indexOf(META) == 0 && u.slice(META.length).match(/^(geosite|geoip)\/([^\/]+)\.list$/);
-			if (m)
-				metaSel.push([ m[1], m[2] ]);
-		}
-		const metaInit = metaSel.map(metaUrl);
+		// Наборы geosite и geoip из russia-v2ray-rules-dat — поиском по именам, как в 3x-ui. В списке
+		// хранятся именами (geosite:youtube) и скачиваются вместе с ним.
+		const geoSel = l.geo.map((g) => g.split(':')).filter((p) => p.length == 2 && (p[0] == 'geosite' || p[0] == 'geoip'));
 		const chips = E('div', { 'class': 'st-chips' });
 		const search = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'disabled': '', 'placeholder': _('загружаю наборы…') });
 		const hits = E('div', { 'class': 'st-devs', 'style': 'display:none' });
-		const metaState = E('small', { 'class': 'st-dim' });
-		const metaIdx = (p) => metaSel.findIndex((x) => x[0] == p[0] && x[1] == p[1]);
+		const geoState = E('small', { 'class': 'st-dim' });
+		const geoIdx = (p) => geoSel.findIndex((x) => x[0] == p[0] && x[1] == p[1]);
 		const toggle = (p) => {
-			const i = metaIdx(p);
+			const i = geoIdx(p);
 			if (i >= 0)
-				metaSel.splice(i, 1);
+				geoSel.splice(i, 1);
 			else
-				metaSel.push(p);
+				geoSel.push(p);
 			drawChips();
 			drawHits();
 		};
-		const drawChips = () => dom.content(chips, metaSel.map((p) => E('span', { 'class': 'st-chip' }, [
+		const drawChips = () => dom.content(chips, geoSel.map((p) => E('span', { 'class': 'st-chip' }, [
 			p[0] + ':' + p[1],
 			E('a', { 'href': '#', 'title': _('Убрать'), 'click': (ev) => { ev.preventDefault(); toggle(p); } }, '×')
 		])));
@@ -258,7 +277,7 @@ return view.extend({
 		const drawHits = () => {
 			const m = search.value.trim().toLowerCase().match(/^(?:(geosite|geoip):)?(.*)$/);
 			const q = m[2];
-			if (!this.meta || !q) {
+			if (!this.geo || !q) {
 				hits.style.display = 'none';
 				return;
 			}
@@ -266,56 +285,56 @@ return view.extend({
 			const found = [];
 			for (const kind of [ 'geosite', 'geoip' ])
 				if (!m[1] || m[1] == kind)
-					for (const n of this.meta[kind])
+					for (const n of this.geo[kind])
 						if (n.indexOf(q) >= 0)
 							found.push([ kind, n ]);
 			found.sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].length - b[1].length || a[1].localeCompare(b[1]));
 			hits.style.display = '';
 			dom.content(hits, found.length ? found.slice(0, 50).map((p) => E('label', { 'class': 'st-dev' }, [
-				E('input', { 'type': 'checkbox', 'checked': metaIdx(p) >= 0 ? '' : null, 'change': () => toggle(p) }),
+				E('input', { 'type': 'checkbox', 'checked': geoIdx(p) >= 0 ? '' : null, 'change': () => toggle(p) }),
 				E('span', { 'class': 'st-name' }, p[1]),
 				E('span', { 'class': 'st-dim' }, p[0])
 			])) : E('div', { 'class': 'st-dev st-dim' }, _('ничего не найдено')));
 		};
 		search.addEventListener('input', drawHits);
-		const useMeta = (r) => {
-			this.meta = r;
+		const useGeo = (r) => {
+			this.geo = r;
 			search.disabled = false;
-			search.placeholder = _('поиск: youtube, telegram, geoip:ru');
+			search.placeholder = _('поиск: youtube, ru-blocked, geoip:ru');
 			drawHits();
 		};
 		// Имён нет или им больше недели — роутер скачивает их заново; пока качает — опрашиваем.
 		let asked = false;
-		const loadMeta = (update) => callMetaIndex(update).then((r) => {
+		const loadGeo = (update) => callGeoIndex(update).then((r) => {
 			const have = r.geosite.length + r.geoip.length > 0;
-			if (have && (!this.meta || this.meta.at != r.at))
-				useMeta(r);
+			if (have && (!this.geo || this.geo.at != r.at))
+				useGeo(r);
 			if (!r.loading && !asked && (!have || Date.now() / 1000 - r.at > 7 * 86400)) {
 				asked = true;
-				return loadMeta(true);
+				return loadGeo(true);
 			}
 			if (r.loading)
-				return new Promise((res) => window.setTimeout(res, 1500)).then(() => document.body.contains(search) && loadMeta(false));
+				return new Promise((res) => window.setTimeout(res, 1500)).then(() => document.body.contains(search) && loadGeo(false));
 			if (!have) {
 				search.placeholder = '';
-				dom.content(metaState, [ _('Не удалось загрузить наборы.') + ' ', E('a', { 'href': '#', 'click': (ev) => {
+				dom.content(geoState, [ _('Не удалось загрузить наборы.') + ' ', E('a', { 'href': '#', 'click': (ev) => {
 					ev.preventDefault();
-					dom.content(metaState, '');
+					dom.content(geoState, '');
 					search.placeholder = _('загружаю наборы…');
-					loadMeta(true);
+					loadGeo(true);
 				} }, _('Повторить')) ]);
 			}
-		}).catch((e) => dom.content(metaState, _('Поиск недоступен: %s').format(e.message)));
+		}).catch((e) => dom.content(geoState, [ _('Поиск недоступен: %s').format(e.message) ]));
 		drawChips();
-		if (this.meta)
-			useMeta(this.meta);
+		if (this.geo)
+			useGeo(this.geo);
 		else
-			loadMeta(false);
+			loadGeo(false);
 
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('необязательно') : '' });
 		const text = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4,
 			'placeholder': 'mysite.ru\n203.0.113.0/24\nhttps://example.com/list.lst' },
-			[ [ ...l.urls.filter((u) => !catUrls[u] && metaInit.indexOf(u) < 0), ...l.entries ].join('\n') ]);
+			[ [ ...l.urls.filter((u) => !catUrls[u]), ...l.entries ].join('\n') ]);
 
 		// Устройства: известные в сети + уже выбранные в списке (даже если сейчас не в сети).
 		const devs = this.devices.slice();
@@ -336,38 +355,44 @@ return view.extend({
 			(v) => { devMode = v; syncDevs(); });
 		syncDevs();
 
+		// Правка копится до «Сохранить»: новый список — новая секция с постоянным именем.
 		const save = () => {
 			const macs = boxes.filter(([ , cb ]) => cb.checked).map(([ d ]) => d.mac);
 			if (devMode != 'all' && !macs.length)
 				return ui.addNotification(null, E('p', {}, _('Выберите хотя бы одно устройство.')), 'warning');
 			const all = lines(text.value).map(puny);
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
-
-			if (!isNew) {
-				const all_urls = [ ...checks.filter(([ cb ]) => cb.checked).flatMap(([ , , u ]) => u), ...metaSel.map(metaUrl), ...urls ];
-				if (!all_urls.length && !sites.length)
-					return ui.addNotification(null, E('p', {}, _('Список пуст.')), 'warning');
-				ui.hideModal();
-				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, sites, action, undefined, devMode, macs));
-			}
-
-			// Всё выбранное — один список: пункты каталога, наборы meta-rules-dat, свои ссылки и сайты.
 			const picked = checks.filter(([ cb ]) => cb.checked);
-			const all_urls = [ ...picked.flatMap(([ , , u ]) => u), ...metaSel.map(metaUrl), ...urls ];
-			if (!all_urls.length && !sites.length)
-				return ui.addNotification(null, E('p', {}, _('Ничего не выбрано.')), 'warning');
-			const names = [ ...picked.map(([ , it ]) => it[0]), ...metaSel.map((p) => p[0] + ':' + p[1]), ...urls.map(listName),
-				...(sites.length ? [ _('свои сайты') ] : []) ];
-			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
+			const all_urls = [ ...picked.flatMap(([ , , u ]) => u), ...urls ];
+			const geo = geoSel.map((p) => p[0] + ':' + p[1]);
+			if (!all_urls.length && !geo.length && !sites.length)
+				return ui.addNotification(null, E('p', {}, isNew ? _('Ничего не выбрано.') : _('Список пуст.')), 'warning');
+
+			let sid = l.id, title = name.value.trim();
+			if (isNew) {
+				// Название по умолчанию — из выбранного: пункты каталога, наборы, свои ссылки и сайты.
+				const names = [ ...picked.map(([ , it ]) => it[0]), ...geo, ...urls.map(listName), ...(sites.length ? [ _('свои сайты') ] : []) ];
+				title = title || ((names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', '));
+				sid = uci.add('stella', 'list', sui.newId('list'));
+				uci.set('stella', sid, 'enabled', '1');
+			}
+			const set = (k, v) => (Array.isArray(v) ? v.length : v) ? uci.set('stella', sid, k, v) : uci.unset('stella', sid, k);
+			set('name', title || l.name);
+			set('action', action);
+			set('url', all_urls);
+			set('geo', geo);
+			set('entry', sites);
+			set('devices_mode', (devMode == 'all') ? '' : devMode);
+			set('mac', (devMode == 'all') ? [] : macs);
 			ui.hideModal();
-			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, entries: sites } ], action, devMode, macs));
+			return sui.push().then(() => this.redraw());
 		};
 
 		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Название')), name ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Действие')), actSel ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Готовые списки')), cat ]),
-			E('div', { 'class': 'st-field' }, [ E('b', {}, 'meta-rules-dat'), chips, search, hits, metaState ]),
+			E('div', { 'class': 'st-field' }, [ E('b', {}, 'russia-v2ray-rules-dat'), chips, search, hits, geoState ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Свои сайты, подсети и ссылки на списки')), text,
 				E('small', { 'class': 'st-dim' }, _('По одному в строке, поддомены учитываются.')) ]),
 			E('div', { 'class': 'st-field' }, [ E('b', {}, _('Устройства')), mode, devList ]),
@@ -380,23 +405,43 @@ return view.extend({
 		]);
 	},
 
-	// Удаление без подтверждения, но не сразу: REMOVE_DELAY секунд список остаётся на роутере
-	// как был, а в таблице на его месте — «удалён» и «Вернуть», которая просто отменяет удаление.
+	// Удаление без подтверждения, как в таблицах LuCI, — сразу в «Unsaved Changes». В таблице
+	// на месте списка — «удалён» и «Вернуть»; до применения файл списка на роутере не трогается.
 	handleRemove(l) {
-		this.pending[l.id] = window.setTimeout(() => this.commitRemove(l.id), REMOVE_DELAY * 1000);
-		this.renderAll();
+		const ids = uci.sections('stella', 'list').map((s) => s['.name']);
+		const i = ids.indexOf(l.id);
+		const values = {};
+		for (const [ k, v ] of Object.entries(uci.get('stella', l.id) || {}))
+			if (k.charAt(0) != '.')
+				values[k] = v;
+		this.removed[l.id] = { l, index: i, next: ids[i + 1], values };
+		uci.remove('stella', l.id);
+		return sui.push().then(() => this.redraw());
 	},
 
-	commitRemove(id) {
-		window.clearTimeout(this.pending[id]);
-		delete this.pending[id];
-		return this.call(callRemove(id));
-	},
-
+	// Удаление — единственная несохранённая правка: она просто отменяется на роутере. Иначе
+	// список заводится снова с тем же именем и настройками на прежнем месте.
 	handleRestore(id) {
-		window.clearTimeout(this.pending[id]);
-		delete this.pending[id];
-		this.renderAll();
+		const r = this.removed[id];
+		delete this.removed[id];
+		return sui.saved().then(() => uci.changes()).then((ch) => {
+			const all = Object.values(ch || {}).flat();
+			if (all.length == 1 && all[0][0] == 'remove' && all[0][1] == id && all[0].length == 2)
+				return callUciRevert('stella').then(() => { uci.unload('stella'); return uci.load('stella'); });
+			uci.add('stella', 'list', id);
+			for (const k in r.values)
+				uci.set('stella', id, k, r.values[k]);
+			if (r.next && uci.get('stella', r.next))
+				uci.move('stella', id, r.next);
+			return sui.push();
+		}).then(() => this.redraw());
+	},
+
+	// Порядок важен (срабатывает первый подходящий список) — меняется и он до «Сохранить».
+	handleMove(i, dir) {
+		const ls = this.data.lists;
+		uci.move('stella', ls[i].id, ls[i + dir].id, dir > 0);
+		this.redraw();
 	},
 
 	goneRow(l) {
@@ -472,7 +517,14 @@ return view.extend({
 		// YouTube, Discord и игры — отдельные наборы, как в Zapret Manager; «1» от прежних
 		// версий — первый вариант набора.
 		const fam = (f) => zc.strategies.filter((st) => st.family == f);
-		const cur = (key, f) => (!cfg[key] || cfg[key] == '0') ? '' : (cfg[key] == '1' ? ((fam(f)[0] || {}).name || '') : cfg[key]);
+		const cur = (key) => cfg[key] || '';
+		// Основная из каталога: её параметры копируются в zapret_opts; своя — имени из каталога нет.
+		const texts = {};
+		for (const st of zc.strategies)
+			if (st.text)
+				texts[st.name] = st.text;
+		const current = cfg.zapret_strategy || (String(cfg.zapret_opts).match(/^#(.+)/) || [])[1] || '';
+		const custom = !!cfg.zapret_opts && !texts[current];
 		// Оценка из последней проверки — серой припиской к названию.
 		const stLabel = (st) => res[st.name] ? sui.label(st.name, score(st.name)) : st.name;
 		const setSel = (key, f) => sui.select(cur(key, f), [ [ '', _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
@@ -488,18 +540,18 @@ return view.extend({
 		const fakeSel = (key) => [ sui.dim(_('подделка')), sui.select(cfg[key] || '', [ [ '', _('stun (по умолчанию)') ],
 			...(zc.fakes || []).map((f) => [ f, fakeName(f) ]) ], (v) => this.saveSetting({ [key]: v })) ];
 		// Основная: каталог по источникам (источник — серой припиской), выключено и своя.
-		const sel = sui.select(zc.custom ? '__custom' : (zc.current || ''), [
+		const sel = sui.select(custom ? '__custom' : current, [
 			[ '', _('выключено') ],
 			...Object.keys(groups).reduce((all, f) => all.concat(groups[f].map((st) =>
 				[ st.name, sui.label(st.name, (FAMILIES[f] || f) + (res[st.name] ? ', ' + score(st.name) : '')) ])), []),
-			[ '__custom', zc.custom ? _('своя стратегия') : _('своя стратегия…') ]
+			[ '__custom', custom ? _('своя стратегия') : _('своя стратегия…') ]
 		], (v) => {
 			if (v == '__custom')
 				return this.showZapret();
 			// Без основной работают только YouTube, Discord и игры.
 			if (v == '')
 				return this.saveSetting({ zapret_opts: '', zapret_strategy: '' });
-			return this.call(callZApply(v));
+			return this.saveSetting({ zapret_strategy: v, zapret_opts: texts[v] });
 		});
 
 		let state;
@@ -537,8 +589,8 @@ return view.extend({
 		const names = Object.keys(res).filter((n) => res[n].family != 'current').sort((a, b) => res[b].ok - res[a].ok);
 		const base = zc.results && zc.results.baseline;
 		const baseText = base ? Object.keys(base).map((k) => (k == 'yv' ? _('YouTube') : _('общие')) + ' ' + base[k].ok + '/' + base[k].total).join(', ') : '';
-		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == zc.current && !zc.custom);
-		const apply = (n) => this.call(callZApply(n));
+		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == current && !custom);
+		const apply = (n) => this.saveSetting((res[n].family == 'yv') ? { zapret_yt: n } : { zapret_strategy: n, zapret_opts: texts[n] });
 		const results = names.length ? E('details', { 'class': 'st-full' }, [
 			E('summary', { 'style': 'cursor:pointer' }, _('Результаты проверки (%d)').format(names.length) +
 				(zc.results.at ? ' · ' + sui.time(zc.results.at) : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
@@ -603,7 +655,7 @@ return view.extend({
 		const newest = Math.max(0, ...d.lists.map((l) => l.updated || 0));
 		dom.content(this.defaultBox, [
 			...sui.kv(_('Остальной трафик'), sui.select(d.default_action,
-				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.call(callDefault(v)))),
+				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.saveSetting({ default_action: v }))),
 			// Расписание, кнопка, когда обновлено (последний из скачанных списков) — как везде.
 			...sui.kv(_('Обновление списков'), [ sui.hours(this.cfg.lists_interval, (v) => sui.saveSettings({ lists_interval: v })),
 				d.updating ? E('em', { 'class': 'spinning' }, _('загружаю списки…')) :
@@ -613,34 +665,37 @@ return view.extend({
 
 		this.renderZapret();
 
-		if (!d.lists.length) {
+		const gone = Object.values(this.removed).sort((a, b) => a.index - b.index);
+		if (!d.lists.length && !gone.length) {
 			dom.content(this.tableBox, E('p', {}, _('Списков пока нет.')));
 			return;
 		}
 
 		const n = d.lists.length;
-		const rows = d.lists.map((l, i) => (l.id in this.pending) ? this.goneRow(l) : E('tr', { 'class': l.enabled ? '' : 'st-off' }, [
+		const rows = d.lists.map((l, i) => E('tr', { 'class': l.enabled ? '' : 'st-off' }, [
 			E('td', { 'class': 'st-order' }, [
 				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Выше'), 'disabled': i == 0 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, -1))) }, sui.icon('up')),
+					'click': ui.createHandlerFn(this, 'handleMove', i, -1) }, sui.icon('up')),
 				E('button', { 'class': 'btn cbi-button st-ib', 'title': _('Ниже'), 'disabled': i == n - 1 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, 1))) }, sui.icon('down'))
+					'click': ui.createHandlerFn(this, 'handleMove', i, 1) }, sui.icon('down'))
 			]),
 			E('td', { 'class': 'st-order' }, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
-				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, ev.target.checked)) })),
+				'change': (ev) => { uci.set('stella', l.id, 'enabled', ev.target.checked ? '1' : '0'); this.redraw(); } })),
 			E('td', {}, [ E('div', {}, [ l.name ]), this.scopeLabel(l) ]),
 			E('td', { 'class': 'st-dim' }, [
 				E('div', {}, countLabel(l)),
 				l.updated ? E('div', {}, sui.time(l.updated)) : ''
 			]),
 			E('td', { 'class': 'st-act' }, [
-				l.urls.length ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
+				(!l.pending && (l.urls.length || l.geo.length)) ? sui.iconButton('refresh', _('Обновить'), () => this.call(callUpdate(l.id))) : '',
 				' ',
 				sui.iconButton('edit', _('Изменить'), () => this.showList(l)),
 				' ',
 				sui.iconButton('close', _('Удалить'), () => this.handleRemove(l))
 			])
 		]));
+		for (const r of gone)
+			rows.splice(Math.min(r.index, rows.length), 0, this.goneRow(r.l));
 
 		dom.content(this.tableBox, [
 			E('table', { 'class': 'st-table' }, [
@@ -651,24 +706,19 @@ return view.extend({
 		]);
 	},
 
-	render([ data, dr, cfg, zi, zc ]) {
-		this.data = data;
-		this.cfg = cfg;
+	render([ raw, hosts, , zi, zc ]) {
+		this.cfg = sui.cfg();
+		this.setDevices(hosts);
+		this.raw = raw;
+		this.data = this.merge(raw);
 		this.zi = zi;
 		this.zc = zc;
-		this.setDevices(dr);
-		this.pending = {};
-		// Ушли со страницы раньше — удалить сейчас: обычный запрос при уходе может не дойти.
-		window.addEventListener('pagehide', () => {
-			for (const id in this.pending)
-				navigator.sendBeacon(rpc.getBaseURL(), JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'call',
-					params: [ rpc.getSessionID(), 'stella', 'list_remove', { id } ] }));
-		});
+		this.removed = {};
 		this.defaultBox = E('div', { 'class': 'st-card' });
 		this.tableBox = E('div', { 'class': 'st-box' });
 		this.zapretBox = E('div', { 'class': 'st-card' });
 		this.renderAll();
-		if (data.updating || zc.testing || zc.updating)
+		if (raw.updating || zc.testing || zc.updating)
 			this.refresh();
 
 		return E([], [
@@ -684,7 +734,13 @@ return view.extend({
 		]);
 	},
 
-	handleSave: null,
-	handleSaveApply: null,
-	handleReset: null
+	// Как в формах OpenWrt: «Сохранить» отдаёт правки роутеру,
+	// «Сохранить и применить» ещё и применяет их, «Сбросить» отменяет несохранённые.
+	handleSave() {
+		return sui.push().then(() => this.refresh());
+	},
+
+	handleReset() {
+		location.reload();
+	}
 });
