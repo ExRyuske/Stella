@@ -5,7 +5,7 @@ LUCI_DEPENDS:=+xray-core +ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-zlib +cu
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-stella
-PKG_VERSION:=0.1.18
+PKG_VERSION:=0.1.19
 PKG_RELEASE:=1
 
 define Package/luci-app-stella/conffiles
