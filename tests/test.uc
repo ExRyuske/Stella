@@ -8,11 +8,12 @@ import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config } from 'stella.xray';
 import { stab_entry, stab_better, best_node, read_json } from 'stella.store';
-import { parse_list } from 'stella.lists';
+import { parse_list, itdog_catalog } from 'stella.lists';
+import { doh_catalog, dns_query, dns_answer, resolv_servers, doh_url } from 'stella.dns';
 import { parse_srs } from 'stella.srs';
-import { warp_link, random_endpoints, iso_time } from 'stella.warp';
+import { warp_link, random_endpoints, iso_time, trace_info, warp_better, warp_data_parse, warp_data_reset, WARP_DATA } from 'stella.warp';
 import { nft_script, dnsmasq_conf, restore_script } from 'stella.firewall';
-import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_game_ports, game_strategies, localize, missing_files, test_list } from 'stella.zapret';
+import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_discord_voice, zms_games, zms_gp_domains, zms_yt_targets, localize, missing_files, test_list } from 'stella.zapret';
 
 const UUID = '48b4e5f1-00ed-4c06-aa7d-e8890e1dcc5d';
 const PBK = 'VaUOAQYUQAmBLwQ0NproXnB1vR_YNA9e3Pa9ghS72BY';
@@ -21,6 +22,12 @@ const PCS = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const WGK = 'iAUkyvpedMvtQtwPEbJGkWIwC2eVUKlCHiLB/z2S+2I=';
 const WARP_PK = 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
 const TMP = getenv('TMPDIR') || '/tmp';
+
+// Данные WARP — из выдержек файлов генератора, как их сохраняет stella warp-data.
+const WD = warp_data_parse(readfile('tests/fixtures/warp-endpoint-pool.ts'), readfile('tests/fixtures/warp-shared.ts'),
+	readfile('tests/fixtures/warp-cloudflare-client.ts'));
+writefile(WARP_DATA, sprintf('%J', WD));
+warp_data_reset();
 const XRAY = getenv('XRAY') || 'xray';
 
 let vmess_json = b64enc(sprintf('%J', {
@@ -124,7 +131,9 @@ function fail(msg) {
 
 const INTERCEPT = {
 	intercept: true, tproxy_port: 10812, dns_port: 10853,
-	dns_remote: 'https://1.1.1.1/dns-query', dns_direct: 'https://77.88.8.8/dns-query'
+	dns_servers: [ 'https://dns.comss.one/dns-query', 'https://1.1.1.1/dns-query' ],
+	dns_hosts: { 'dns.comss.one': [ '92.38.152.163', '93.115.24.204' ] },
+	dns_isp: [ '192.168.1.1' ]
 };
 
 // Каждый узел проверяется в обоих режимах: только socks и прозрачный прокси.
@@ -212,12 +221,13 @@ else
 unlink(`${TMP}/stella-bad.json`);
 
 // WireGuard в конфиге xray: без системного интерфейса, маска QUIC первой и одна и та же при
-// каждой сборке (иначе xray перезапускался бы на каждый reload), с перехватом — и UseIPv4.
+// каждой сборке (иначе xray перезапускался бы на каждый reload), с перехватом — и UseIPv4;
+// домены сайтов — через DNS xray, сначала IPv6 (иначе мимо адресов DNS обхода геоблокировок).
 let wn = parse(CASES[length(CASES) - 5].link);
 let wc = build_config({ node: wn, ...INTERCEPT });
 let wo = wc.outbounds[0];
 let wfm = wo.streamSettings?.finalmask?.udp?.[0];
-if (wo.protocol == 'wireguard' && wo.settings.noKernelTun === true && wo.settings.peers[0].endpoint == '162.159.192.1:2408' &&
+if (wo.protocol == 'wireguard' && wo.settings.noKernelTun === true && wo.targetStrategy == 'ForceIPv6v4' && wo.settings.peers[0].endpoint == '162.159.192.1:2408' &&
     sprintf('%J', wo.settings.reserved) == '[ 1, 2, 3 ]' && wfm?.type == 'noise' && length(wfm.settings.noise) == 9 &&
     match(wfm.settings.noise[0].packet, /^c[0-9a-f]+$/) && wo.streamSettings.sockopt?.domainStrategy == 'UseIPv4' &&
     sprintf('%J', build_config({ node: wn, ...INTERCEPT })) == sprintf('%J', wc) &&
@@ -225,6 +235,16 @@ if (wo.protocol == 'wireguard' && wo.settings.noKernelTun === true && wo.setting
 	passed++;
 else
 	fail(`wireguard: ${sprintf('%J', wo)}`);
+
+// Данные WARP из файлов генератора: подсети, порты, ключ, маски QUIC, API и User-Agent; из
+// чужого текста — ничего.
+if (length(WD.hosts) == 14 && WD.hosts[0] == '162.159.192' && length(WD.ports) == 54 && WD.ports[33] == 2408 &&
+    WD.key == 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=' && length(WD.masks) == 2 && substr(WD.masks[0], 0, 4) == 'c100' &&
+    WD.api == 'https://api.cloudflareclient.com/v0i1909051800' && WD.ua == 'okhttp/3.12.1' &&
+    !length(keys(warp_data_parse('нет', 'данных', 'тут'))))
+	passed++;
+else
+	fail(`данные WARP: ${sprintf('%J', { ...WD, masks: length(WD.masks) })}`);
 
 // Случайные адреса WARP — без повторов и из своих подсетей; время регистрации — ISO 8601.
 let eps = random_endpoints(8);
@@ -238,30 +258,37 @@ else
 if (xray_test(null, 'без узла'))
 	passed++;
 
-// Адрес прокси-сервера — домен: он резолвится напрямую, а DNS-сервер идёт в direct.
+// DNS — одна цепочка напрямую: DoH-серверы по порядку (ждать каждый 1,5 с), последним — DNS
+// провайдера; имена DoH-серверов — из hosts; запросы DNS идут через свой выход, который узнаёт
+// адрес DoH-сервера у встроенного DNS (то есть из hosts). Истёкшие записи отдаются из кэша.
+// Сам xray спрашивает и IPv6 (для WARP); устройствам AAAA не отдаёт dnsmasq.
 let c = build_config({ node: parse(CASES[1].link), ...INTERCEPT });
-let dns0 = c.dns.servers[0];
-if (dns0.domains?.[0] == 'full:srv.example.com' && dns0.tag == 'dns-direct' &&
-    c.routing.rules[1].inboundTag[0] == 'dns-direct' && c.routing.rules[1].outboundTag == 'direct')
+let dns_out = filter(c.outbounds, (o) => o.tag == 'direct-dns')[0];
+if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_servers[0], timeoutMs: 1500 },
+	{ address: INTERCEPT.dns_servers[1], timeoutMs: 1500 }, { address: '192.168.1.1', port: 53 } ]) &&
+    c.dns.tag == 'dns-direct' && c.dns.hosts['dns.comss.one'][1] == '93.115.24.204' &&
+    c.dns.serveStale === true && c.dns.serveExpiredTTL == 86400 && c.dns.queryStrategy == 'UseIP' &&
+    dns_out?.streamSettings?.sockopt?.domainStrategy == 'UseIPv4' &&
+    length(filter(c.routing.rules, (r) => r.inboundTag?.[0] == 'dns-direct' && r.outboundTag == 'direct-dns')) == 1 &&
+    length(filter(c.routing.rules, (r) => r.inboundTag?.[0] == 'dns-internal')) == 0)
 	passed++;
 else
-	fail(`прямой резолв адреса сервера: ${sprintf('%J', dns0)}`);
+	fail(`цепочка DNS: ${sprintf('%J', { dns: c.dns, rules: c.routing.rules })}`);
 
-// Адрес сервера — IP: прямого DNS для него не нужно; в конце — запасной DNS напрямую.
-// DNS через VPN ждём 3 с, истёкшие записи отдаются из кэша (туннель может упасть).
-c = build_config({ node: parse(CASES[0].link), ...INTERCEPT });
-if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_remote, timeoutMs: 3000 }, { address: INTERCEPT.dns_direct, tag: 'dns-direct' } ]) &&
-    c.dns.serveStale === true && c.dns.serveExpiredTTL == 86400)
+// Запасные — по порядку после цепочки: DoH и обычный DNS вперемешку.
+c = build_config({ node: null, ...INTERCEPT, dns_last: [ '77.88.8.8', 'https://dns.google/dns-query' ] });
+if (sprintf('%J', map(c.dns.servers, (x) => x.address)) == sprintf('%J', [ ...INTERCEPT.dns_servers, '77.88.8.8', 'https://dns.google/dns-query' ]) &&
+    c.dns.servers[2].port == 53 && c.dns.servers[3].timeoutMs == 1500)
 	passed++;
 else
-	fail(`DNS-серверы для IP-адреса: ${sprintf('%J', c.dns)}`);
+	fail(`запасные DNS: ${sprintf('%J', c.dns.servers)}`);
 
-// Без узла запасного DNS нет — ждать основной столько, сколько xray ждёт по умолчанию.
-c = build_config({ node: null, ...INTERCEPT });
-if (sprintf('%J', c.dns.servers) == sprintf('%J', [ INTERCEPT.dns_remote ]))
+// Без цепочки (каталог ещё не скачан) — только DNS провайдера, без hosts.
+c = build_config({ node: null, ...INTERCEPT, dns_servers: [], dns_hosts: {} });
+if (sprintf('%J', c.dns.servers) == '[ { "address": "192.168.1.1", "port": 53 } ]' && !c.dns.hosts)
 	passed++;
 else
-	fail(`DNS без узла: ${sprintf('%J', c.dns.servers)}`);
+	fail(`DNS без цепочки: ${sprintf('%J', c.dns)}`);
 
 // Автовыбор: outbound на каждый узел, balancer с запасным ручным узлом, observatory; xray принимает.
 c = build_config({ node: parse(CASES[0].link), auto_nodes: [ parse(CASES[1].link), parse(CASES[11].link), parse(CASES[7].link) ], ...INTERCEPT });
@@ -269,7 +296,7 @@ let tags = map(c.outbounds, (o) => o.tag);
 let last = c.routing.rules[length(c.routing.rules) - 1];
 if (sprintf('%J', slice(tags, 0, 4)) == '[ "proxy", "proxy-0", "proxy-1", "proxy-2" ]' &&
     c.routing.balancers[0].fallbackTag == 'proxy' && last.balancerTag == 'auto' && !last.outboundTag &&
-    c.observatory.subjectSelector[0] == 'proxy-' && length(c.dns.servers[0].domains) == 3) {
+    c.observatory.subjectSelector[0] == 'proxy-' && length(c.dns.servers) == 3) {
 	let path = `${TMP}/stella-auto.json`;
 	writefile(path, sprintf('%.J', c));
 	if (system(`${XRAY} run -test -c '${path}' >/dev/null 2>&1`) == 0) {
@@ -288,22 +315,6 @@ if (!c.routing.balancers && !c.observatory)
 	passed++;
 else
 	fail('автовыбор из одного узла');
-
-// Один IP у DNS через VPN и напрямую: запросы устройств всё равно идут через VPN —
-// напрямую только сервер с тегом dns-direct, правила по IP нет.
-c = build_config({ node: parse(CASES[0].link), ...INTERCEPT, dns_remote: 'https://1.1.1.1/dns-query', dns_direct: 'tcp://1.1.1.1' });
-if (length(filter(c.routing.rules, (r) => r.ip && r.outboundTag == 'direct' && r.ip[0] == '1.1.1.1')) == 0 &&
-    length(filter(c.routing.rules, (r) => r.inboundTag?.[0] == 'dns-internal' && r.outboundTag == 'proxy')) == 1)
-	passed++;
-else
-	fail(`DNS с одним IP: ${sprintf('%J', c.routing.rules)}`);
-
-// Один и тот же сервер в обоих полях: запасной напрямую всё равно есть.
-c = build_config({ node: parse(CASES[0].link), ...INTERCEPT, dns_direct: INTERCEPT.dns_remote });
-if (sprintf('%J', c.dns.servers) == sprintf('%J', [ { address: INTERCEPT.dns_remote, timeoutMs: 3000 }, { address: INTERCEPT.dns_remote, tag: 'dns-direct' } ]))
-	passed++;
-else
-	fail(`один DNS в обоих полях: ${sprintf('%J', c.dns.servers)}`);
 
 // Разбор списков: форматы itdoginfo, v2ray, clash, dnsmasq, yaml.
 let pl = parse_list(join('\n', [
@@ -335,9 +346,9 @@ if (length(gs?.domains) == 21 && 't.me' in gs.domains && 'telegram.org' in gs.do
 else
 	fail(`parse_srs: ${sprintf('%J', [ gs, gi, gbad ])}`);
 
-// nft: порядок списков, списки для части устройств, устройства в обход списков, DoH.
+// nft: порядок списков, списки для части устройств, устройства в обход списков.
 let nft = nft_script({
-	lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'direct', dns_hijack: true, block_doh: true,
+	lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'direct', dns_hijack: true,
 	lists: [
 		{ id: 'list_a', action: 'vpn', cidrs: [ '1.2.3.0/24' ], devices_mode: 'all', macs: [] },
 		{ id: 'list_b', action: 'zapret', cidrs: [], devices_mode: 'only', macs: [ 'aa:bb:cc:dd:ee:ff' ] },
@@ -358,7 +369,7 @@ let ok = index(nft, '\t\tip daddr @list_a goto act_vpn\n' +
 	index(nft, 'set list_b {') < 0 && index(nft, '\tset zapret_excl {\n\t\ttype ipv4_addr\n\t\tsize 262144\n\t\tflags dynamic, timeout\n\t\ttimeout 12h\n\t}') >= 0 &&
 	index(nft, 'ether saddr { 11:22:33:44:55:66 } goto act_vpn') >= 0 &&
 	index(nft, '11:22:33:44:55:77') < 0 &&
-	index(nft, 'th dport 853 drop') >= 0 &&
+	index(nft, 'dport 853') < 0 && index(nft, 'doh4') < 0 &&
 	index(nft, 'tcp dport { 80, 443 }') >= 0 && index(nft, 'udp dport') < 0 &&
 	index(nft, 'th dport 53 redirect to :53') >= 0;
 if (ok)
@@ -400,7 +411,7 @@ else
 // dnsmasq: домен из двух списков — одна строка с двумя сетами.
 let dm = dnsmasq_conf({ dns_port: 10853, lists: [ { id: 'list_a', domains: [ 'x.com', 'y.com' ] }, { id: 'list_b', domains: [ 'x.com' ] } ] });
 if (index(dm, 'nftset=/x.com/4#inet#stella#list_a,4#inet#stella#list_b\n') >= 0 && index(dm, 'nftset=/y.com/4#inet#stella#list_a\n') >= 0 &&
-    index(dm, 'max-ttl=60\n') >= 0 && index(dm, 'max-cache-ttl=300\n') >= 0)
+    index(dm, 'max-ttl=60\n') >= 0 && index(dm, 'max-cache-ttl=300\n') >= 0 && index(dm, 'filter-AAAA\n') >= 0)
 	passed++;
 else
 	fail(`dnsmasq_conf:\n${dm}`);
@@ -436,19 +447,33 @@ if (length(yv) == 2 && yv[0].name == 'Yv01' && yv[1].name == 'Yv02' && yv[0].arg
 else
 	fail(`block_strategies: ${sprintf('%J', yv)}`);
 
-// Отдельные наборы ZMS: Dv из скрипта, игровые порты из скрипта, Gv1–Gv4 по шаблону.
+// Отдельные наборы ZMS — из его скрипта: Dv, блок голоса Discord, игры Gv1–Gv4 (общий TCP-блок,
+// порты PORTS_*, число — из меню fix_GAME), домены Google Play.
 let zms = readfile('tests/fixtures/zms-strategies.sh');
-let dv = zms_discord(zms), gp = zms_game_ports(zms), gv = game_strategies(gp);
+let dv = zms_discord(zms), voice = zms_discord_voice(zms), gv = zms_games(zms), gpd = zms_gp_domains(zms);
+let gvj = join(' ', gv[1]?.args || []);
 if (length(dv) == 2 && dv[0].name == 'Dv1' && dv[0].family == 'dv' && dv[0].args[0] == '--filter-tcp=2053,2083,2087,2096,8443' &&
-    index(gp.udp, '1024-2407') >= 0 && index(gp.tcp, '25565') >= 0 &&
-    length(gv) == 4 && gv[0].name == 'Gv1' && gv[3].args[5] == '--dpi-desync-cutoff=n4' && index(join(' ', gv[1].args), '--new --filter-tcp=') > 0)
+    voice?.family == 'voice' && voice.args[0] == '--filter-udp=19294-19344,50000-50100' && voice.args[length(voice.args) - 1] == '--dpi-desync-repeats=6' &&
+    length(gv) == 4 && gv[0].name == 'Gv1' && gv[0].family == 'gv' && index(gv[0].args[0], '--filter-udp=88,1024-2407') == 0 &&
+    gv[0].args[2] == '--dpi-desync-cutoff=d2' && gv[3].args[5] == '--dpi-desync-cutoff=n4' &&
+    index(gvj, '--new --filter-tcp=2099,') > 0 && index(gvj, '$') < 0 && index(gvj, '#') < 0 && gv[1].args[0] != '--new' &&
+    length(gpd) >= 10 && 'gvt1.com' in gpd && 'play.google.com' in gpd &&
+    !length(zms_games('PORTS_UDP="1"')) && zms_discord_voice('') == null)
 	passed++;
 else
-	fail(`наборы ZMS: ${sprintf('%J', { dv, gp, gv: gv[0] })}`);
+	fail(`наборы ZMS: ${sprintf('%J', { dv: length(dv), voice, gv: gv[0], gv2: gv[1], n: length(gv), gpd })}`);
+
+// Цели проверки YouTube — из DOMAINS Zapret Manager, по одной на домен второго уровня.
+let ytt = zms_yt_targets(zms);
+if (sprintf('%J', ytt) == sprintf('%J', [ 'youtu.be', 'youtube.com', 'i.ytimg.com', 'yt3.ggpht.com', 'googleapis.com', 'manifest.googlevideo.com' ]) &&
+    !length(zms_yt_targets('нет списка')))
+	passed++;
+else
+	fail(`цели YouTube: ${sprintf('%J', ytt)}`);
 
 // Сборка: YouTube первым, Discord — голос + Dv, игры — Gv; порты дополняются и сливаются.
 let z = compose({ main: [ '--filter-tcp=443', '--dpi-desync=fake' ], yt: { args: [ '--filter-tcp=443', '--hostlist=g.txt' ] },
-	discord: dv[0], games: gv[1], tcp_ports: '80,443', udp_ports: '443' });
+	discord: dv[0], voice, games: gv[1], tcp_ports: '80,443', udp_ports: '443' });
 let zj = join(' ', z.args);
 if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == '--filter-tcp=443' &&
     index(zj, '--filter-l7=discord,stun') > 0 && index(zj, 'discord.media') > index(zj, '--filter-l7=discord,stun') &&
@@ -464,7 +489,7 @@ else
 	fail('compose без наборов');
 
 // Без основной и YouTube — только порты Discord и игр, веб-трафик в очередь не идёт.
-let zo = compose({ main: [], discord: dv[0] }), zn = compose({ main: [] });
+let zo = compose({ main: [], discord: dv[0], voice }), zn = compose({ main: [] });
 if (zo.tcp_ports == '2053,2083,2087,2096,8443' && zo.udp_ports == '19294-19344,50000-50100' &&
     index(join(' ', zo.args), 'discord.media') > 0 && !length(zn.args) && zn.tcp_ports == '' && zn.udp_ports == '')
 	passed++;
@@ -491,8 +516,17 @@ if (index(nz, 'set zapret_excl {') > 0 && index(nz, 'ip daddr @zapret_excl updat
 else
 	fail(`исключения zapret:\n${nz}`);
 
+// IPv6 устройств закрыт — отказ на выход из LAN наружу, внутри сети не трогается; открыт —
+// цепочки нет, и dnsmasq отдаёт AAAA.
+let n6 = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'direct', lists: [], devices: [], zapret: null, block_ipv6: true });
+if (index(n6, 'chain ipv6_block {') > 0 && index(n6, 'oifname { "br-lan" } return\n\t\tmeta l4proto tcp reject with tcp reset\n\t\treject with icmpx admin-prohibited') > 0 &&
+    index(nn, 'ipv6_block') < 0 && index(dnsmasq_conf({ dns_port: 1, block_ipv6: false, lists: [] }), 'filter-AAAA') < 0)
+	passed++;
+else
+	fail(`ipv6_block:\n${n6}`);
+
 // Подделка для голоса Discord заменяет оба файла голосового блока.
-let zd = join(' ', compose({ main: [ '--a' ], discord: dv[0], discord_fake: '/f/x.bin' }).args);
+let zd = join(' ', compose({ main: [ '--a' ], discord: dv[0], voice, discord_fake: '/f/x.bin' }).args);
 if (index(zd, '--dpi-desync-fake-discord=/f/x.bin') > 0 && index(zd, '--dpi-desync-fake-stun=/f/x.bin') > 0 && index(zd, 'stun.bin --dpi-desync-repeats=6') < 0)
 	passed++;
 else
@@ -537,6 +571,68 @@ if (sprintf('%J', se) == '{ "ok": 4, "n": 5, "ms": 120, "jit": 12 }' && stab_ent
 	passed++;
 else
 	fail(`стабильность узлов: ${sprintf('%J', se)}`);
+
+// Только игры (умолчание): в очередь — только игровые порты из блока Gv1.
+let zgo = compose({ main: [], games: gv[0] });
+if (zgo.udp_ports == '88,1024-2407,2409-4499,4502-19293,19345-49999,50101-65535' && index(zgo.tcp_ports, '25565') >= 0 &&
+    index(zgo.tcp_ports, '443') < 0 && zgo.args[0] == gv[0].args[0])
+	passed++;
+else
+	fail(`только игры: ${sprintf('%J', zgo)}`);
+
+// Готовые списки itdoginfo по дереву репозитория: списки доменов по стране и сервисы с подсетями
+// (то же имя, затем без учёта регистра), подсети без сервиса — отдельно; форматы других программ
+// и IPv6 — нет.
+let itc = itdog_catalog(json(readfile('tests/fixtures/itdog-tree.json')));
+let itf = map(itc, (e) => join('+', e.files));
+if (sprintf('%J', itf) == sprintf('%J', [ 'Categories/block.lst', 'Russia/inside-raw.lst', 'Services/discord.lst+Subnets/IPv4/discord.lst',
+	'Services/hetzner.lst+Subnets/IPv4/hetzner.lst', 'Services/youtube.lst', 'Ukraine/inside-raw.lst', 'Subnets/IPv4/Meta.lst' ]) &&
+    itc[0].group == 'Categories' && itc[6].group == 'Services' && !length(itdog_catalog(null)))
+	passed++;
+else
+	fail(`itdog_catalog: ${sprintf('%J', itc)}`);
+
+// Каталог DoH из массива PROVIDERS панели Zapret Manager: вид, адреса для начального разрешения
+// (только IPv4), без адресов не https и без того, что после массива.
+let dc = doh_catalog(readfile('tests/fixtures/zms-doh-providers.txt'));
+if (length(dc) == 7 && dc[0].id == 'google' && dc[0].kind == 'plain' && sprintf('%J', dc[0].boot) == '[ "8.8.8.8", "8.8.4.4" ]' &&
+    dc[2].kind == 'safe' && dc[2].label == 'Cloudflare · Защита от угроз' && dc[3].id == 'xbox' && dc[3].kind == 'geo' && !length(dc[3].boot) &&
+    !length(filter(dc, (x) => x.id == 'bad' || x.id == 'after')) && !length(doh_catalog('нет массива')) &&
+    doh_url('https://dns.comss.one/dns-query') && doh_url('https://api.magicdns.ru/sync') && !doh_url('https://a b/') && !doh_url('http://x.ru/q'))
+	passed++;
+else
+	fail(`doh_catalog: ${sprintf('%J', dc)}`);
+
+// DNS провайдера из resolv.conf.
+let rsv = resolv_servers('# Interface wan\nnameserver 192.168.1.1\nnameserver 127.0.0.1\nnameserver fe80::1\nnameserver 8.8.8.8\nnameserver 192.168.1.1\n');
+if (sprintf("%J", rsv) == "[ \"192.168.1.1\", \"8.8.8.8\" ]")
+	passed++;
+else
+	fail(`resolv_servers: ${sprintf("%J", rsv)}`);
+
+// Запрос DNS для DoH GET (base64url без «=») и разбор ответа: A-записи, ссылки-сжатие, CNAME
+// пропускается; не ответ DNS — null.
+let dq = dns_query('example.com');
+let ans = '\x00\x00\x81\x80\x00\x01\x00\x02\x00\x00\x00\x00' + '\x07example\x03com\x00\x00\x01\x00\x01' +
+	'\xc0\x0c\x00\x05\x00\x01\x00\x00\x00\x3c\x00\x02\xc0\x0c' +
+	'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x5d\xb8\xd7\x0e';
+let da = dns_answer(ans), dn = dns_answer('\x00\x00\x81\x83\x00\x01\x00\x00\x00\x00\x00\x00\x03bad\x00\x00\x01\x00\x01');
+if (dq == 'AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE' && sprintf('%J', da) == '{ "rcode": 0, "ips": [ "93.184.215.14" ] }' &&
+    dn.rcode == 3 && !length(dn.ips) && dns_answer('<html>') == null && dns_answer(substr(ans, 0, 40)) == null)
+	passed++;
+else
+	fail(`dns_query/dns_answer: ${sprintf('%J', { dq, da, dn })}`);
+
+// WARP: узел Cloudflare и страна из cdn-cgi/trace; лучше — отвечающий, среди отвечающих — заметно
+// более быстрый (страна выхода у WARP всегда страна пользователя — её не сравниваем).
+let ti = trace_info('fl=1\nh=www.cloudflare.com\nip=1.2.3.4\nloc=RU\ncolo=ARN\nwarp=on\n');
+let wa = { ok: true, ms: 40 }, wb = { ok: true, ms: 120 };
+if (ti?.loc == 'RU' && ti.colo == 'ARN' && trace_info('<html>') == null &&
+    warp_better(wa, wb) && !warp_better(wb, wa) && warp_better(wb, { ok: false }) && !warp_better({ ok: false }, wa) &&
+    !warp_better({ ok: true, ms: 100 }, wb) && warp_better(wb, null))
+	passed++;
+else
+	fail(`warp_better: ${sprintf('%J', ti)}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

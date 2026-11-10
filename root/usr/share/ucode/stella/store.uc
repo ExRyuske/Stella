@@ -6,10 +6,21 @@ import { readfile, writefile, stat, popen } from 'fs';
 import { parse } from 'stella.uri';
 import { parse_list } from 'stella.lists';
 import { try_json, mac_list } from 'stella.util';
+import { doh_url, resolv_servers, is_ipv4 } from 'stella.dns';
 
 export const CACHE_DIR = getenv('STELLA_CACHE_DIR') || '/etc/stella/subs';
 export const RUN_DIR = getenv('STELLA_RUN_DIR') || '/var/run/stella';
 export const LISTS_DIR = getenv('STELLA_LISTS_DIR') || '/etc/stella/lists';
+// DNS: каталог DoH-серверов, итоги проверки, подобранная цепочка, адреса имён серверов.
+export const DNS_DIR = getenv('STELLA_DNS_DIR') || '/etc/stella/dns';
+// Сколько серверов DNS добавляет пользователь и сколько подбирается автоматически: xray
+// спрашивает их по очереди, и при упавших серверах до DNS провайдера надо дойти быстро.
+// Проверки — на Cloudflare: доступность (ответ 204 без тела) и trace (IP, страна, узел).
+export const PROBE_URL = getenv('STELLA_PROBE_URL') || 'https://cp.cloudflare.com/generate_204';
+export const TRACE_URL = getenv('STELLA_TRACE_URL') || 'https://www.cloudflare.com/cdn-cgi/trace';
+
+export const DNS_MAX = 4;
+export const DNS_AUTO = 2;
 // Тайминги и пределы, общие для CLI и rpcd (секунды). Скачивание — подписки, списки,
 // каталоги, пакеты; проверка — один запрос: задержка узла, «Проверить связь».
 export const TIMEOUT = { connect: 10, fetch: 60, probe: 8 };
@@ -61,6 +72,50 @@ export function read_json(path, def) {
 	return try_json(readfile(path) || 'null') ?? def;
 };
 
+// Серверы DNS: в режиме подбора (dns_mode не «manual») — подобранные проверкой серверы обхода
+// геоблокировок, вручную — свои (dns_server) по порядку. Последним xray спрашивает DNS
+// провайдера (не здесь).
+export function dns_auto(uci) {
+	if (uci.get('stella', 'main', 'dns_mode') == 'manual')
+		return [];
+	let v = read_json(`${DNS_DIR}/auto.json`, {})?.servers;
+	return slice(filter((type(v) == 'array') ? v : [], (u) => doh_url(u)), 0, DNS_AUTO);
+};
+
+export function dns_user(uci) {
+	let v = uci.get('stella', 'main', 'dns_server');
+	return slice(filter((type(v) == 'array') ? v : (v ? [ v ] : []), (u) => doh_url(u)), 0, DNS_MAX);
+};
+
+// Цепочка: при подборе — подобранные серверы, вручную — свои по порядку.
+export function dns_chain(uci) {
+	return (uci.get('stella', 'main', 'dns_mode') == 'manual') ? dns_user(uci) : dns_auto(uci);
+};
+
+// Запасные DNS — после цепочки, по порядку: 'isp' — DNS провайдера, IPv4 — обычный DNS,
+// https://… — DoH. Не заданы — Cloudflare и Google из каталога (их адреса — оттуда же), а без
+// каталога — DNS провайдера.
+const DNS_FALLBACK_IDS = [ 'cloudflare', 'google' ];
+
+export function dns_fallback(uci) {
+	let v = uci.get('stella', 'main', 'dns_fallback');
+	let res = filter((type(v) == 'array') ? v : (v ? [ v ] : []), (x) => x == 'isp' || is_ipv4(x) || doh_url(x));
+	if (length(res))
+		return slice(res, 0, DNS_MAX);
+	let cat = read_json(`${DNS_DIR}/catalog.json`, []);
+	res = [];
+	for (let id in DNS_FALLBACK_IDS)
+		for (let c in (type(cat) == 'array') ? cat : [])
+			if (c?.id == id && doh_url(c.url))
+				push(res, c.url);
+	return length(res) ? res : [ 'isp' ];
+};
+
+// DNS провайдера — из настроек WAN (resolv.conf.auto netifd).
+export function isp_dns() {
+	return resolv_servers(readfile('/tmp/resolv.conf.d/resolv.conf.auto') || readfile('/tmp/resolv.conf.auto') || '');
+};
+
 function as_array(v) {
 	return (v == null) ? [] : (type(v) == 'array') ? v : [ v ];
 }
@@ -69,7 +124,13 @@ export function sub_label(s) {
 	return s.name || s['.name'];
 };
 
-// errors (необязательно) — массив, куда складываются битые отдельные ссылки.
+// Узел WARP: отмеченный при создании или прежний — по ключу сервера WARP в ссылке.
+export function is_warp(s) {
+	return s?.warp == '1';
+};
+
+// errors (необязательно) — массив, куда складываются битые отдельные ссылки. Источник узла —
+// id подписки, «manual» (отдельная ссылка) или «warp».
 export function load_nodes(uci, errors) {
 	let nodes = [];
 
@@ -83,8 +144,7 @@ export function load_nodes(uci, errors) {
 		n.id = s['.name'];
 		if (s.name)
 			n.name = s.name;
-		n.source = 'manual';
-		n.source_id = 'manual';
+		n.source = n.source_id = is_warp(s) ? 'warp' : 'manual';
 		push(nodes, n);
 	});
 
@@ -119,6 +179,7 @@ export function load_lists(uci) {
 			enabled: s.enabled != '0',
 			action: s.action || 'vpn',
 			urls: as_array(s.url),
+			geo: as_array(s.geo),
 			entries: as_array(s.entry),
 			domains: keys(domains),
 			cidrs: keys(cidrs),

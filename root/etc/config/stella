@@ -1,12 +1,30 @@
 
 config stella 'main'
-	option enabled '0'
-	option default_action 'vpn'
+	option enabled '1'
+	option default_action 'zapret'
+	option zapret_games 'Gv1'
+	option zapret_test_yt '1'
+	option dns_mode 'geo'
 	option dns_hijack '1'
-	option block_doh '0'
+	option block_ipv6 '1'
 	option node ''
-	option dns_remote 'https://1.1.1.1/dns-query'
-	option dns_direct 'https://77.88.8.8/dns-query'
+	option select_mode 'best'
+	option warp_auto '1'
 	option log_level 'warning'
 	option socks_port '10808'
 	list lan_ifname 'br-lan'
+
+# YouTube — через Zapret (стратегию подбирает сам автоподбор: сразу и раз в сутки ночью); выше
+# списка заблокированного, где YouTube тоже есть, — срабатывает первый подходящий.
+config list 'list_youtube'
+	option name 'YouTube'
+	option enabled '1'
+	option action 'zapret'
+	list url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Services/youtube.lst'
+
+# Заблокированное в России (itdoginfo) — через VPN.
+config list 'list_ru_blocked'
+	option name 'Заблокировано в России'
+	option enabled '1'
+	option action 'vpn'
+	list url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst'

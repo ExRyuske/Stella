@@ -38,6 +38,14 @@
 			"path": "stella/lists"
 		}
 	},
+	"admin/services/stella/dns": {
+		"title": "DNS",
+		"order": 23,
+		"action": {
+			"type": "view",
+			"path": "stella/dns"
+		}
+	},
 	"admin/services/stella/devices": {
 		"title": "Устройства",
 		"order": 24,

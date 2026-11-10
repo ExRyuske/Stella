@@ -72,3 +72,51 @@ export function parse_list(text) {
 
 	return { domains: sort(keys(domains)), cidrs: sort(keys(cidrs)) };
 };
+
+// Дерево репозитория itdoginfo/allow-domains (ответ GitHub API trees?recursive=1) → готовые
+// списки по группам: [ { group, files: [ путь, … ] } ]. Берутся списки доменов — по стране
+// (Russia/inside-raw.lst …), сервисы и категории; к сервису — его подсети IPv4
+// (Subnets/IPv4/<имя>.lst: сначала то же имя, потом без учёта регистра). Подсети без
+// сервиса — отдельным пунктом. Остальное в репозитории — те же списки в форматах других программ.
+export function itdog_catalog(tree) {
+	let paths = [];
+	for (let e in (type(tree?.tree) == 'array') ? tree.tree : [])
+		if (e?.type == 'blob' && type(e.path) == 'string' && match(e.path, /\.lst$/))
+			push(paths, e.path);
+	let subnets = {};
+	for (let p in paths) {
+		let m = match(p, /^Subnets\/IPv4\/([^\/]+)\.lst$/);
+		if (m)
+			subnets[m[1]] = p;
+	}
+	let used = {};
+	let subnet_of = (name) => {
+		if (subnets[name])
+			return subnets[name];
+		for (let n, p in subnets)
+			if (lc(n) == lc(name))
+				return p;
+		return null;
+	};
+	let res = [];
+	for (let p in sort(paths)) {
+		let m = match(p, /^(Russia|Ukraine)\/[^\/]+-raw\.lst$/) || match(p, /^(Services|Categories)\/[^\/]+\.lst$/);
+		if (!m)
+			continue;
+		let files = [ p ];
+		if (m[1] == 'Services') {
+			let s = subnet_of(match(p, /([^\/]+)\.lst$/)[1]);
+			if (s) {
+				push(files, s);
+				used[s] = true;
+			}
+		}
+		push(res, { group: m[1], files });
+	}
+	// Подсети, у которых нет списка доменов, и дубли имён другого регистра — только если такого
+	// сервиса нет совсем.
+	for (let n, p in subnets)
+		if (!used[p] && !length(filter(res, (r) => r.group == 'Services' && lc(match(r.files[0], /([^\/]+)\.lst$/)[1]) == lc(n))))
+			push(res, { group: 'Services', files: [ p ] });
+	return res;
+};

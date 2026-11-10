@@ -1,0 +1,66 @@
+{
+ "sha": "x",
+ "tree": [
+  {
+   "path": "Categories",
+   "type": "tree"
+  },
+  {
+   "path": "Categories/block.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Russia/inside-kvas.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Russia/inside-raw.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Services",
+   "type": "tree"
+  },
+  {
+   "path": "Services/discord.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Services/hetzner.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Services/youtube.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Subnets/IPv4/Discord.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Subnets/IPv4/Meta.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Subnets/IPv4/discord.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Subnets/IPv4/hetzner.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Subnets/IPv6/discord.lst",
+   "type": "blob"
+  },
+  {
+   "path": "Ukraine/inside-raw.lst",
+   "type": "blob"
+  },
+  {
+   "path": "src/Russia-domains-inside.lst",
+   "type": "blob"
+  }
+ ],
+ "truncated": false
+}

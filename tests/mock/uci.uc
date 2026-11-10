@@ -14,6 +14,7 @@ export function cursor() {
 		load: (pkg) => true,
 		unload: (pkg) => true,
 		get: (pkg, sec, opt) => (opt == null) ? conf[sec]?.['.type'] : conf[sec]?.[opt],
+		get_all: (pkg, sec) => conf[sec] ? { ...conf[sec], '.name': sec } : null,
 		set: (pkg, sec, opt, val) => {
 			if (val == null)
 				conf[sec] = { '.type': opt };
@@ -38,7 +39,8 @@ export function cursor() {
 		commit: (pkg) => writefile(path, sprintf('%J', conf)) != null,
 		foreach: (pkg, type, cb) => {
 			for (let name, s in conf) {
-				if (s['.type'] != type)
+				// Без типа — все секции, как у настоящего uci.
+				if (type != null && s['.type'] != type)
 					continue;
 				if (cb({ ...s, '.name': name, '.anonymous': match(name, /^cfg[0-9a-f]{6}$/) != null }) === false)
 					break;

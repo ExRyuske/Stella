@@ -37,6 +37,9 @@ function args_of_line(line) {
 
 const FS_EXCLUDE = '/opt/zapret/ipset/zapret-hosts-flowseal-exclude.txt';
 
+// Подделки (*.bin) из пакета zapret.
+export const FAKE_DIR = '/opt/zapret/files/fake';
+
 // .bat Flowseal → стратегия. fake_dir — куда положены его файлы-подделки (*.bin).
 export function flowseal_strategy(bat, name, fake_dir) {
 	let args = [];
@@ -116,22 +119,40 @@ export function strategy_text(s) {
 	return join('\n', [ `#${s.name}`, ...s.args ]);
 };
 
-// Отдельные наборы — как у Zapret Manager:
-//   dv — варианты TCP-блока для discord.media (Dv1…); к ним всегда добавляется блок
-//        голоса и видео Discord по UDP;
-//   gv — игры (Gv1…Gv4): UDP-блок с разной отсечкой + общий TCP-блок, на игровых
-//        портах ZMS.
-const FAKE = '/opt/zapret/files/fake';
-const DISCORD_VOICE = [
-	'--filter-udp=19294-19344,50000-50100', '--filter-l7=discord,stun', '--dpi-desync=fake',
-	`--dpi-desync-fake-discord=${FAKE}/stun.bin`, `--dpi-desync-fake-stun=${FAKE}/stun.bin`, '--dpi-desync-repeats=6'
-];
-const DISCORD_TCP = '2053,2083,2087,2096,8443';
-const DISCORD_UDP = '19294-19344,50000-50100';
-export const GAME_PORTS = {
-	udp: '88,1024-2407,2409-4499,4502-19293,19345-49999,50101-65535',
-	tcp: '2099,2802,2302,2502,3478-3480,3724,6000-8000,8085,8090,8100,8903,8904,25565,27015-27030,27036-27037,35500-35600,50001,60442'
-};
+// Отдельные наборы — как у Zapret Manager, из его скрипта:
+//   dv    — варианты TCP-блока для discord.media (Dv1…); к ним добавляется блок голоса
+//           и видео Discord по UDP (voice);
+//   gv    — игры (Gv1…GvN): UDP-блок с разной отсечкой + общий TCP-блок, на игровых портах.
+// Порты очереди каждого набора — из его же ключей --filter-tcp/--filter-udp.
+
+// Строки в кавычках из вызова printf (формат «%s\n» пропускается) — с первого printf в тексте.
+function printf_items(text) {
+	let i = index(text || '', 'printf ');
+	if (i < 0)
+		return [];
+	return filter(map(match(substr(text, i), /"[^"]*"/g) || [], (m) => substr(m[0], 1, length(m[0]) - 2)), (a) => a != '%s\\n' && a != '%s\n');
+}
+
+// Тело функции оболочки «имя() { … }» — до конца строки с её «; }» (с переносами «\»).
+function sh_func(script, name) {
+	let i = index(script || '', `\n${name}() {`);
+	if (i < 0)
+		return null;
+	let body = '';
+	for (let line in split(substr(script, i + 1), '\n')) {
+		body += line + '\n';
+		if (!match(line, /\\$/) && match(line, /; *\}$/))
+			break;
+	}
+	return body;
+}
+
+// Блок ключей без ведущего --new.
+function trim_new(args) {
+	while (length(args) && args[0] == '--new')
+		args = slice(args, 1);
+	return args;
+}
 
 // Zapret-Manager.sh: DvN=$'--ключ\n--ключ…'
 export function zms_discord(script) {
@@ -144,23 +165,73 @@ export function zms_discord(script) {
 	return res;
 };
 
-// Игровые порты из Zapret-Manager.sh (PORTS_UDP="…"; PORTS_TCP="…"), иначе — встроенные.
-export function zms_game_ports(script) {
-	let u = match(script || '', /PORTS_UDP="([0-9,-]+)"/), t = match(script || '', /PORTS_TCP="([0-9,-]+)"/);
-	return { udp: u ? u[1] : GAME_PORTS.udp, tcp: t ? t[1] : GAME_PORTS.tcp };
+// Блок голоса и видео Discord (UDP) — из discord_str_add: ключи до первого набора Dv.
+export function zms_discord_voice(script) {
+	let args = [];
+	for (let a in trim_new(printf_items(sh_func(script, 'discord_str_add'))))
+		if (substr(a, 0, 1) == '#' || a == "'")
+			break;
+		else
+			push(args, a);
+	return (length(args) && match(args[0], /^--filter-udp=/)) ? { name: 'voice', family: 'voice', args } : null;
 };
 
-export function game_strategies(ports) {
-	let tcp_common = [
-		`--filter-tcp=${ports.tcp}`, '--dpi-desync-any-protocol=1', '--dpi-desync-cutoff=n5', '--dpi-desync=multisplit',
-		'--dpi-desync-split-seqovl=582', '--dpi-desync-split-pos=1', `--dpi-desync-split-seqovl-pattern=${FAKE}/stun.bin`
-	];
+// Игровые наборы: strategy_Gv1, strategy_Gv N, strategy_TCP_common и порты PORTS_UDP/PORTS_TCP;
+// сколько их — из меню fix_GAME («for i in 1 2 3 4» или «seq 1 4»).
+export function zms_games(script) {
+	let u = match(script || '', /PORTS_UDP="([0-9,-]+)"/)?.[1], t = match(script || '', /PORTS_TCP="([0-9,-]+)"/)?.[1];
+	let one = printf_items(sh_func(script, 'strategy_Gv1')), gen = printf_items(sh_func(script, 'strategy_Gv'));
+	let tcp = printf_items(sh_func(script, 'strategy_TCP_common'));
+	if (!u || !t || !length(one) || !length(tcp))
+		return [];
+	let fix = sh_func(script, 'fix_GAME') || '';
+	let n = 1;
+	for (let m in match(fix, /for i in ([0-9 ]+); do/g) || [])
+		for (let x in split(trim(m[1]), / +/))
+			n = max(n, +x);
+	for (let m in match(fix, /seq 1 ([0-9]+)/g) || [])
+		n = max(n, +m[1]);
+	let subst = (a, i) => replace(replace(replace(a, '$PORTS_UDP', u), '$PORTS_TCP', t), /\$\{?N\}?/g, `${i}`);
+	let body = (items, i) => trim_new(filter(map(items, (a) => subst(a, i)), (a) => substr(a, 0, 2) == '--'));
 	let res = [];
-	for (let n = 1; n <= 4; n++) {
-		let udp = (n == 1)
-			? [ `--filter-udp=${ports.udp}`, '--dpi-desync=fake', '--dpi-desync-cutoff=d2', '--dpi-desync-any-protocol=1', `--dpi-desync-fake-unknown-udp=${FAKE}/stun.bin` ]
-			: [ `--filter-udp=${ports.udp}`, '--dpi-desync=fake', '--dpi-desync-repeats=10', '--dpi-desync-any-protocol=1', `--dpi-desync-fake-unknown-udp=${FAKE}/stun.bin`, `--dpi-desync-cutoff=n${n}` ];
-		push(res, { name: `Gv${n}`, family: 'gv', args: [ ...udp, '--new', ...tcp_common ], tcp_ports: ports.tcp, udp_ports: ports.udp });
+	for (let i = 1; i <= n; i++) {
+		let udp = (i == 1) ? body(one, i) : (length(gen) ? body(gen, i) : null);
+		if (udp)
+			push(res, { name: `Gv${i}`, family: 'gv', args: [ ...udp, '--new', ...body(tcp, i) ] });
+	}
+	return res;
+};
+
+// Домены Google Play, которые Zapret Manager дописывает к хостлисту Google (ADD_GP_DOMAINS).
+export function zms_gp_domains(script) {
+	return filter(printf_items(sh_func(script, 'ADD_GP_DOMAINS')), (d) => match(d, /^[a-z0-9.-]+\.[a-z]+$/));
+};
+
+// Домены проверки YouTube у Zapret Manager (DOMAINS="…") — по одному на домен второго уровня:
+// там десятки узлов googlevideo, а проверка каждой стратегии по всем шла бы минутами.
+export function zms_yt_targets(script) {
+	let m = match(script || '', /(^|\n)DOMAINS="([^"]*)"/);
+	let res = [], seen = {};
+	for (let d in split(m?.[2] || '', /[ \t]+/)) {
+		if (!match(d, /^[a-z0-9.-]+\.[a-z]+$/))
+			continue;
+		let p = split(d, '.');
+		let base = `${p[length(p) - 2]}.${p[length(p) - 1]}`;
+		if (!seen[base]) {
+			seen[base] = true;
+			push(res, d);
+		}
+	}
+	return res;
+};
+
+// Порты из ключей --filter-tcp/--filter-udp блока: { tcp: [ … ], udp: [ … ] }.
+export function block_ports(args) {
+	let res = { tcp: [], udp: [] };
+	for (let a in args || []) {
+		let m = match(a, /^--filter-(tcp|udp)=([0-9,-]+)$/);
+		if (m)
+			push(res[m[1]], m[2]);
 	}
 	return res;
 };
@@ -186,24 +257,19 @@ export const HOSTLISTS = {
 	google: {
 		pkg: '/opt/zapret/ipset/zapret-hosts-google.txt',
 		url: 'https://raw.githubusercontent.com/remittor/zapret-openwrt/zap1/zapret/ipset/zapret-hosts-google.txt',
-		// Домены Google Play, которые Zapret Manager дописывает к этому списку.
-		extra: [ 'gvt1.com', 'googleplay.com', 'play.google.com', 'beacons.gvt2.com', 'play.googleapis.com',
-			'play-fe.googleapis.com', 'lh3.googleusercontent.com', 'android.clients.google.com',
-			'connectivitycheck.gstatic.com', 'play-lh.googleusercontent.com', 'play-games.googleusercontent.com',
-			'prod-lt-playstoregatewayadapter-pa.googleapis.com', 'youtubei.youtube.com' ]
+		// Домены Google Play, которые Zapret Manager дописывает к этому списку, — из его скрипта.
+		zms_extra: true
 	},
 	exclude: {
 		pkg: '/opt/zapret/ipset/zapret-hosts-user-exclude.txt',
-		url: 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main/zapret-hosts-user-exclude.txt',
-		extra: []
+		url: 'https://raw.githubusercontent.com/StressOzz/Zapret-Manager/main/zapret-hosts-user-exclude.txt'
 	},
 	// Свои исключения у стратегий Flowseal (Steam, Epic, Microsoft, VK, банки…). В пакете zapret
 	// такого файла нет: путь условный, его заменяет своя копия, а без неё — список ZMS.
 	exclude_fs: {
 		pkg: FS_EXCLUDE,
 		url: 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/lists/list-exclude.txt',
-		fallback: '/opt/zapret/ipset/zapret-hosts-user-exclude.txt',
-		extra: []
+		fallback: '/opt/zapret/ipset/zapret-hosts-user-exclude.txt'
 	}
 };
 
@@ -249,17 +315,20 @@ export function merge_ports(list) {
 
 // Итоговые ключи nfqws и порты очереди. YouTube — первым: nfqws берёт первый подходящий
 // профиль, а Yv ограничены доменами YouTube и остальному не мешают.
-// opts: { main: [ключи], yt: стратегия | null, discord: стратегия | null,
-//         games: стратегия | null, games_fake: путь | null, discord_fake: путь | null,
+// opts: { main: [ключи], yt: стратегия | null, discord: стратегия | null, voice: блок голоса
+//         Discord | null, games: стратегия | null, games_fake: путь | null, discord_fake: путь | null,
 //         tcp_ports, udp_ports }
+// Порты Discord и игр — из ключей их блоков.
 export function compose(opts) {
 	let blocks = [ opts.yt?.args, opts.main ];
+	let extra = [];
 	if (opts.discord) {
 		// Своя подделка для голоса Discord — как смена fake в Zapret Manager.
-		let voice = opts.discord_fake
-			? map(DISCORD_VOICE, (a) => match(a, /^--dpi-desync-fake-(discord|stun)=/) ? replace(a, /=.*$/, `=${opts.discord_fake}`) : a)
-			: DISCORD_VOICE;
+		let voice = opts.voice?.args || [];
+		if (opts.discord_fake)
+			voice = map(voice, (a) => match(a, /^--dpi-desync-fake-(discord|stun)=/) ? replace(a, /=.*$/, `=${opts.discord_fake}`) : a);
 		push(blocks, voice, opts.discord.args);
+		push(extra, ...voice, ...opts.discord.args);
 	}
 	if (opts.games) {
 		// Своя подделка для игр — как пункт «сменить fake» в Zapret Manager.
@@ -267,6 +336,7 @@ export function compose(opts) {
 		if (opts.games_fake)
 			g = map(g, (a) => (substr(a, 0, 30) == '--dpi-desync-fake-unknown-udp=') ? `--dpi-desync-fake-unknown-udp=${opts.games_fake}` : a);
 		push(blocks, g);
+		push(extra, ...g);
 	}
 
 	let args = [];
@@ -282,13 +352,8 @@ export function compose(opts) {
 		push(tcp, opts.tcp_ports || '80,443');
 		push(udp, opts.udp_ports || '443');
 	}
-	if (opts.discord) {
-		push(tcp, DISCORD_TCP);
-		push(udp, DISCORD_UDP);
-	}
-	if (opts.games) {
-		push(tcp, opts.games.tcp_ports || GAME_PORTS.tcp);
-		push(udp, opts.games.udp_ports || GAME_PORTS.udp);
-	}
+	let p = block_ports(extra);
+	push(tcp, ...p.tcp);
+	push(udp, ...p.udp);
 	return { args, tcp_ports: merge_ports(tcp), udp_ports: merge_ports(udp) };
 };

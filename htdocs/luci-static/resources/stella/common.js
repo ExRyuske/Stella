@@ -1,15 +1,10 @@
 'use strict';
 'require baseclass';
-'require uci';
+'require rpc';
 'require ui';
 
 // Общее для страниц Stella: стили, иконки, выпадающие списки с готовыми вариантами, время,
-// склонение, настройки.
-//
-// Настройки меняются, как в формах OpenWrt: правка поля копится в uci браузера, «Сохранить» отдаёт
-// её роутеру, «Сохранить и применить» — применяет (служба перезагружается сама). Добавление,
-// удаление и «Сохранить» в окне, как у таблиц LuCI, отдаются роутеру сразу (push) и видны в
-// «Unsaved Changes».
+// склонение, сохранение настроек.
 //
 // Иконки — свои SVG одного размера и цвета текста: символы Юникода (⏱ ⟳ ⚙) в каждом
 // шрифте рисуются по-своему, и кнопки выходили разной высоты.
@@ -26,55 +21,12 @@ const PATHS = {
 	star: '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/>'
 };
 
-// Значения по умолчанию и проверка настроек main.
-const IPV4_DNS = (v) => (/^([a-z+]+:\/\/)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/).test(v);
-const PORTS = (v) => v == '' || (/^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$/).test(v);
-const HOURS_OK = (v) => (/^[0-9]{1,4}$/).test(v) && +v <= 8760;
-const DAYS_OK = (v) => (/^[0-9]{1,3}$/).test(v);
-const SETTINGS = {
-	enabled: [ '0' ],
-	default_action: [ 'vpn' ],
-	dns_remote: [ 'https://1.1.1.1/dns-query', (v) => v != '', _('DNS через VPN') ],
-	dns_direct: [ 'https://77.88.8.8/dns-query', IPV4_DNS, _('DNS напрямую: нужен адрес IPv4') ],
-	dns_hijack: [ '1' ],
-	block_doh: [ '0' ],
-	log_level: [ 'warning' ],
-	select_mode: [ 'single' ],
-	sub_interval: [ '12', HOURS_OK, _('Обновление подписок') ],
-	best_from: [ '' ],
-	best_interval: [ '6', HOURS_OK, _('Подбор узла') ],
-	node_missing: [ 'stop' ],
-	backup_iface: [ '' ],
-	backup_node: [ '' ],
-	backup_vpn: [ '0' ],
-	backup_mode: [ 'single' ],
-	backup_best_from: [ '' ],
-	backup_best_interval: [ '6', HOURS_OK, _('Подбор узла резервного канала') ],
-	lists_interval: [ '24', HOURS_OK, _('Обновление списков') ],
-	upgrade_interval: [ '24', HOURS_OK, _('Автообновление') ],
-	zapret_bin: [ '' ],
-	zapret_opts: [ '' ],
-	zapret_strategy: [ '' ],
-	zapret_yt: [ '' ],
-	zapret_discord: [ '' ],
-	zapret_games: [ '' ],
-	zapret_games_fake: [ '' ],
-	zapret_discord_fake: [ '' ],
-	zapret_exclude: [ '' ],
-	zapret_test_main: [ '0', DAYS_OK, _('Автоподбор основной') ],
-	zapret_test_yt: [ '0', DAYS_OK, _('Автоподбор YouTube') ],
-	zapret_tcp_ports: [ '80,443', PORTS, _('Порты TCP') ],
-	zapret_udp_ports: [ '443', PORTS, _('Порты UDP') ]
-};
+const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
 
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 6;
-
-// Идущая отправка правок роутеру (push): пока она не закончилась, uci браузера перечитывает
-// конфиг и бывает пуст.
-let saving = Promise.resolve();
+const API = 14;
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -83,38 +35,34 @@ const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ],
 // Пункт «-- Please choose --» Combobox добавляет всегда (optional у него не отключить), а
 // значение у наших списков есть всегда — в раскрытом списке он скрыт (правило темы с
 // !important перебивается тем же селектором с body впереди; стили — только на страницах Stella).
-// Один шаблон для всех страниц: заголовок; рамка с настройками страницы (st-card: подписи
-// слева, под значением — серое пояснение st-hint); строка кнопок (st-bar: «Добавить» слева,
-// поиск растягивается, значки справа); содержимое в рамке (st-box); дальше разделы — h3 и
-// снова st-card.
+// Страницы Stella — из стоковых частей LuCI, в одном стиле с главной («Состояние → Обзор»):
+// разделы cbi-section с заголовком h3, строки «подпись | значение» — таблицей (подпись слева,
+// треть ширины) и на страницах, и в окнах, пояснения cbi-value-description, таблицы
+// cbi-section-table с заглушкой, когда пусто, сортировкой по заголовку столбца (как у таблиц
+// форм LuCI) и «Добавить» под ними (cbi-section-create). Своё — только то, чего в LuCI нет:
+// звёздочки, цвета задержки и состояний, строка поиска.
 const CSS = `
-.st-card { display:grid; grid-template-columns:max-content 1fr; gap:.6em 1.2em; align-items:baseline; padding:1em; border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:1em }
-.st-card > .st-k { opacity:.65 }
-.st-card > .st-wide { grid-column:1 / -1 }
-.st-card > hr { grid-column:1 / -1; width:100%; margin:.1em 0; border:0; border-top:1px solid rgba(128,128,128,.2) }
-.st-card .cbi-dropdown { min-width:12em; max-width:100% }
-.st-row { display:flex; flex-wrap:wrap; gap:.4em .8em; align-items:center }
-.st-hint, .st-full { flex-basis:100% }
-.st-hint { font-size:90%; opacity:.55 }
+.st-info .cbi-dropdown { min-width:12em; max-width:100% }
+.st-info .cbi-dynlist { min-width:20em }
+.modal .st-info .td:first-child { width:30% }
+.modal .st-info textarea, .modal .st-info input[type=text] { width:100% }
+.st-row { display:flex; flex-wrap:wrap; gap:.4em .8em; align-items:center; min-height:30px }
+.st-full { flex-basis:100% }
+.st-row > .cbi-value-description { flex-basis:100%; margin-top:0 }
 .st-bar { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:0 0 1em }
 .st-bar input[type=text] { flex:1; min-width:10em }
-.st-box { border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:1em; overflow:hidden }
-.st-box > p { margin:.8em 1em }
-.st-table { width:100%; border-collapse:collapse; margin:0 }
-.st-table td, .st-table th { padding:.35em .6em; border-bottom:1px solid rgba(128,128,128,.15); vertical-align:middle; text-align:left }
-.st-table tr:last-child td { border-bottom:0 }
-.st-table th { font-weight:normal; opacity:.6; font-size:90% }
-.st-table .st-dim { font-size:85% }
+.st-table .td, .st-table .th { vertical-align:middle }
+.st-table .st-dim { font-size:90% }
 body .cbi-dropdown[optional][open] > ul.dropdown > li[placeholder] { display:none !important }
-.st-act, .st-table td.st-act { text-align:right; white-space:nowrap; width:1% }
-.st-act .btn { line-height:1.8em; min-height:0 }
-.st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.55 }
+.st-act, .table .td.st-act { text-align:right; white-space:nowrap; width:1% }
+.st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.6 }
 .st-ico { display:inline-block; vertical-align:middle; line-height:1 }
 .st-ico svg { display:block; width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round }
 .st-ico.filled svg { fill:currentColor }
 .btn.st-ib { min-width:2.4em; padding-left:.55em; padding-right:.55em; text-align:center }
 .btn.st-ib .st-ico { margin:0 auto }
 .btn.st-ib.on { background:rgba(60,140,220,.25) }
+@media (max-width:854px) { .st-info .td:first-child { flex-basis:100%; font-weight:bold } .st-info .td + .td { flex-basis:100% } }
 `;
 
 function injectCss() {
@@ -159,14 +107,105 @@ return baseclass.extend({
 			.then(() => { location.reload(); return new Promise(() => {}); });
 	},
 
-	// Строка рамки: подпись слева, значения справа (в строку; пояснение st-hint — под ними).
+	// Строка «подпись | значение», как на «Состояние → Обзор»: подпись слева, треть ширины,
+	// значения в строку, пояснение под ними. Массив — чтобы строки собирались через «...».
 	kv(label, value, title) {
-		return [ E('span', { 'class': 'st-k', 'title': title || null }, label), E('div', { 'class': 'st-row' }, value) ];
+		return [ E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td left', 'width': '33%', 'title': title || null }, label),
+			E('td', { 'class': 'td left' }, E('div', { 'class': 'st-row' }, value))
+		]) ];
 	},
 
-	// Серое пояснение под значением в строке рамки.
+	// Строки kv — таблицей.
+	card(rows, cls) {
+		return E('table', { 'class': 'table st-info' + (cls ? ' ' + cls : '') }, rows);
+	},
+
+	info(label, value, title) {
+		return this.kv(label, value, title);
+	},
+
+	infoTable(rows, cls) {
+		return this.card(rows, cls);
+	},
+
+	// Флажок, как у форм LuCI (ui.Checkbox): подпись — у строки, рядом только флажок.
+	checkbox(on, onchange) {
+		const w = new ui.Checkbox(on ? '1' : '0', { value_enabled: '1', value_disabled: '0' });
+		const el = w.render();
+		el.addEventListener('widget-change', () => onchange(w.isChecked()));
+		return el;
+	},
+
+	// Пояснение под значением — как у полей форм LuCI.
 	hint(text) {
-		return E('div', { 'class': 'st-hint' }, [ text ]);
+		return E('div', { 'class': 'cbi-value-description' }, [ text ]);
+	},
+
+	// Раздел страницы, как у форм LuCI: cbi-section, заголовок h3 внутри.
+	section(title, content) {
+		return E('div', { 'class': 'cbi-section' }, [ title ? E('h3', {}, title) : '', ...[].concat(content) ]);
+	},
+
+	// Таблица LuCI: на телефоне тема показывает строки карточками, подписи — из заголовков
+	// столбцов (data-title у ячеек). heads — [ подпись | [ подпись, атрибуты ] ]; empty — текст
+	// заглушки, когда строк нет.
+	table(heads, rows, cls, empty) {
+		return E('table', { 'class': 'table cbi-section-table st-table' + (cls ? ' ' + cls : '') }, [
+			E('tr', { 'class': 'tr table-titles' }, heads.map((h) => Array.isArray(h) ? E('th', Object.assign({ 'class': 'th' }, h[1]), h[0]) : E('th', { 'class': 'th' }, h))),
+			...(rows.length || !empty ? rows : [ E('tr', { 'class': 'tr placeholder' }, E('td', { 'class': 'td' }, E('em', {}, [ empty ]))) ])
+		]);
+	},
+
+	// Заголовок столбца с сортировкой, как у таблиц форм LuCI: щелчок — по возрастанию, ещё раз —
+	// по убыванию; стрелку рисует тема (data-sort-direction). state — { key, desc } страницы.
+	sortHead(label, key, state, onchange) {
+		return [ label, {
+			'data-sortable-row': '',
+			'data-sort-direction': (state.key == key) ? (state.desc ? 'desc' : 'asc') : null,
+			'title': _('Сортировать'),
+			'click': () => {
+				state.desc = (state.key == key) ? !state.desc : false;
+				state.key = key;
+				onchange();
+			}
+		} ];
+	},
+
+	// Упорядочить по state: value(x, key) — значение для сравнения (строка или число).
+	sorted(list, state, value) {
+		if (!state.key)
+			return list;
+		const v = (x) => value(x, state.key);
+		return list.slice().sort((a, b) => {
+			const x = v(a), y = v(b);
+			const r = (typeof x == 'number' && typeof y == 'number') ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' });
+			return state.desc ? -r : r;
+		});
+	},
+
+	tr(cells, cls) {
+		return E('tr', { 'class': 'tr' + (cls ? ' ' + cls : '') }, cells);
+	},
+
+	td(title, content, cls, attrs) {
+		return E('td', Object.assign({ 'class': 'td' + (cls ? ' ' + cls : ''), 'data-title': title || null }, attrs || {}), content);
+	},
+
+	// «Добавить» под таблицей, как у таблиц форм LuCI.
+	create(label, handler) {
+		return E('div', { 'class': 'cbi-section-create' },
+			E('button', { 'class': 'btn cbi-button cbi-button-add', 'click': handler }, label));
+	},
+
+	// Кнопка в строке таблицы, как в таблицах форм LuCI: cls — edit, remove, action…
+	rowButton(label, cls, handler) {
+		return E('button', { 'class': 'btn cbi-button cbi-button-' + cls, 'click': ui.createHandlerFn(this, handler) }, label);
+	},
+
+	// Поле в окне — такой же строкой «подпись | значение», окно собирает их в card().
+	field(label, content) {
+		return this.kv(label, [].concat(content))[0];
 	},
 
 	dim(text) {
@@ -222,46 +261,15 @@ return baseclass.extend({
 		return E('span', {}, [ text, ' ', this.dim(note) ]);
 	},
 
-	// Настройки main с несохранёнными правками; нет значения — по умолчанию.
-	cfg() {
-		return new Proxy({}, { get: (t, k) => uci.get('stella', 'main', k) ?? (SETTINGS[k] || [])[0] });
-	},
-
-	// Изменить настройки main (до «Сохранить»). Неверное значение — уведомление, и ничего не
-	// меняется. Промис — изменилось ли.
+	// Сохранить настройки (rpc settings_set); ошибку — уведомлением. Промис — сохранилось ли.
 	saveSettings(values) {
-		for (const k in values) {
-			const v = Array.isArray(values[k]) ? values[k] : String(values[k] ?? '').trim();
-			const check = (SETTINGS[k] || [])[1];
-			if (check && !Array.isArray(v) && !check(v)) {
-				ui.addNotification(null, E('p', {}, [ _('%s: некорректное значение').format(SETTINGS[k][2]) ]), 'danger');
-				return Promise.resolve(false);
+		return callSettingsSet(values).then((r) => {
+			if (r && r.error) {
+				ui.addNotification(null, E('p', {}, r.error), 'danger');
+				return false;
 			}
-		}
-		for (const k in values) {
-			const v = Array.isArray(values[k]) ? values[k] : String(values[k] ?? '').trim();
-			(v === '' || (Array.isArray(v) && !v.length)) ? uci.unset('stella', 'main', k) : uci.set('stella', 'main', k, v);
-		}
-		return Promise.resolve(true);
-	},
-
-	// Отдать правки роутеру без применения — как LuCI после «Добавить», «Удалить» и «Сохранить» в
-	// окне таблицы. Отправки идут по очереди; ошибка — уведомление.
-	push() {
-		saving = saving.then(() => uci.save()).catch((e) => {
-			ui.addNotification(null, E('p', {}, [ _('Не удалось сохранить: %s').format(e.message || e) ]), 'danger');
+			return true;
 		});
-		return saving;
-	},
-
-	// Перед чтением uci: дождаться идущей отправки.
-	saved() {
-		return saving;
-	},
-
-	// Имя новой секции: постоянное (на нём держатся id узлов, кэш подписки, содержимое списка).
-	newId(prefix) {
-		return prefix + '_' + ('0000000' + (Math.random() * 0xffffffff >>> 0).toString(16)).slice(-8);
 	},
 
 	plural(n, one, few, many) {
@@ -269,3 +277,4 @@ return baseclass.extend({
 		return (m10 == 1 && m100 != 11) ? one : (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) ? few : many;
 	}
 });
+

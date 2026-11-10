@@ -4,46 +4,47 @@
 'require ui';
 'require poll';
 'require dom';
-'require uci';
 'require stella.common as sui';
 
 const callNodes = rpc.declare({ object: 'stella', method: 'nodes' });
+const callSelect = rpc.declare({ object: 'stella', method: 'select', params: [ 'id' ] });
 const callUpdate = rpc.declare({ object: 'stella', method: 'update', params: [ 'id' ] });
 const callPing = rpc.declare({ object: 'stella', method: 'ping', params: [ 'ids' ] });
+const callAdd = rpc.declare({ object: 'stella', method: 'add', params: [ 'text', 'name' ] });
+const callEdit = rpc.declare({ object: 'stella', method: 'edit', params: [ 'id', 'name', 'url', 'user_agent', 'enabled' ] });
+const callRemove = rpc.declare({ object: 'stella', method: 'remove', params: [ 'id' ] });
+const callAuto = rpc.declare({ object: 'stella', method: 'auto_set', params: [ 'mode', 'id', 'on' ] });
 const callPick = rpc.declare({ object: 'stella', method: 'node_pick', params: [ 'backup' ] });
 const callWarp = rpc.declare({ object: 'stella', method: 'warp', params: [ 'name' ] });
-
-// Узлов в автовыборе ★ — не больше, чем у роутера (AUTO_MAX).
-const AUTO_MAX = 30;
+const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 
 const PROTO = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'SS', hysteria: 'Hysteria2', wireguard: 'WireGuard' };
 const NET = { raw: 'TCP', xhttp: 'XHTTP', ws: 'WS', httpupgrade: 'HTTPUpgrade', grpc: 'gRPC' };
 
 const CSS = `
-.st-group { border:1px solid rgba(128,128,128,.3); border-radius:4px; margin-bottom:.6em }
-.st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; padding:.45em .8em; cursor:pointer; list-style:none }
+.st-group { margin-bottom:1.5em }
+.st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; cursor:pointer; list-style:none; padding:.2em 0 .5em }
 .st-group > summary::-webkit-details-marker { display:none }
 .st-group > summary::before { content:'▸'; width:1em; opacity:.6 }
 .st-group[open] > summary::before { content:'▾' }
-.st-group .st-title { font-weight:bold }
-.st-group .st-meta { opacity:.6; font-size:85% }
-.st-group .st-actions { margin-left:auto; display:flex; gap:.25em }
-.st-group .st-actions .btn { line-height:1.7em; min-height:0 }
-.st-list { max-height:24em; overflow-y:auto; border-top:1px solid rgba(128,128,128,.3) }
-.st-list table { width:100%; border-collapse:collapse; margin:0 }
-.st-list td { padding:.3em .6em; border-bottom:1px solid rgba(128,128,128,.1); vertical-align:middle }
-.st-list tr.st-sel td { background:rgba(60,160,60,.14) }
-.st-list tr:hover td { background:rgba(128,128,128,.07) }
-.st-list .st-type { display:block; opacity:.5; font-size:80%; line-height:1.2 }
-.st-ping { white-space:nowrap; text-align:right; width:5.5em; font-size:90% }
-@media (hover:hover) { .st-list tr:not(:hover) .st-act .btn { visibility:hidden } }
+.st-group > summary > h3 { display:inline; margin:0; padding:0; border:0 }
+.st-group .st-meta { opacity:.6; font-size:90% }
+.st-group .st-actions { margin-left:auto; display:flex; flex-wrap:wrap; gap:.25em }
+.st-list { max-height:32em; overflow-y:auto }
+.st-nodes { margin:0 }
+.st-nodes .tr.st-sel .td { background:rgba(60,160,60,.14) }
+.st-nodes .td.st-starcell { width:1.5em }
+.st-nodes .st-type { display:block; opacity:.6; font-size:85% }
+.st-ping { white-space:nowrap; text-align:right; width:5.5em }
+@media (hover:hover) { .st-nodes .tr:not(:hover) .st-act .btn { visibility:hidden } }
+@media (max-width:854px) { .st-nodes .tr { flex-wrap:nowrap; align-items:center } .st-nodes .td { flex:0 0 auto } .st-nodes .td.st-name { flex:1 1 auto } }
 .st-star { cursor:pointer; color:#d9a400; user-select:none; display:inline-flex }
 .st-star.off { color:inherit; opacity:.3 }
 `;
 
 function typeLabel(n) {
-	if (n.pending)
-		return _('после применения');
+	if (n.warp)
+		return 'WARP';
 	let t = PROTO[n.protocol] || n.protocol;
 	if (n.protocol == 'hysteria' || n.protocol == 'shadowsocks' || n.protocol == 'wireguard')
 		return t;
@@ -80,7 +81,7 @@ function pingValue(v) {
 
 function smallBtn(label, title, handler, cls) {
 	return E('button', {
-		'class': 'btn cbi-button ' + (cls || ''),
+		'class': 'btn cbi-button ' + (cls || 'cbi-button-action'),
 		'title': title || '',
 		'click': (ev) => { ev.preventDefault(); ev.stopPropagation(); return handler(ev); }
 	}, label);
@@ -88,55 +89,23 @@ function smallBtn(label, title, handler, cls) {
 
 return view.extend({
 	filter: '',
-	sortByPing: false,
+	// Сортировка узлов — по заголовку столбца: { key: name | ping, desc }.
+	sort: {},
 	open: null,
 
 	load() {
-		return sui.need(6).then(() => Promise.all([ callNodes(), uci.load('stella') ]));
-	},
-
-	// Данные страницы: состояние узлов — с роутера, а подписки, отдельные ссылки, выбор и ★ — из
-	// настроек с несохранёнными правками (узлы новой подписки появятся после применения).
-	merge(raw) {
-		const d = Object.assign({}, raw);
-		const counts = {};
-		for (const x of raw.sources)
-			counts[x.id] = x;
-		d.sources = uci.sections('stella', 'subscription').map((s) => ({
-			id: s['.name'], kind: 'subscription', name: s.name || s['.name'], url: s.url, user_agent: s.user_agent || '',
-			enabled: s.enabled != '0', updated: (counts[s['.name']] || {}).updated, count: (counts[s['.name']] || {}).count || 0
-		}));
-		const links = uci.sections('stella', 'node');
-		const known = {};
-		for (const s of links)
-			known[s['.name']] = s;
-		const subOn = {};
-		for (const x of d.sources)
-			subOn[x.id] = x.enabled;
-		d.nodes = raw.nodes.filter((n) => (n.source == 'manual') ? known[n.id] : subOn[n.source]).map((n) =>
-			(n.source == 'manual' && known[n.id].name) ? Object.assign({}, n, { name: known[n.id].name }) : n);
-		for (const s of links)
-			if (!raw.nodes.find((n) => n.id == s['.name']) && !raw.errors.find((e) => e.id == s['.name']))
-				d.nodes.push({ id: s['.name'], name: s.name || (s.link || '').replace(/^[^#]*#?/, '') || s['.name'], source: 'manual', pending: true });
-		d.errors = raw.errors.filter((e) => known[e.id]);
-		if (d.nodes.some((n) => n.source == 'manual') || d.errors.length)
-			d.sources.push({ id: 'manual', kind: 'manual', name: 'manual', enabled: true, count: d.nodes.filter((n) => n.source == 'manual').length });
-		d.selected = this.cfg.node;
-		d.select_mode = this.cfg.select_mode;
-		d.auto_nodes = L.toArray(uci.get('stella', 'main', 'auto_node'));
-		return d;
+		return sui.need(14).then(() => Promise.all([ callNodes(), callSettings() ]));
 	},
 
 	refresh() {
-		return callNodes().then((raw) => sui.saved().then(() => raw)).then((raw) => {
-			const data = this.merge(raw);
+		return callNodes().then((data) => {
 			const wasUpdating = this.data && this.data.updating;
 			const wasWarping = this.data && this.data.warping;
 			const same = this.data && this.signature(this.data) == this.signature(data);
 			this.data = data;
 			// Во время опроса меняются только задержки и счётчики — обновляем их на месте,
 			// иначе перерисовка сбрасывает прокрутку.
-			if (same && !this.sortByPing)
+			if (same && !this.sort.key)
 				this.updateInPlace();
 			else
 				this.renderAll();
@@ -152,25 +121,19 @@ return view.extend({
 			}
 			if (wasUpdating && !data.updating && data.update_log)
 				ui.addNotification(_('Обновление подписок'), E('pre', { 'style': 'white-space:pre-wrap' }, [ data.update_log ]), 'info');
-			// Узел WARP роутер записал в настройки сам — страница перечитывается, чтобы его показать.
-			if (wasWarping && !data.warping) {
+			if (wasWarping && !data.warping)
 				ui.addNotification(_('WARP'), E('pre', { 'style': 'white-space:pre-wrap' }, [ data.warp_log || '' ]), 'info');
-				window.setTimeout(() => location.reload(), 3000);
-			}
 		});
-	},
-
-	// Правка поля — до «Сохранить»; добавление, удаление и «Сохранить» в окне отдаются роутеру
-	// сразу, как в таблицах LuCI. Страница перерисовывается из настроек.
-	redraw() {
-		return this.refresh();
 	},
 
 	/* действия */
 
 	handleSelect(id) {
-		uci.set('stella', 'main', 'node', id);
-		return this.redraw();
+		return callSelect(id).then((r) => {
+			if (r && r.error)
+				ui.addNotification(null, E('p', {}, r.error), 'danger');
+			return this.refresh();
+		});
 	},
 
 	handleUpdate(id) {
@@ -181,19 +144,10 @@ return view.extend({
 		return callPing(ids || []).then(() => this.refresh());
 	},
 
-	// Удаление подписки или ссылки; отметки ★ и узел резервного канала, которые на неё указывали, — тоже.
 	handleRemove(id, what) {
 		if (!confirm(_('Удалить «%s»?').format(what)))
 			return;
-		uci.remove('stella', id);
-		const mine = (x) => x == id || x.indexOf(id + '_') == 0;
-		const auto = L.toArray(uci.get('stella', 'main', 'auto_node'));
-		if (auto.some(mine))
-			sui.saveSettings({ auto_node: auto.filter((x) => !mine(x)) });
-		const bn = uci.get('stella', 'main', 'backup_node');
-		if (bn && mine(bn))
-			uci.unset('stella', 'main', 'backup_node');
-		return sui.push().then(() => this.redraw());
+		return callRemove(id).then(() => this.refresh());
 	},
 
 	showAdd() {
@@ -203,48 +157,31 @@ return view.extend({
 		});
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'placeholder': _('необязательно') });
 
-		// Строки http(s):// — подписки, остальные — ссылки на узлы; узлы подписок загрузятся после применения.
-		const add = () => {
-			const lines = text.value.split(/\r?\n/).map((l) => l.trim()).filter((l) => l);
-			const bad = lines.filter((l) => !(/^[a-z0-9]+:\/\/\S+$/i).test(l));
-			if (!lines.length || bad.length)
-				return ui.addNotification(null, E('p', {}, [ bad.length ? _('Не ссылка: «%s»').format(bad[0].slice(0, 48)) : _('Ничего не вставлено.') ]), 'warning');
-			const one = lines.length == 1 && name.value.trim();
-			for (const l of lines) {
-				const sub = (/^https?:\/\//i).test(l);
-				const sid = uci.add('stella', sub ? 'subscription' : 'node', sui.newId(sub ? 'sub' : 'node'));
-				if (sub) {
-					uci.set('stella', sid, 'name', one || l.replace(/^https?:\/\/([^\/:?#]+).*$/i, '$1'));
-					uci.set('stella', sid, 'url', l);
-					uci.set('stella', sid, 'enabled', '1');
-				}
-				else {
-					if (one)
-						uci.set('stella', sid, 'name', one);
-					uci.set('stella', sid, 'link', l);
-				}
-			}
-			ui.hideModal();
-			return sui.push().then(() => this.redraw());
-		};
-
 		ui.showModal(_('Добавить серверы'), [
-			E('p', {}, _('Подписка или ссылки на серверы, по одной в строке.')),
-			text,
-			E('p', {}, [ _('Название'), name ]),
-			E('div', { 'style': 'display:flex;gap:.5em' }, [
-				E('button', {
-					'class': 'btn cbi-button',
-					'title': _('Бесплатный узел Cloudflare WARP'),
-					'disabled': this.data.warping ? '' : null,
-					'click': ui.createHandlerFn(this, () => {
-						ui.hideModal();
-						return callWarp(name.value.trim() || undefined).then(() => this.refresh());
-					})
-				}, _('Создать WARP')),
-				E('span', { 'style': 'flex:1' }),
+			sui.card([
+				sui.field(_('Подписка или ссылки'), [ text, sui.hint(_('По одной в строке.')) ]),
+				sui.field(_('Название'), name)
+			]),
+			E('div', { 'class': 'button-row' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, add) }, _('Добавить'))
+				E('button', {
+					'class': 'btn cbi-button-positive',
+					'click': ui.createHandlerFn(this, () => {
+						return callAdd(text.value, name.value.trim() || undefined).then((r) => {
+							ui.hideModal();
+							const msg = [];
+							if (r.subscriptions)
+								msg.push(_('Добавлено подписок: %d, загружаю узлы…').format(r.subscriptions));
+							if (r.links)
+								msg.push(_('Добавлено ссылок: %d').format(r.links));
+							for (const e of (r.errors || []))
+								msg.push(_('Не разобрано «%s…»: %s').format(e.line, e.error));
+							if (msg.length)
+								ui.addNotification(null, msg.map((m) => E('p', {}, [ m ])), (r.errors && r.errors.length) ? 'warning' : 'info');
+							return this.refresh();
+						});
+					})
+				}, _('Добавить'))
 			])
 		]);
 		text.focus();
@@ -254,13 +191,13 @@ return view.extend({
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.name });
 		const url = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.url || '' });
 		const ua = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.user_agent, 'placeholder': 'v2rayN/7.0' });
-		const en = E('input', { 'type': 'checkbox', 'checked': src.enabled ? '' : null });
 
 		ui.showModal(_('Подписка'), [
-			E('p', {}, [ _('Название'), name ]),
-			E('p', {}, [ _('URL'), url ]),
-			E('p', {}, [ _('User-Agent'), ua ]),
-			E('p', {}, E('label', {}, [ en, ' ', _('Включена') ])),
+			sui.card([
+				sui.field(_('Название'), name),
+				sui.field(_('Ссылка'), url),
+				sui.field(_('User-Agent'), ua)
+			]),
 			E('div', { 'style': 'display:flex;gap:.5em' }, [
 				E('button', {
 					'class': 'btn cbi-button-negative',
@@ -271,13 +208,12 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-positive',
 					'click': ui.createHandlerFn(this, () => {
-						if (!(/^https?:\/\/\S+$/).test(url.value.trim()))
-							return ui.addNotification(null, E('p', {}, _('Нужна ссылка http(s)://')), 'danger');
-						for (const [ k, v ] of [ [ 'name', name.value.trim() ], [ 'url', url.value.trim() ], [ 'user_agent', ua.value.trim() ] ])
-							v ? uci.set('stella', src.id, k, v) : uci.unset('stella', src.id, k);
-						uci.set('stella', src.id, 'enabled', en.checked ? '1' : '0');
-						ui.hideModal();
-						return sui.push().then(() => this.redraw());
+						return callEdit(src.id, name.value.trim(), url.value.trim(), ua.value.trim(), src.enabled ? undefined : true).then((r) => {
+							if (r && r.error)
+								return ui.addNotification(null, E('p', {}, r.error), 'danger');
+							ui.hideModal();
+							return this.refresh();
+						});
 					})
 				}, _('Сохранить'))
 			])
@@ -286,20 +222,12 @@ return view.extend({
 
 	/* отрисовка */
 
-	// Режим выбора узла или отметка ★ (id + on).
 	handleAuto(mode, id, on) {
-		if (mode != null)
-			sui.saveSettings({ select_mode: mode });
-		if (id != null) {
-			const ids = L.toArray(uci.get('stella', 'main', 'auto_node')).filter((x) => x != id);
-			if (on) {
-				if (ids.length >= AUTO_MAX)
-					return ui.addNotification(null, E('p', {}, _('В автовыборе не больше %d узлов').format(AUTO_MAX)), 'danger');
-				ids.push(id);
-			}
-			sui.saveSettings({ auto_node: ids });
-		}
-		return this.redraw();
+		return callAuto(mode, id, on).then((r) => {
+			if (r && r.error)
+				ui.addNotification(null, E('p', {}, r.error), 'danger');
+			return this.refresh();
+		});
 	},
 
 	renderCurrent() {
@@ -339,8 +267,8 @@ return view.extend({
 				_('из'), sui.select(cfg[fromKey], [ [ '', _('всех подписок и ссылок') ], ...subs.map((x) => [ x.id, x.name ]) ], set(fromKey)),
 				sui.hours(cfg[everyKey], set(everyKey)),
 				d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
-					E('button', { 'class': 'btn cbi-button', 'disabled': (d.pinging || wait) ? '' : null,
-						'title': wait ? _('Подбирается через резервный канал, когда он работает') : _('5 запросов через каждый узел; узел меняется, только если новый заметно лучше'),
+					E('button', { 'class': 'btn cbi-button cbi-button-action', 'disabled': (d.pinging || wait) ? '' : null,
+						'title': wait ? _('Подбирается через резервный канал, когда он работает') : _('Проверить узлы и выбрать лучший'),
 						'click': ui.createHandlerFn(this, () => callPick(forBackup || undefined).then((r) => {
 							if (r && r.error)
 								ui.addNotification(null, E('p', {}, r.error), 'warning');
@@ -353,7 +281,7 @@ return view.extend({
 		// Резервный канал mwan3 (например, мобильный оператор с белыми списками) и узел для него:
 		// вручную или лучший по проверке, как основной, только без автовыбора из ★.
 		const ifs = d.mwan3 || [];
-		const save = (key) => (v) => this.setting(key, v).then(() => this.renderCurrent());
+		const save = (key) => (v) => this.setting(key, v).then(() => this.refresh()).then(() => this.renderCurrent());
 		const bsel = cfg.backup_node && d.nodes.find((x) => x.id == cfg.backup_node);
 		const bbest = cfg.backup_mode == 'best';
 		const srcName = (id) => { const src = d.sources.find((x) => x.id == id); return (src && src.kind == 'subscription') ? src.name : _('отдельная ссылка'); };
@@ -370,14 +298,13 @@ return view.extend({
 						[ '', (cfg.backup_node && !bsel) ? _('узел удалён') : _('выберите узел') ],
 						...d.nodes.map((x) => [ x.id, sui.label(x.name, srcName(x.source)) ])
 					], save('backup_node')) ]),
-				E('label', { 'style': 'white-space:nowrap', 'title': _('Пока работает резервный канал, весь трафик идёт через VPN, кроме блок-списков') }, [
+				E('label', { 'style': 'white-space:nowrap', 'title': _('На резервном канале весь трафик идёт через VPN') }, [
 					E('input', { 'type': 'checkbox', 'checked': cfg.backup_vpn == '1' ? '' : null, 'change': (ev) => save('backup_vpn')(ev.target.checked ? '1' : '0') }), ' ', _('всё через VPN')
 				])
 			] : []),
 			d.backup ? E('span', { 'class': 'st-mid' }, _('работает сейчас')) : ''
 		];
 
-		const newest = Math.max(0, ...d.sources.map((x) => x.updated || 0));
 		// Строка «Резервный канал» — только когда к месту (есть mwan3 или канал уже задан).
 		dom.content(this.currentBox, [
 			...sui.kv(_('Узел'), node),
@@ -385,23 +312,23 @@ return view.extend({
 				[ 'single', _('вручную') ], [ 'auto', _('самый быстрый из ★') ], [ 'best', _('лучший по проверке') ]
 			], (v) => this.handleAuto(v)), ...pick ]),
 			...((ifs.length || cfg.backup_iface) ? sui.kv(_('Резервный канал'), backup) : []),
-			// Расписание, кнопка, когда обновлено (последняя из подписок) — как везде.
-			...sui.kv(_('Обновление подписок'), [ sui.hours(cfg.sub_interval, set('sub_interval')),
-				d.updating ? E('em', { 'class': 'spinning' }, _('обновляю подписки…')) :
-					E('button', { 'class': 'btn cbi-button', 'click': ui.createHandlerFn(this, () => this.handleUpdate(undefined)) }, _('Обновить сейчас')),
-				newest ? sui.dim(_('обновлено %s').format(sui.time(newest))) : '' ]),
 			...sui.kv(_('Если узел пропал'), sui.select(cfg.node_missing == 'best' ? 'best' : 'stop', [
 				[ 'stop', _('лучший из ★, иначе не запускать Stella') ], [ 'best', _('лучший из ★, иначе лучший из всех') ]
 			], set('node_missing')))
 		]);
 	},
 
+	handleWarp() {
+		return callWarp(undefined).then(() => this.refresh());
+	},
+
+	// Сохранить настройку и запомнить её у себя.
 	setting(key, v) {
-		return sui.saveSettings({ [key]: v });
+		return sui.saveSettings({ [key]: v }).then((ok) => ok && (this.cfg[key] = v));
 	},
 
 	signature(d) {
-		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.updating, d.auto_nodes, d.backup, d.mwan3, d.errors.length, d.nodes.length,
+		return JSON.stringify([ d.selected, d.select_mode, d.picking, d.updating, d.warping, d.auto_nodes, d.backup, d.mwan3, d.errors.length, d.nodes.length,
 			d.sources.map((x) => [ x.id, x.count, x.updated, x.enabled, x.name ]) ]);
 	},
 
@@ -422,8 +349,7 @@ return view.extend({
 	renderBusy() {
 		const d = this.data;
 		dom.content(this.busyBox, [
-			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : '',
-			d.warping ? E('em', { 'class': 'spinning' }, _('создаю WARP…')) : ''
+			d.pinging ? E('em', { 'class': 'spinning' }, _('проверяю задержку…')) : ''
 		]);
 	},
 
@@ -474,46 +400,53 @@ return view.extend({
 				list = list.filter((n) => n.name.toLowerCase().indexOf(q) >= 0);
 			if (q && !list.length)
 				return null;
-			if (this.sortByPing)
-				list = list.slice().sort((a, b) => rank(a) - rank(b));
+			list = sui.sorted(list, this.sort, (n, key) => (key == 'ping') ? rank(n) : n.name);
 
-			const isSub = (src.kind == 'subscription');
+			const isSub = (src.kind == 'subscription'), isWarp = (src.kind == 'warp');
 
 			const rows = list.map((n) => {
 				const sel = (n.id == d.selected);
 				const star = d.auto_nodes.indexOf(n.id) >= 0;
-				return E('tr', { 'class': sel ? 'st-sel' : '' }, [
-					E('td', { 'style': 'width:1.5em' }, E('span', {
+				return sui.tr([
+					sui.td(null, E('span', {
 						'class': 'st-star' + (star ? '' : ' off'),
 						'title': star ? _('Убрать из автовыбора') : _('Добавить в автовыбор'),
 						'click': ui.createHandlerFn(this, 'handleAuto', undefined, n.id, !star)
-					}, sui.icon('star', star))),
-					E('td', {}, [
+					}, sui.icon('star', star)), 'st-starcell'),
+					sui.td(null, [
 						sel ? E('strong', {}, [ '✓ ' + n.name ]) : n.name,
 						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : '',
 						E('span', { 'class': 'st-type' }, typeLabel(n))
-					]),
-					(this.cells[n.id] = E('td', { 'class': 'st-ping' }, pingLabel(d.ping[n.id], d.stability[n.id]))),
-					E('td', { 'class': 'st-act' }, [
-						(sel || n.pending) ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
-						n.pending ? '' : sui.iconButton('ping', _('Проверить задержку'), () => this.handlePing([ n.id ])),
-						isSub ? '' : sui.iconButton('close', _('Удалить'), () => this.handleRemove(n.id, n.name))
-					])
-				]);
+					], 'st-name'),
+					(this.cells[n.id] = sui.td(null, pingLabel(d.ping[n.id], d.stability[n.id]), 'st-ping')),
+					sui.td(null, [
+						sel ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
+						' ',
+						smallBtn(_('Проверить'), _('Проверить задержку'), () => this.handlePing([ n.id ]), 'cbi-button-action'),
+						' ',
+						isSub ? '' : smallBtn(_('Удалить'), '', () => this.handleRemove(n.id, n.name), 'cbi-button-remove')
+					], 'st-act')
+				], sel ? 'st-sel' : '');
 			});
 
-			const el = E('details', { 'class': 'st-group', 'open': (q || this.open.has(src.id)) ? '' : null }, [
-				E('summary', { 'class': 'st-summary' }, [
-					E('span', { 'class': 'st-title' }, [ isSub ? src.name : _('Отдельные ссылки') ]),
+			// Группа — раздел, как в LuCI: заголовок h3 (сворачивается), под ним таблица узлов.
+			const el = E('details', { 'class': 'cbi-section st-group', 'open': (q || this.open.has(src.id)) ? '' : null }, [
+				E('summary', {}, [
+					E('h3', {}, [ isSub ? src.name : isWarp ? 'WARP' : _('Отдельные ссылки') ]),
 					(this.metas[src.id] = E('span', { 'class': 'st-meta' }, this.metaText(src))),
+					// Проверка задержки — правее остальных кнопок.
 					E('span', { 'class': 'st-actions' }, [
-						sui.iconButton('ping', _('Проверить задержку узлов'), () => this.handlePing(list.map((n) => n.id))),
-						isSub ? sui.iconButton('refresh', _('Обновить подписку'), () => this.handleUpdate(src.id)) : '',
-						isSub ? sui.iconButton('settings', _('Настройки подписки'), () => this.showEdit(src)) : ''
+						isSub ? smallBtn(_('Обновить'), '', () => this.handleUpdate(src.id), 'cbi-button-action') : '',
+						isSub ? smallBtn(_('Изменить'), '', () => this.showEdit(src), 'cbi-button-edit') : '',
+						// WARP один и создаётся здесь, а не через «Добавить»; чинит его роутер сам.
+						(isWarp && d.warping) ? E('em', { 'class': 'spinning' }, _('создаю WARP…')) :
+						(isWarp && !src.count) ? smallBtn(_('Создать WARP'), _('Бесплатный узел Cloudflare WARP'), () => this.handleWarp(), 'cbi-button-add') : '',
+						list.length ? smallBtn(_('Проверить задержку'), '', () => this.handlePing(list.map((n) => n.id)), 'cbi-button-action') : ''
 					])
 				]),
-				E('div', { 'class': 'st-list', 'data-src': src.id }, E('table', {}, rows.length ? rows :
-					E('tr', {}, E('td', { 'class': 'st-dim' }, isSub ? _('Узлов нет.') : ''))))
+				E('div', { 'class': 'st-list', 'data-src': src.id }, sui.table([ '', sui.sortHead(_('Узел'), 'name', this.sort, () => this.renderGroups()),
+					sui.sortHead(_('Задержка'), 'ping', this.sort, () => this.renderGroups()), '' ], rows, 'st-nodes',
+					isWarp ? _('Узла пока нет.') : _('Узлов нет.')))
 			]);
 			el.addEventListener('toggle', () => { if (!q) el.open ? this.open.add(src.id) : this.open.delete(src.id); });
 			return el;
@@ -531,27 +464,20 @@ return view.extend({
 	},
 
 	render(r) {
-		this.cfg = sui.cfg();
-		const data = this.merge(r[0]);
+		const [ data, cfg ] = r;
 		this.data = data;
-		this.currentBox = E('div', { 'class': 'st-card' });
+		this.cfg = cfg;
+		this.currentBox = sui.card([]);
 		this.busyBox = E('span', { 'style': 'white-space:nowrap' });
 		this.groupsBox = E('div');
 
-		const sortBtn = sui.iconButton('sort', _('Сортировать по задержке'), () => {
-			this.sortByPing = !this.sortByPing;
-			sortBtn.classList.toggle('on', this.sortByPing);
-			this.renderGroups();
-		});
 		const bar = E('div', { 'class': 'st-bar' }, [
-			E('button', { 'class': 'btn cbi-button-add', 'click': () => this.showAdd() }, _('Добавить')),
 			E('input', {
 				'class': 'cbi-input-text', 'type': 'text', 'placeholder': _('Поиск по названию…'),
 				'input': (ev) => { this.filter = ev.target.value; this.renderGroups(); }
 			}),
 			this.busyBox,
-			sui.iconButton('ping', _('Проверить задержку всех узлов'), () => this.handlePing([])),
-			sortBtn
+			smallBtn(_('Проверить задержку всех'), _('Проверить задержку всех узлов'), () => this.handlePing([]), 'cbi-button-action')
 		]);
 
 		this.renderAll();
@@ -561,19 +487,15 @@ return view.extend({
 		return E([], [
 			E('style', {}, CSS),
 			E('h2', {}, _('Серверы')),
-			this.currentBox,
+			sui.section(null, this.currentBox),
 			bar,
-			this.groupsBox
+			this.groupsBox,
+			sui.create(_('Добавить'), () => this.showAdd())
 		]);
 	},
 
-	// Как в формах OpenWrt: «Сохранить» отдаёт правки роутеру, «Сохранить и применить» ещё и
-	// применяет их, «Сбросить» отменяет несохранённые.
-	handleSave() {
-		return sui.push().then(() => this.refresh());
-	},
-
-	handleReset() {
-		location.reload();
-	}
+	handleSave: null,
+	handleSaveApply: null,
+	handleReset: null
 });
+

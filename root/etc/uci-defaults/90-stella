@@ -1,4 +1,21 @@
 #!/bin/sh
 # Анонимные секции (ручной `uci add`) — в постоянные имена: на них держатся id узлов и кэш.
 /usr/bin/stella migrate >/dev/null 2>&1
+# DNS теперь одна цепочка (вкладка DNS): прежние «через VPN» и «напрямую» больше не нужны.
+uci -q delete stella.main.dns_remote
+uci -q delete stella.main.dns_direct
+# Обновления — одним расписанием (update_interval) вместо отдельных у подписок, списков и версий.
+uci -q delete stella.main.sub_interval
+uci -q delete stella.main.lists_interval
+uci -q delete stella.main.upgrade_interval
+# Исключения Zapret — всегда оба списка, настройки больше нет.
+uci -q delete stella.main.zapret_exclude
+# Блокировки DoH больше нет.
+uci -q delete stella.main.block_doh
+# Узлы WARP из v0.1.18 — без отметки warp: узнаются по ключу сервера Cloudflare в ссылке (тогда
+# он был в коде, теперь берётся из данных генератора и до первого скачивания неизвестен).
+for s in $(uci -q show stella | sed -n "s/^stella\.\([^.]*\)\.link='wireguard:.*publickey=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D.*/\1/p"); do
+	uci -q set "stella.$s.warp=1"
+done
+uci -q commit stella
 exit 0

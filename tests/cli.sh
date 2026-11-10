@@ -39,7 +39,7 @@ DNSMASQ="$T/dnsmasq-full"
 # «--» перед скриптом: getopt из glibc переставляет аргументы и принял бы «--apply» команды
 # за ключ самого ucode (на роутере musl так не делает, а в CI — glibc).
 run() {
-	PATH="$DNSMASQ:$PATH" STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" "$UCODE" -S \
+	PATH="$DNSMASQ:$PATH" STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" STELLA_WARP_DATA="$T/warp.json" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
 		-- root/usr/bin/stella "$@"
 }
@@ -199,7 +199,7 @@ for want in 'set list_yt {' 'elements = { 91.108.4.0/22 }' 'ip daddr @list_yt go
 	echo "$OUT" | grep -qF "$want" || { echo "FAIL: fw show без «$want»"; exit 1; }
 done
 if echo "$OUT" | grep -q 'list_off'; then echo "FAIL: выключенный список попал в правила"; exit 1; fi
-if echo "$OUT" | grep -q 'dport 853'; then echo "FAIL: DoH блокируется, хотя по умолчанию выключено"; exit 1; fi
+if echo "$OUT" | grep -q 'dport 853'; then echo "FAIL: в правилах осталась блокировка DoT"; exit 1; fi
 # Обычный dnsmasq: строк nftset= нет (с ними он не запустился бы), DNS через xray — есть.
 DNSMASQ="$T/dnsmasq-plain"; OUT=$(run fw show 2>/dev/null); DNSMASQ="$T/dnsmasq-full"
 if echo "$OUT" | grep -q '^nftset='; then echo "FAIL: nftset= для dnsmasq без nftset"; exit 1; fi
@@ -210,32 +210,26 @@ echo "$OUT" | grep -qF 'server=127.0.0.1#10853' || { echo "FAIL: без nftset �
 mkdir -p "$T/trees"
 echo '{"tree":[{"path":"geosite-youtube.srs","type":"blob"},{"path":"geosite-ru-blocked.srs","type":"blob"},{"path":"geosite-geolocation-!cn.srs","type":"blob"},{"path":"geoip-ru.srs","type":"blob"},{"path":"youtube.json","type":"blob"},{"path":"geosite-x","type":"tree"}]}' > "$T/trees/rule-set-geosite"
 echo '{"tree":[{"path":"geoip-ru.srs","type":"blob"}]}' > "$T/trees/rule-set-geoip"
+cp tests/fixtures/itdog-tree.json "$T/itdog-tree.json"
+export STELLA_ITDOG_TREE=http://127.0.0.1:18765/itdog-tree.json
 STELLA_GEO_TREES=http://127.0.0.1:18765/trees/rule-set- run geo-index >/dev/null
+# Сервер наборов не ответил — прежние имена и списки itdoginfo остаются, отметка времени — прежняя.
 if STELLA_GEO_TREES=http://127.0.0.1:18765/missing/ run geo-index 2>/dev/null; then echo "FAIL: geo-index без ответа сервера"; exit 1; fi
 python3 - "$T/run/geo-index.json" <<'PY' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
-if d['geosite'] != ['geolocation-!cn', 'ru-blocked', 'youtube'] or d['geoip'] != ['ru']:
+if d['geosite'] != ['geolocation-!cn', 'ru-blocked', 'youtube'] or d['geoip'] != ['ru'] or len(d['itdog']) != 7 or \
+   d['itdog'][2]['files'] != ['Services/discord.lst', 'Subnets/IPv4/discord.lst'] or not d['at']:
     print('FAIL: geo-index', d); sys.exit(1)
 PY
+unset STELLA_ITDOG_TREE
 
-# У стратегии Flowseal — свои исключения.
+# Исключения Zapret — всегда оба списка (Zapret Manager и Flowseal), какой бы ни была стратегия:
+# и в сете, и в ключах nfqws вместо заложенных в стратегию.
 printf 'steampowered.com\ntwitch.tv\n' > "$T/zapret/hosts-exclude_fs.txt"
 python3 - "$T/uci.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1])); d['main']['zapret_bin'] = '/bin/sh'; d['main']['zapret_opts'] = '--filter-tcp=443 --hostlist-exclude=/opt/zapret/ipset/zapret-hosts-flowseal-exclude.txt --dpi-desync=fake'
-json.dump(d, open(sys.argv[1], 'w'))
-PY
-OUT=$(run fw show)
-echo "$OUT" | grep -qF 'nftset=/twitch.tv/4#inet#stella#zapret_excl' || { echo "FAIL: нет исключений Flowseal"; exit 1; }
-if echo "$OUT" | grep -qF 'nftset=/sberbank.com/4#inet#stella#zapret_excl'; then echo "FAIL: исключения ZMS у стратегии Flowseal"; exit 1; fi
-ARGS=$(run zapret-cmd 2>/dev/null || true)
-case "$ARGS" in *hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил свой файл исключений Flowseal: $ARGS"; exit 1 ;; esac
-
-# Выбранные исключения: «все вместе» — оба списка и в сете, и в ключах nfqws.
-python3 - "$T/uci.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1])); d['main']['zapret_exclude'] = 'all'
 json.dump(d, open(sys.argv[1], 'w'))
 PY
 OUT=$(run fw show)
@@ -244,18 +238,6 @@ for want in 'nftset=/twitch.tv/4#inet#stella#zapret_excl' 'nftset=/sberbank.com/
 done
 ARGS=$(run zapret-cmd 2>/dev/null || true)
 case "$ARGS" in *hosts-exclude.txt*hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил оба списка исключений: $ARGS"; exit 1 ;; esac
-
-# Только Zapret Manager — даже у стратегии Flowseal.
-python3 - "$T/uci.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1])); d['main']['zapret_exclude'] = 'zms'
-json.dump(d, open(sys.argv[1], 'w'))
-PY
-OUT=$(run fw show)
-echo "$OUT" | grep -qF 'nftset=/sberbank.com/4#inet#stella#zapret_excl' || { echo "FAIL: нет выбранных исключений ZMS"; exit 1; }
-if echo "$OUT" | grep -qF 'nftset=/twitch.tv/4#inet#stella#zapret_excl'; then echo "FAIL: исключения Flowseal при выборе ZMS"; exit 1; fi
-ARGS=$(run zapret-cmd 2>/dev/null || true)
-case "$ARGS" in *hosts-exclude_fs.txt*) echo "FAIL: nfqws получил исключения Flowseal при выборе ZMS: $ARGS"; exit 1 ;; *hosts-exclude.txt*) ;; *) echo "FAIL: nfqws без исключений ZMS: $ARGS"; exit 1 ;; esac
 
 # migrate: анонимная подписка переименовывается, кэш и выбранный узел следуют за ней.
 cat > "$T/uci.json" <<EOF
@@ -308,19 +290,66 @@ d = json.load(open(sys.argv[1]))
 d['list_new'] = { '.type': 'list', 'name': 'new', 'entry': 'x.com', 'url': 'http://127.0.0.1:18765/list.txt' }
 d['list_entries'] = { '.type': 'list', 'name': 'only entries', 'entry': 'y.com' }
 d['sub_new'] = { '.type': 'subscription', 'name': 's', 'url': 'http://127.0.0.1:18765/sub.txt' }
+d['main']['default_action'] = 'zapret'
 json.dump(d, open(sys.argv[1], 'w'))
 PY
 rm -f "$T/reload.log"
+# Файлы удалённого со страницы списка (секции нет) — убираются; у живых — остаются.
+touch "$T/lists/list_dead.json" "$T/lists/list_dead.src"
 PATH="$T/bin:$PATH" run stale
+[ ! -e "$T/lists/list_dead.json" ] && [ ! -e "$T/lists/list_dead.src" ] && [ -e "$T/lists/list_tg.json" ] ||
+	{ echo "FAIL: stale не убрал файлы удалённого списка"; exit 1; }
 grep -qx 'sh .*/lists.sh' "$T/reload.log" && grep -qx 'sh .*/update.sh' "$T/reload.log" || { echo "FAIL: stale не запустил задачи: $(cat "$T/reload.log")"; exit 1; }
+# Каталогов ещё нет: Zapret выбран («остальной трафик») — его каталог, DNS — всегда.
+grep -q '/usr/bin/stella zapret-catalog; /etc/init.d/stella reload' "$T/run/zcatalog.sh" && grep -q '/usr/bin/stella dns-catalog' "$T/run/dnscat.sh" ||
+	{ echo "FAIL: stale не скачивает каталоги: $(cat "$T/reload.log")"; exit 1; }
 grep -q '/usr/bin/stella lists list_gone list_new; /etc/init.d/stella reload' "$T/run/lists.sh" ||
 	{ echo "FAIL: stale: $(cat "$T/run/lists.sh")"; exit 1; }
 grep -q '/usr/bin/stella update sub_new; /etc/init.d/stella reload' "$T/run/update.sh" || { echo "FAIL: stale: $(cat "$T/run/update.sh")"; exit 1; }
-rm -f "$T/reload.log" "$T/run/lists.running" "$T/run/update.running"
+rm -f "$T/reload.log" "$T/run/lists.running" "$T/run/update.running" "$T/run/zcatalog.running" "$T/run/dnscat.running"
 PATH="$T/bin:$PATH" run stale
 [ ! -s "$T/reload.log" ] || { echo "FAIL: stale повторил попытку: $(cat "$T/reload.log")"; exit 1; }
 unset STELLA_GEO_BASE
 
+# DNS: каталог DoH — из массива PROVIDERS панели Zapret Manager (выдержка). Режим «вручную» — без
+# проверки серверов (иначе запросы в сеть).
+cp tests/fixtures/zms-doh-providers.txt "$T/zm-luci.sh"
+uci_main dns_mode='"manual"' 'dns_server=["https://dns.google/dns-query", "https://dns.comss.one/dns-query"]' dns_hijack='"1"'
+STELLA_DNS_DIR="$T/dns" STELLA_DNS_CATALOG=http://127.0.0.1:18765/zm-luci.sh run dns-catalog >/dev/null ||
+	{ echo "FAIL: dns-catalog"; exit 1; }
+STELLA_DNS_DIR="$T/dns" run gen "$T/config.json"
+STELLA_DNS_DIR="$T/dns" run fw show > "$T/fw.txt"
+python3 - "$T" <<'PY' || exit 1
+import json, sys
+t = sys.argv[1]
+cat = json.load(open(t + '/dns/catalog.json'))
+c = json.load(open(t + '/config.json'))
+fw = open(t + '/fw.txt').read()
+if len(cat) != 7 or cat[3]['kind'] != 'geo':
+    print('FAIL: каталог DNS', cat); sys.exit(1)
+srv = [s['address'] for s in c['dns']['servers']]
+if srv[:2] != ['https://dns.google/dns-query', 'https://dns.comss.one/dns-query'] or c['dns']['hosts'].get('dns.google') != ['8.8.8.8', '8.8.4.4']:
+    print('FAIL: цепочка DNS в конфиге', c['dns']); sys.exit(1)
+# Запасные по умолчанию — Cloudflare и Google из каталога (Google уже в цепочке — не повторяется).
+if srv[2:] != ['https://cloudflare-dns.com/dns-query']:
+    print('FAIL: запасные DNS по умолчанию', srv); sys.exit(1)
+if 'doh4' in fw or 'address=/' in fw:
+    print('FAIL: осталась блокировка DoH', fw); sys.exit(1)
+PY
+# Каталог не скачался — прежний остаётся.
+if STELLA_DNS_DIR="$T/dns" STELLA_DNS_CATALOG=http://127.0.0.1:18765/missing run dns-catalog >/dev/null 2>&1; then
+	echo "FAIL: dns-catalog без ответа сервера"; exit 1
+fi
+[ "$(python3 -c "import json; print(len(json.load(open('$T/dns/catalog.json'))))")" = 7 ] || { echo "FAIL: каталог DNS пропал"; exit 1; }
+
+# setup: всё нужное уже стоит (dnsmasq-full, zapret) — ничего не ставится; mwan3 не трогается.
+printf '#!/bin/sh\necho "apk $*" >> "%s/apk.log"\n[ "$1 $2 $3" = "list -I zapret" ] && echo "zapret-72.20251103-r1 aarch64 {zapret} (MIT) [installed]"\nexit 0\n' "$T" > "$T/bin/apk"
+chmod +x "$T/bin/apk"
+rm -f "$T/apk.log"
+PATH="$T/bin:$PATH" run setup > "$T/setup.out" 2>&1 || { echo "FAIL: setup: $(cat "$T/setup.out")"; exit 1; }
+! grep -q 'add\|mwan3\|upgrade' "$T/apk.log" || { echo "FAIL: setup поставил лишнее: $(cat "$T/apk.log")"; exit 1; }
+
+export STELLA_TRACE_URL=http://127.0.0.1:18765/missing-trace
 # WARP: ключи от xray, регистрация в API (здесь — поддельном), узел — отдельная ссылка; занятое
 # название получает номер. Адреса фиктивные — никто не отвечает, остаётся адрес из ответа API.
 cat > "$T/warp_api.py" <<'PY'
@@ -362,6 +391,19 @@ cat > "$T/uci.json" <<EOF
 	"node_a": { ".type": "node", "name": "WARP", "link": "trojan://pw@tr.example.com:443#t" }
 }
 EOF
+# Данные WARP — с «GitHub генератора» (выдержки его файлов); не скачались — прежние остаются.
+mkdir -p "$T/wg/builders"
+cp tests/fixtures/warp-endpoint-pool.ts "$T/wg/endpoint-pool.ts"
+cp tests/fixtures/warp-shared.ts "$T/wg/builders/shared.ts"
+cp tests/fixtures/warp-cloudflare-client.ts "$T/wg/cloudflare-client.ts"
+STELLA_WARP_SOURCE=http://127.0.0.1:18765/wg/ run warp-data >/dev/null 2>&1 || { echo "FAIL: warp-data"; exit 1; }
+if STELLA_WARP_SOURCE=http://127.0.0.1:18765/missing/ run warp-data >/dev/null 2>&1; then echo "FAIL: warp-data без ответа сервера"; exit 1; fi
+python3 - "$T/warp.json" <<'PY' || exit 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+if len(d.get('hosts', [])) != 14 or len(d.get('ports', [])) != 54 or len(d.get('masks', [])) != 2 or d.get('ua') != 'okhttp/3.12.1' or not d.get('api'):
+    print('FAIL: данные WARP', {k: (len(v) if isinstance(v, list) else v) for k, v in d.items()}, file=sys.stderr); sys.exit(1)
+PY
 STELLA_WARP_API=http://127.0.0.1:18766/v0 PATH="$(dirname "$(command -v "$XRAY")"):$PATH" run warp >"$T/warp.out" 2>&1 || { echo "FAIL: warp: $(cat "$T/warp.out")"; exit 1; }
 grep -Eqx 'POST /v0/reg [A-Za-z0-9+/]{43}= 20[0-9]{2} okhttp/3.12.1' "$T/warp_api.log" && grep -qxF 'PATCH /v0/reg/abc True Bearer tok' "$T/warp_api.log" ||
 	{ echo "FAIL: запросы к API WARP: $(cat "$T/warp_api.log")"; exit 1; }
@@ -380,6 +422,20 @@ uci_main node="\"$WID\""
 run gen "$T/config.json"
 grep -q '"protocol": "wireguard"' "$T/config.json" || { echo "FAIL: узел WARP не попал в конфиг"; exit 1; }
 "$XRAY" run -test -c "$T/config.json" >/dev/null || { echo "FAIL: xray отклонил конфиг WARP"; exit 1; }
+
+# Первое включение: WARP уже есть — заново не регистрируется, становится узлом, warp_auto снимается.
+uci_main node='""' warp_auto='"1"'
+N=$(wc -l < "$T/warp_api.log")
+run warp --first >"$T/warp.out" 2>&1 || { echo "FAIL: warp --first: $(cat "$T/warp.out")"; exit 1; }
+python3 - "$T/uci.json" "$WID" <<'PY' || exit 1
+import json, sys
+m = json.load(open(sys.argv[1]))['main']
+if m.get('node') != sys.argv[2] or 'warp_auto' in m:
+    print('FAIL: warp --first', m, file=sys.stderr); sys.exit(1)
+PY
+[ "$(wc -l < "$T/warp_api.log")" = "$N" ] || { echo "FAIL: warp --first зарегистрировал WARP заново"; exit 1; }
+# Без warp_auto — ничего не делает.
+run warp --first >/dev/null 2>&1 && [ "$(wc -l < "$T/warp_api.log")" = "$N" ] || { echo "FAIL: warp --first без warp_auto"; exit 1; }
 kill $WARP_PID 2>/dev/null; WARP_PID=
 
 # API недоступен: Zapret не установлен — путь пропускается, в ошибке — испробованные пути.

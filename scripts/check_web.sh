@@ -27,4 +27,10 @@ for f in root/usr/share/luci/menu.d/*.json root/usr/share/rpcd/acl.d/*.json; do
 	python3 -m json.tool "$f" >/dev/null || { echo "FAIL: $f"; exit 1; }
 done
 
+# Список по умолчанию — ссылки на списки itdoginfo в формате, который понимает окно списка.
+ITD=https://raw.githubusercontent.com/itdoginfo/allow-domains/main/
+for u in $(sed -n "s/^[[:space:]]*list url '\(.*\)'$/\1/p" root/etc/config/stella); do
+	case "$u" in "$ITD"*.lst) ;; *) echo "FAIL: $u — не список itdoginfo"; exit 1 ;; esac
+done
+
 echo "web: OK"

@@ -1,0 +1,13 @@
+// выдержка из ZapretManager_LuCI.sh
+var x = 1;
+var PROVIDERS = [
+	{ id: 'google', label: 'Google', url: 'https://dns.google/dns-query', boot: '8.8.8.8, 8.8.4.4, 2001:4860:4860::8888, 2001:4860:4860::8844', k: 'plain' },
+	{ id: 'cloudflare', label: 'Cloudflare', v: 'Без фильтрации', url: 'https://cloudflare-dns.com/dns-query', boot: '1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001', k: 'plain' },
+	{ id: 'cloudflare_sec', label: 'Cloudflare · Защита от угроз', v: 'Защита от угроз', url: 'https://security.cloudflare-dns.com/dns-query', boot: '1.1.1.2, 1.0.0.2, 2606:4700:4700::1112, 2606:4700:4700::1002', k: 'safe' },
+	{ id: 'xbox', label: 'XBOX', url: 'https://xbox-dns.ru/dns-query', k: 'geo' },
+	{ id: 'comss', label: 'Comss', url: 'https://dns.comss.one/dns-query', k: 'geo' },
+	{ id: 'dnsai', label: 'DNS-AI', url: 'https://dns.dns-ai.ru/dns-query', k: 'geo' },
+	{ id: 'bezmezhau', label: 'Bezmezhau', url: 'https://sync.bezmezhau.com/dns-query', k: 'geo' },
+	{ id: 'bad', label: 'Bad', url: 'http://x.example/dns-query', k: 'geo' },
+];
+var PROVIDERS_AFTER = [ { id: 'after', url: 'https://after.example/dns-query', k: 'geo' } ];

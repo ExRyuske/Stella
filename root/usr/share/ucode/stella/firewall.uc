@@ -43,24 +43,6 @@ const BYPASS4 = [
 
 export const ACTIONS = { vpn: true, zapret: true, direct: true, block: true };
 
-// Публичные DoH-резолверы — все IPv4 из их сертификатов, с «семейными» и запасными адресами:
-// через любой из них устройство обошло бы DNS роутера.
-const DOH4 = [
-	// Cloudflare: обычный, «без вредоносных», «семейный», для приложения 1.1.1.1, для Firefox
-	'1.1.1.1', '1.0.0.1', '1.1.1.2', '1.0.0.2', '1.1.1.3', '1.0.0.3', '162.159.36.1', '162.159.46.1',
-	'104.16.248.249', '104.16.249.249', '162.159.61.4', '172.64.41.4',
-	// Google
-	'8.8.8.8', '8.8.4.4',
-	// Quad9
-	'9.9.9.9', '9.9.9.10', '9.9.9.11', '9.9.9.12', '149.112.112.112', '149.112.112.10', '149.112.112.11', '149.112.112.12',
-	// AdGuard
-	'94.140.14.14', '94.140.15.15', '94.140.14.140', '94.140.14.141', '94.140.14.15', '94.140.15.16',
-	// OpenDNS
-	'208.67.222.222', '208.67.220.220', '208.67.222.123', '208.67.220.123', '208.67.222.2', '208.67.220.2',
-	// Яндекс: базовый, безопасный, семейный
-	'77.88.8.8', '77.88.8.1', '77.88.8.88', '77.88.8.2', '77.88.8.7', '77.88.8.3'
-];
-
 function hex(v) {
 	return sprintf('0x%08x', v);
 }
@@ -96,11 +78,12 @@ function list_rules(l, verdict) {
 	return res;
 }
 
-// opts: { lan_ifnames, tproxy_port, default_action, dns_hijack, block_doh,
+// opts: { lan_ifnames, tproxy_port, default_action, dns_hijack,
 //         lists:   [ { id, action, cidrs, devices_mode, macs } ]   — включённые, по порядку,
 //         devices: [ { mac, policy } ]                               — vpn/direct в обход списков,
 //         zapret:  { qnum, tcp_ports, udp_ports } | null,
-//         all_vpn: работает резервный канал, и на нём всё через VPN }
+//         all_vpn: работает резервный канал, и на нём всё через VPN,
+//         block_ipv6: устройствам закрыт выход в интернет по IPv6 }
 export function nft_script(opts) {
 	let ifs = join(', ', map(opts.lan_ifnames, (i) => sprintf('%J', i)));
 	let out = [
@@ -131,15 +114,8 @@ export function nft_script(opts) {
 		`		iifname != { ${ifs} } return`,
 		'		meta nfproto != ipv4 return',
 		'		ip daddr @bypass4 return');
-	if (opts.dns_hijack) {
+	if (opts.dns_hijack)
 		push(out, '		meta l4proto { tcp, udp } th dport 53 return');
-		// Сторонний DNS-over-TLS/HTTPS в обход роутера: без этого списки доменов
-		// не видят, какие адреса узнало устройство. Браузеры откатываются на обычный DNS.
-		if (opts.block_doh)
-			push(out,
-				'		meta l4proto { tcp, udp } th dport 853 drop',
-				`		ip daddr { ${join(', ', DOH4)} } meta l4proto { tcp, udp } th dport 443 drop`);
-	}
 	if (opts.all_vpn) {
 		// Резервный канал (например, мобильный с белыми списками): напрямую там мало что
 		// открывается — всё через VPN, списки и устройства не действуют, кроме блокировки.
@@ -185,6 +161,19 @@ export function nft_script(opts) {
 		...(opts.zapret ? [ `		${dns_match('zapret_excl')} accept` ] : []),
 		`		ct mark set ct mark | ${hex(ZAPRET_MARK)} accept`,
 		'	}');
+
+	// IPv6 устройств: перехват Stella — только для IPv4, а по IPv6 сайты шли бы мимо списков.
+	// Отказ, а не тишина: приложения сразу переходят на IPv4. Внутри сети IPv6 работает.
+	if (opts.block_ipv6)
+		push(out, '',
+			'	chain ipv6_block {',
+			'		type filter hook forward priority filter - 1; policy accept;',
+			`		iifname != { ${ifs} } return`,
+			'		meta nfproto != ipv6 return',
+			`		oifname { ${ifs} } return`,
+			'		meta l4proto tcp reject with tcp reset',
+			'		reject with icmpx admin-prohibited',
+			'	}');
 
 	if (opts.dns_hijack)
 		push(out, '',
@@ -264,9 +253,10 @@ export function dnsmasq_conf(opts) {
 	// max-ttl: устройства переспрашивают не реже раза в минуту — новый список начинает
 	// действовать через минуту, а не когда истечёт TTL сайта. Кэш dnsmasq держит настоящий TTL.
 	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}`, 'max-ttl=60', `max-cache-ttl=${DNS_CACHE_TTL}` ];
-	// «Канарейки»: по NXDOMAIN Firefox отключает свой DoH, Apple — iCloud Private Relay.
-	if (opts.block_doh)
-		push(out, 'address=/use-application-dns.net/', 'address=/mask.icloud.com/', 'address=/mask-h2.icloud.com/');
+	// IPv6 закрыт — и адреса IPv6 устройствам не нужны (пустой ответ на AAAA). Сам xray
+	// спрашивает и IPv6 — для WARP.
+	if (opts.block_ipv6 !== false)
+		push(out, 'filter-AAAA');
 	// Без поддержки nftset (обычный dnsmasq, не dnsmasq-full) он с такими строками не запустится.
 	if (opts.nftset !== false)
 		for (let d in order)

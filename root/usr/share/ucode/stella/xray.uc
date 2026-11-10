@@ -2,7 +2,7 @@
 
 'use strict';
 
-import { SOCKS_PORT } from 'stella.store';
+import { SOCKS_PORT, PROBE_URL } from 'stella.store';
 import { quic_noise } from 'stella.warp';
 
 const NET_NAMES = {
@@ -15,10 +15,10 @@ const PRIVATE_NETS = [
 	'172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4'
 ];
 
-// Сколько ждать DNS через VPN, прежде чем спросить запасной напрямую. У xray по умолчанию 4 с:
-// при упавшем туннеле так ждал каждый запрос, и клиенты успевали сдаться. Меньше 3 с нельзя:
-// первый запрос через медленный узел (подключение к серверу и TLS до DNS) идёт около 1,5 с.
-const DNS_REMOTE_TIMEOUT_MS = 3000;
+// Сколько ждать сервер цепочки, прежде чем спросить следующий. Устройства ждут ответа около 5 с,
+// а xray спрашивает серверы по очереди: при упавших DoH-серверах до DNS провайдера надо дойти
+// раньше. Прямой DoH отвечает за 0,1–0,6 с вместе с подключением.
+const DNS_TIMEOUT_MS = 1500;
 // Истёкшую запись xray отдаёт сразу (с TTL 1) и обновляет её в фоне, но не дольше суток после
 // срока: при упавшем туннеле знакомые имена отвечают без ожидания.
 const DNS_STALE_TTL = 86400;
@@ -168,10 +168,18 @@ export function outbound(n, tag) {
 	}
 
 	// У WireGuard транспорта нет — только маски пакетов (finalmask), маска QUIC — первой.
+	// Домен сайта WireGuard не передаёт серверу, а разрешает здесь — targetStrategy: через DNS
+	// xray (цепочку DNS), сначала IPv6. Без него xray шёл мимо цепочки на настоящий адрес сайта, и
+	// ChatGPT через WARP (выход в России) отвечал 403. Серверы обхода геоблокировок для таких
+	// сайтов дают только IPv4 (адрес своего прокси) — он и берётся. Остальное — по IPv6: через
+	// WARP по IPv4 YouTube не открывается.
 	if (n.protocol == 'wireguard') {
+		ob.targetStrategy = 'ForceIPv6v4';
 		let fm = n.fm ? { ...n.fm } : {};
-		if (n.noise == 'quic')
-			fm.udp = [ quic_noise(n), ...(fm.udp || []) ];
+		// Маски — из данных WARP; их ещё нет — без маски, до первого скачивания.
+		let q = (n.noise == 'quic') ? quic_noise(n) : null;
+		if (q)
+			fm.udp = [ q, ...(fm.udp || []) ];
 		if (length(fm))
 			ob.streamSettings = { finalmask: fm };
 	}
@@ -181,35 +189,29 @@ export function outbound(n, tag) {
 	return ob;
 };
 
-function is_ipv4(s) {
-	return match(s, /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) != null;
-}
-
 // opts: { node, auto_nodes, log_level, socks_port,
-//         intercept, tproxy_port, dns_port, dns_remote, dns_direct }
+//         intercept, tproxy_port, dns_port, dns_servers, dns_hosts, dns_last (или dns_isp) }
 //
 // node — выбранный вручную узел (outbound "proxy"). auto_nodes — узлы автовыбора:
 // каждый получает outbound "proxy-N", xray раз в минуту проверяет их и ведёт трафик через
 // самый быстрый живой (balancer leastPing); если не отвечает ни один — через node.
 //
 // intercept = прозрачный прокси для LAN: вход TPROXY и DNS для dnsmasq.
-// DNS-запросы клиентов идут через туннель (dns_remote), при его отказе — напрямую
-// (dns_direct, запасной); адреса самих прокси-серверов резолвятся напрямую — иначе
-// для подключения к серверу нужен сервер.
+// DNS — напрямую, цепочкой: DoH-серверы dns_servers по порядку, за ними запасные dns_last (DoH
+// или обычный UDP; по умолчанию — DNS провайдера). Имена DoH-серверов xray берёт из dns_hosts (их адреса узнаёт
+// Stella): иначе он спросил бы их у dnsmasq, а тот — у самого xray.
 export function build_config(opts) {
 	let auto = (length(opts.auto_nodes || []) >= 2) ? opts.auto_nodes : null;
 	let has_proxy = !!(opts.node || auto);
 	let to_main = auto ? { balancerTag: 'auto' } : { outboundTag: has_proxy ? 'proxy' : 'direct' };
 	let outbounds = [];
-	let servers_of = [];
 
+	// Адреса прокси-серверов xray узнаёт своим DNS — он и так напрямую.
 	let add_proxy = (n, tag) => {
 		let ob = outbound(n, tag);
 		if (opts.intercept)
 			ob.streamSettings = { ...(ob.streamSettings || {}), sockopt: { domainStrategy: 'UseIPv4' } };
 		push(outbounds, ob);
-		if (!is_ipv4(n.address) && !(`full:${n.address}` in servers_of))
-			push(servers_of, `full:${n.address}`);
 	};
 
 	if (opts.node)
@@ -255,25 +257,24 @@ export function build_config(opts) {
 			protocol: 'dokodemo-door',
 			settings: { address: '1.1.1.1', port: 53, network: 'tcp,udp' }
 		});
+		// Сам xray спрашивает и IPv6 — для WARP; устройствам, пока IPv6 закрыт, AAAA не отдаёт dnsmasq.
 		push(outbounds, { tag: 'dns-out', protocol: 'dns' });
 
-		// Запросы к прямому DNS помечены своим тегом и идут напрямую по нему, а не по IP:
-		// иначе при одном IP у обоих DNS (например, 1.1.1.1 в обоих полях) мимо VPN уходили бы
-		// и запросы устройств.
+		// Свой выход для DNS: имя DoH-сервера он узнаёт у встроенного DNS xray, то есть из hosts.
+		push(outbounds, { tag: 'direct-dns', protocol: 'freedom', streamSettings: { sockopt: { domainStrategy: 'UseIPv4' } } });
 		let servers = [];
-		if (length(servers_of))
-			push(servers, { address: opts.dns_direct, domains: servers_of, skipFallback: true, tag: 'dns-direct' });
-		// Запасной нужен и при том же сервере: через VPN и напрямую — разные пути, при упавшем
-		// туннеле тот же сервер ответит напрямую.
-		push(servers, has_proxy ? { address: opts.dns_remote, timeoutMs: DNS_REMOTE_TIMEOUT_MS } : opts.dns_remote);
-		if (has_proxy)
-			push(servers, { address: opts.dns_direct, tag: 'dns-direct' });
+		for (let url in opts.dns_servers || [])
+			push(servers, { address: url, timeoutMs: DNS_TIMEOUT_MS });
+		// Запасные по порядку: DoH или обычный DNS (IPv4, UDP 53); без них — DNS провайдера.
+		for (let x in opts.dns_last ?? opts.dns_isp ?? [])
+			push(servers, match(x, /^[0-9.]+$/) ? { address: x, port: 53 } : { address: x, timeoutMs: DNS_TIMEOUT_MS });
 
-		cfg.dns = { tag: 'dns-internal', queryStrategy: 'UseIPv4', serveStale: true, serveExpiredTTL: DNS_STALE_TTL, servers };
+		cfg.dns = { tag: 'dns-direct', queryStrategy: 'UseIP', serveStale: true, serveExpiredTTL: DNS_STALE_TTL, servers };
+		if (length(opts.dns_hosts || {}))
+			cfg.dns.hosts = opts.dns_hosts;
 
 		push(rules, { inboundTag: ['dns-in'], outboundTag: 'dns-out' });
-		push(rules, { inboundTag: ['dns-direct'], outboundTag: 'direct' });
-		push(rules, { inboundTag: ['dns-internal'], ...to_main });
+		push(rules, { inboundTag: ['dns-direct'], outboundTag: 'direct-dns' });
 	}
 
 	push(rules,
@@ -288,7 +289,7 @@ export function build_config(opts) {
 		cfg.routing.balancers = [ { tag: 'auto', selector: [ 'proxy-' ], strategy: { type: 'leastPing' }, fallbackTag: fallback } ];
 		cfg.observatory = {
 			subjectSelector: [ 'proxy-' ],
-			probeURL: 'https://www.gstatic.com/generate_204',
+			probeURL: PROBE_URL,
 			probeInterval: '60s',
 			enableConcurrency: true
 		};
