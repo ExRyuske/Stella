@@ -2,31 +2,39 @@
 'require baseclass';
 'require rpc';
 'require ui';
+'require uci';
 
-// Общее для страниц Stella: стили, иконки, выпадающие списки с готовыми вариантами, время,
-// склонение, сохранение настроек.
-//
-// Иконки — свои SVG одного размера и цвета текста: символы Юникода (⏱ ⟳ ⚙) в каждом
-// шрифте рисуются по-своему, и кнопки выходили разной высоты.
+// Общее для страниц Stella: стили, выпадающие списки с готовыми вариантами, время, склонение,
+// запись настроек.
 
-const PATHS = {
-	refresh: '<polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>',
-	ping: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
-	settings: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
-	sort: '<path d="M3 6h11M3 12h8M3 18h5"/><path d="M19 5v14M16 16l3 3 3-3"/>',
-	edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
-	up: '<polyline points="18 15 12 9 6 15"/>',
-	down: '<polyline points="6 9 12 15 18 9"/>',
-	close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-	star: '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/>'
-};
+// Звёздочка автовыбора — свой SVG: символ Юникода в каждом шрифте рисуется по-своему.
+const STAR = '<polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/>';
 
-const callSettingsSet = rpc.declare({ object: 'stella', method: 'settings_set', params: [ 'values' ] });
+const callInit = rpc.declare({ object: 'luci', method: 'setInitAction', params: [ 'name', 'action' ] });
+const callCommit = rpc.declare({ object: 'uci', method: 'commit', params: [ 'config' ], reject: true });
+const callRevert = rpc.declare({ object: 'uci', method: 'revert', params: [ 'config' ] });
+const callHostHints = rpc.declare({ object: 'luci-rpc', method: 'getHostHints', expect: { '': {} } });
+const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
+const callNetDevices = rpc.declare({ object: 'luci-rpc', method: 'getNetworkDevices', expect: { '': {} } });
+
+// Пока правка идёт на роутер, LuCI не узнаёт о перечитанном конфиге: иначе между отправкой и
+// записью он показал бы вверху «Непринятые изменения», хотя они тут же записываются.
+let writing = false;
+window.addEventListener('uci-loaded', (ev) => { if (writing) ev.stopPropagation(); }, true);
+
+// Правки конфига идут по одной: следующая ждёт, пока прежняя дойдёт до роутера.
+let queue = Promise.resolve();
+
+// Что вводится руками (свой вариант в списке, поле портов): [ настройки, вид значения, сообщение ].
+const CHECKS = [
+	[ /_interval$|^zapret_test_/, /^[0-9]{1,4}$/, _('Нужно число.') ],
+	[ /_ports$/, /^([0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*)?$/, _('Порты через запятую: 80,443,1000-2000.') ]
+];
 
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 14;
+const API = 21;
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -40,29 +48,38 @@ const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ],
 // треть ширины) и на страницах, и в окнах, пояснения cbi-value-description, таблицы
 // cbi-section-table с заглушкой, когда пусто, сортировкой по заголовку столбца (как у таблиц
 // форм LuCI) и «Добавить» под ними (cbi-section-create). Своё — только то, чего в LuCI нет:
-// звёздочки, цвета задержки и состояний, строка поиска.
+// звёздочки, цвета задержки и состояний, строка поиска, сворачиваемый раздел с кнопками в
+// заголовке (группы узлов, серверы DNS).
 const CSS = `
 .st-info .cbi-dropdown { min-width:12em; max-width:100% }
 .st-info .cbi-dynlist { min-width:20em }
 .modal .st-info .td:first-child { width:30% }
 .modal .st-info textarea, .modal .st-info input[type=text] { width:100% }
+.st-info > .tr > .td { vertical-align:top }
+.st-kl { position:sticky; top:4.5em; min-height:30px; display:flex; align-items:center }
+.modal .st-kl { top:.5em }
 .st-row { display:flex; flex-wrap:wrap; gap:.4em .8em; align-items:center; min-height:30px }
 .st-full { flex-basis:100% }
 .st-row > .cbi-value-description { flex-basis:100%; margin-top:0 }
+.st-group { margin-bottom:1.5em }
+.st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; cursor:pointer; list-style:none; padding:.2em 0 .5em }
+.st-group > summary::-webkit-details-marker { display:none }
+.st-group > summary::before { content:'▸'; width:1em; font-size:130%; opacity:.7 }
+.st-group[open] > summary::before { content:'▾' }
+.st-group > summary > h3 { display:inline; margin:0; padding:0; border:0 }
+.st-group .st-meta { opacity:.6; font-size:90% }
+.st-group .st-actions { margin-left:auto; display:flex; flex-wrap:wrap; gap:.25em }
+.st-buttons { display:flex; flex-wrap:wrap; gap:.5em; margin-top:1em }
 .st-bar { display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:0 0 1em }
 .st-bar input[type=text] { flex:1; min-width:10em }
 .st-table .td, .st-table .th { vertical-align:middle }
-.st-table .st-dim { font-size:90% }
 body .cbi-dropdown[optional][open] > ul.dropdown > li[placeholder] { display:none !important }
 .st-act, .table .td.st-act { text-align:right; white-space:nowrap; width:1% }
 .st-ok { color:#2a2 } .st-mid { color:#b90 } .st-slow { color:#d60 } .st-bad { color:#c33 } .st-dim { opacity:.6 }
 .st-ico { display:inline-block; vertical-align:middle; line-height:1 }
 .st-ico svg { display:block; width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round }
 .st-ico.filled svg { fill:currentColor }
-.btn.st-ib { min-width:2.4em; padding-left:.55em; padding-right:.55em; text-align:center }
-.btn.st-ib .st-ico { margin:0 auto }
-.btn.st-ib.on { background:rgba(60,140,220,.25) }
-@media (max-width:854px) { .st-info .td:first-child { flex-basis:100%; font-weight:bold } .st-info .td + .td { flex-basis:100% } }
+@media (max-width:854px) { .st-info .td:first-child { flex-basis:100%; font-weight:bold } .st-info .td + .td { flex-basis:100% } .st-kl { position:static; min-height:0 } }
 `;
 
 function injectCss() {
@@ -76,20 +93,10 @@ return baseclass.extend({
 		injectCss();
 	},
 
-	icon(name, filled) {
+	star(filled) {
 		const el = E('span', { 'class': 'st-ico' + (filled ? ' filled' : '') });
-		el.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + PATHS[name] + '</svg>';
+		el.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + STAR + '</svg>';
 		return el;
-	},
-
-	// Кнопка-иконка с подсказкой. extra — дополнительные классы (например, «on»).
-	iconButton(name, title, handler, extra) {
-		return E('button', {
-			'class': 'btn cbi-button st-ib ' + (extra || ''),
-			'title': title,
-			'aria-label': title,
-			'click': (ev) => { ev.preventDefault(); ev.stopPropagation(); return handler(ev); }
-		}, this.icon(name));
 	},
 
 	// Для load() страницы: модуль из кэша браузера старее нужного — скачать его заново и
@@ -109,9 +116,11 @@ return baseclass.extend({
 
 	// Строка «подпись | значение», как на «Состояние → Обзор»: подпись слева, треть ширины,
 	// значения в строку, пояснение под ними. Массив — чтобы строки собирались через «...».
+	// Подпись стоит у верха строки и при прокрутке длинного значения (каталог списков, серверы
+	// DNS) остаётся на виду, а не уезжает в середину или за край.
 	kv(label, value, title) {
 		return [ E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td left', 'width': '33%', 'title': title || null }, label),
+			E('td', { 'class': 'td left', 'width': '33%', 'title': title || null }, E('div', { 'class': 'st-kl' }, label)),
 			E('td', { 'class': 'td left' }, E('div', { 'class': 'st-row' }, value))
 		]) ];
 	},
@@ -119,14 +128,6 @@ return baseclass.extend({
 	// Строки kv — таблицей.
 	card(rows, cls) {
 		return E('table', { 'class': 'table st-info' + (cls ? ' ' + cls : '') }, rows);
-	},
-
-	info(label, value, title) {
-		return this.kv(label, value, title);
-	},
-
-	infoTable(rows, cls) {
-		return this.card(rows, cls);
 	},
 
 	// Флажок, как у форм LuCI (ui.Checkbox): подпись — у строки, рядом только флажок.
@@ -147,9 +148,9 @@ return baseclass.extend({
 		return E('div', { 'class': 'cbi-section' }, [ title ? E('h3', {}, title) : '', ...[].concat(content) ]);
 	},
 
-	// Таблица LuCI: на телефоне тема показывает строки карточками, подписи — из заголовков
-	// столбцов (data-title у ячеек). heads — [ подпись | [ подпись, атрибуты ] ]; empty — текст
-	// заглушки, когда строк нет.
+	// Таблица без сортировки (списки: порядок строк — это порядок проверки), собирается вручную:
+	// на телефоне тема показывает строки карточками, подписи — из заголовков столбцов (data-title
+	// у ячеек). heads — [ подпись | [ подпись, атрибуты ] ]; empty — текст заглушки, когда строк нет.
 	table(heads, rows, cls, empty) {
 		return E('table', { 'class': 'table cbi-section-table st-table' + (cls ? ' ' + cls : '') }, [
 			E('tr', { 'class': 'tr table-titles' }, heads.map((h) => Array.isArray(h) ? E('th', Object.assign({ 'class': 'th' }, h[1]), h[0]) : E('th', { 'class': 'th' }, h))),
@@ -157,31 +158,29 @@ return baseclass.extend({
 		]);
 	},
 
-	// Заголовок столбца с сортировкой, как у таблиц форм LuCI: щелчок — по возрастанию, ещё раз —
-	// по убыванию; стрелку рисует тема (data-sort-direction). state — { key, desc } страницы.
-	sortHead(label, key, state, onchange) {
-		return [ label, {
-			'data-sortable-row': '',
-			'data-sort-direction': (state.key == key) ? (state.desc ? 'desc' : 'asc') : null,
-			'title': _('Сортировать'),
-			'click': () => {
-				state.desc = (state.key == key) ? !state.desc : false;
-				state.key = key;
-				onchange();
-			}
-		} ];
-	},
-
-	// Упорядочить по state: value(x, key) — значение для сравнения (строка или число).
-	sorted(list, state, value) {
-		if (!state.key)
-			return list;
-		const v = (x) => value(x, state.key);
-		return list.slice().sort((a, b) => {
-			const x = v(a), y = v(b);
-			const r = (typeof x == 'number' && typeof y == 'number') ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' });
-			return state.desc ? -r : r;
+	// Таблица данных — стоковый виджет LuCI (ui.Table): сортировка щелчком по заголовку (LuCI её
+	// запоминает), заглушка, когда пусто, подписи столбцов на телефоне. id — имя таблицы на странице;
+	// columns — [ заголовок | [ заголовок, класс ячеек ] ]; rows — [ { cells, cls } ]: ячейка —
+	// текст или один элемент (сортируется по его data-value, иначе по тексту), cls — класс строки.
+	// Столбец кнопок — с классом cbi-section-actions: по нему не сортируют.
+	dataTable(id, columns, rows, cls, empty) {
+		const t = new ui.Table(columns.map((c) => [].concat(c)[0]), {
+			id, classes: [ 'cbi-section-table', 'st-table' ].concat(cls || []),
+			captionClasses: columns.map((c) => [].concat(c)[1] || null)
 		});
+		// Виджет при каждой сортировке собирает строки заново — классы строк возвращаются здесь.
+		const update = t.update.bind(t);
+		t.update = (data, text) => {
+			const node = update(data, text);
+			node.querySelectorAll('.tr:not(.table-titles):not(.placeholder)').forEach((tr, i) => {
+				if (data[i] && data[i].cls)
+					tr.classList.add(data[i].cls);
+			});
+			return node;
+		};
+		// Текст — элементом: голую строку виджет вставил бы как HTML (а имена приходят из подписок).
+		const cell = (c) => (typeof c == 'string') ? E('span', {}, [ c ]) : c;
+		return t.update(rows.map((r) => Object.assign(r.cells.map(cell), { cls: r.cls })), E('em', {}, [ empty ]));
 	},
 
 	tr(cells, cls) {
@@ -261,14 +260,97 @@ return baseclass.extend({
 		return E('span', {}, [ text, ' ', this.dim(note) ]);
 	},
 
-	// Сохранить настройки (rpc settings_set); ошибку — уведомлением. Промис — сохранилось ли.
-	saveSettings(values) {
-		return callSettingsSet(values).then((r) => {
-			if (r && r.error) {
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-				return false;
+	// Правка конфига stella штатным UCI LuCI: fn меняет его (uci.add/remove/move и set ниже),
+	// изменения сразу уходят на роутер и записываются (uci commit) — службу перезагружает её
+	// reload-триггер procd. Перед правкой конфиг перечитывается: его меняет и сам роутер (подбор
+	// узла, WARP, автоподбор Zapret). fn вернула false — ничего не пишется. Промис — записано ли;
+	// ошибка — уведомлением.
+	edit(fn) {
+		const res = queue.then(() => {
+			writing = true;
+			uci.unload('stella');
+			return uci.load('stella');
+		}).then(() => fn()).then((r) => (r === false) ? false : uci.save().then(() => callCommit('stella')).then(() => true))
+			.catch((e) => {
+				// Отправленное наполовину не должно записаться вместе со следующей правкой.
+				uci.unload('stella');
+				ui.addNotification(null, E('p', {}, [ _('Не удалось сохранить: %s').format(e.message || e) ]), 'danger');
+				return callRevert('stella').catch(() => null).then(() => false);
+			}).then((ok) => {
+				writing = false;
+				return ok;
+			});
+		queue = res;
+		return res;
+	},
+
+	// Внутри edit: опция секции; пустая строка, пустой список и null — убрать опцию.
+	set(sid, key, value) {
+		uci.set('stella', sid, key, (value === '' || (Array.isArray(value) && !value.length)) ? null : value);
+	},
+
+	// Устройства сети: стоковый список LuCI (имена и адреса из DHCP и соседей) и настроенные
+	// (секции device). Свои адреса роутера и всё, что не в подсетях LAN (шлюз провайдера), — не
+	// устройства. [ { mac, ip, hostname, id, name, policy, configured } ].
+	devices() {
+		return Promise.all([ callHostHints().catch(() => ({})), callNetDevices().catch(() => ({})), callSettings(), uci.load('stella') ]).then(([ hints, net, cfg ]) => {
+			const own = {}, lans = [];
+			const num = (ip) => ip.split('.').reduce((n, x) => n * 256 + +x, 0);
+			const lan = cfg.lan_devices || [];
+			for (const name in net) {
+				if (net[name].mac)
+					own[net[name].mac.toLowerCase()] = true;
+				if (lan.indexOf(name) >= 0)
+					for (const a of (net[name].ipaddrs || []))
+						lans.push([ num(a.address), a.netmask ]);
 			}
-			return true;
+			const inLan = (ip) => !lans.length || lans.some(([ net4, bits ]) => Math.floor(num(ip) / 2 ** (32 - bits)) == Math.floor(net4 / 2 ** (32 - bits)));
+			const byMac = {}, res = [];
+			for (const s of uci.sections('stella', 'device')) {
+				const mac = String(L.toArray(s.mac)[0] || '').toLowerCase();
+				if (!mac)
+					continue;
+				res.push(byMac[mac] = { mac, id: s['.name'], name: s.name || '', configured: true,
+					policy: (s.policy == 'vpn' || s.policy == 'direct') ? s.policy : 'global' });
+			}
+			for (const m in hints) {
+				const mac = m.toLowerCase(), ip = (hints[m].ipaddrs || []).filter(inLan)[0];
+				let d = byMac[mac];
+				if (!d && (own[mac] || !ip))
+					continue;
+				if (!d)
+					res.push(d = byMac[mac] = { mac, id: null, name: '', policy: 'global', configured: false });
+				d.ip = ip || null;
+				d.hostname = hints[m].name || null;
+			}
+			return res;
+		});
+	},
+
+	// Служба Stella: start, stop, restart — стоковым вызовом LuCI.
+	service(action) {
+		return callInit('stella', action);
+	},
+
+	// Имя новой секции (list_1a2b3c4d): постоянное — на нём держатся файлы списка и id узлов.
+	newId(prefix) {
+		const b = crypto.getRandomValues(new Uint8Array(4));
+		return prefix + '_' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+	},
+
+	// Сохранить настройки (секция main); ошибку — уведомлением. Промис — сохранилось ли.
+	saveSettings(values) {
+		for (const key in values) {
+			const v = values[key];
+			const bad = CHECKS.find((c) => c[0].test(key) && !c[1].test(String(v).trim()));
+			if (bad) {
+				ui.addNotification(null, E('p', {}, [ bad[2] ]), 'danger');
+				return Promise.resolve(false);
+			}
+		}
+		return this.edit(() => {
+			for (const key in values)
+				this.set('main', key, (typeof values[key] == 'string') ? values[key].trim() : values[key]);
 		});
 	},
 

@@ -4,23 +4,21 @@
 'require ui';
 'require poll';
 'require dom';
+'require fs';
 'require stella.common as sui';
 
 const callStatus = rpc.declare({ object: 'stella', method: 'status' });
 const callCheck = rpc.declare({ object: 'stella', method: 'check' });
-const callRestart = rpc.declare({ object: 'stella', method: 'restart' });
 const callSpeedtest = rpc.declare({ object: 'stella', method: 'speedtest' });
-const callSetEnabled = rpc.declare({ object: 'stella', method: 'set_enabled', params: [ 'enabled' ] });
-const callLog = rpc.declare({ object: 'stella', method: 'log', expect: { log: '' } });
+// Строк журнала в окне: только Stella и xray, последние.
+const LOG_LINES = 300;
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callUpdateInfo = rpc.declare({ object: 'stella', method: 'update_info' });
 const callUpdateCheck = rpc.declare({ object: 'stella', method: 'update_check' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
 
 const CSS = `
-.st-state { font-size:120%; font-weight:bold }
 .st-out:empty { display:none }
-.st-log summary { cursor:pointer; padding:.4em 0 }
 .st-log textarea { width:100%; font-family:monospace; font-size:12px }
 `;
 
@@ -31,19 +29,19 @@ function ver(v) {
 
 return view.extend({
 	load() {
-		return sui.need(14).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
+		return sui.need(21).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
 	},
 
 	renderStatus(st) {
 		let state;
 		if (!st.enabled)
-			state = E('span', { 'class': 'st-state st-dim' }, _('Выключено'));
+			state = E('span', { 'class': 'st-dim' }, _('Выключено'));
 		else if (!st.running)
-			state = E('span', { 'class': 'st-state st-bad' }, _('Не запущено, см. лог'));
+			state = E('span', { 'class': 'st-bad' }, _('Не запущено, см. лог'));
 		else if (!st.intercept)
-			state = E('span', { 'class': 'st-state st-bad' }, _('Перехват не работает, см. лог'));
+			state = E('span', { 'class': 'st-bad' }, _('Перехват не работает, см. лог'));
 		else
-			state = E('span', { 'class': 'st-state st-ok' }, _('Работает'));
+			state = E('span', { 'class': 'st-ok' }, _('Работает'));
 
 		// Узел — ссылкой на «Серверы»: там он и меняется. (LuCI не разворачивает вложенные
 		// массивы — здесь всё плоско.)
@@ -62,8 +60,8 @@ return view.extend({
 		else
 			node = [ E('a', { 'href': href, 'class': 'st-bad' }, _('узел не выбран')) ];
 
-		dom.content(this.statusBox, sui.infoTable([
-			...sui.info(_('Состояние'), [
+		dom.content(this.statusBox, sui.card([
+			...sui.kv(_('Состояние'), [
 				state, E('span', {}, [ '(', ...node, ')' ]),
 				st.enabled ? E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, 'handleRestart') }, _('Перезапустить')) : '',
 				st.enabled ?
@@ -71,7 +69,7 @@ return view.extend({
 					E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, 'handleEnable', true) }, _('Включить'))
 			]),
 			// Работа и скорость — одной строкой: кнопки рядом, итоги под ними.
-			...sui.info(_('Проверка'), [ this.checkBtn, this.speedBtn, this.speedOut, this.checkOut ])
+			...sui.kv(_('Проверка'), [ this.checkBtn, this.speedBtn, this.speedOut, this.checkOut ])
 		]));
 		this.renderSpeed(st);
 	},
@@ -116,25 +114,25 @@ return view.extend({
 		const rows = [];
 
 		const st = info ? info.stella : { installed: inst['luci-app-stella'] };
-		rows.push(...sui.info('Stella', [ st.installed ? ver(st.installed) : _('установлена не пакетом'), ...state('stella', st) ]));
+		rows.push(...sui.kv('Stella', [ st.installed ? ver(st.installed) : _('установлена не пакетом'), ...state('stella', st) ]));
 
 		const xr = info ? info.xray : { installed: inst['xray-core'] };
-		rows.push(...sui.info('xray-core', [ ver(xr.installed) || '—', ...state('xray', xr) ]));
+		rows.push(...sui.kv('xray-core', [ ver(xr.installed) || '—', ...state('xray', xr) ]));
 
 		// Без nftset в dnsmasq IP сайтов из списков не попадают в правила.
-		rows.push(...sui.info('dnsmasq', u.dnsmasq_nftset ? 'full' :
+		rows.push(...sui.kv('dnsmasq', u.dnsmasq_nftset ? 'full' :
 			[ _('без nftset'), btn('dnsmasq', _('Установить dnsmasq-full')), E('span', { 'class': 'st-bad' }, _('без него списки не работают')) ]));
 
 		// Установить можно и без проверки: версию из последнего релиза узнает сама установка.
 		const zr = info ? info.zapret : { installed: inst.zapret };
-		rows.push(...sui.info('zapret', zr.installed ? [ ver(zr.installed), ...state('zapret', zr) ] :
+		rows.push(...sui.kv('zapret', zr.installed ? [ ver(zr.installed), ...state('zapret', zr) ] :
 			[ _('не установлен'), btn('zapret', zr.latest ? _('Установить %s').format(ver(zr.latest)) : _('Установить')) ]));
 
 		// mwan3 — для резервного канала на «Серверах». Ставится nftables-версия с GitHub (3.x): из
 		// репозитория OpenWrt — старая, на iptables, в 25.12 не рекомендуется.
 		const nft = (v) => parseInt(v, 10) >= 3;
 		const mw = (info && info.mwan3) ? info.mwan3 : { installed: inst.mwan3 };
-		rows.push(...sui.info('mwan3', !mw.installed ?
+		rows.push(...sui.kv('mwan3', !mw.installed ?
 			[ _('не установлен'), btn('mwan3', mw.latest ? _('Установить %s').format(ver(mw.latest)) : _('Установить')), sui.dim(_('нужен для резервного канала')) ] :
 			!nft(mw.installed) ?
 			[ ver(mw.installed), btn('mwan3', _('Заменить на nftables-версию')), E('span', { 'class': 'st-bad' }, _('версия на iptables')) ] :
@@ -142,13 +140,13 @@ return view.extend({
 
 		const busy = u.installing ? _('устанавливаю…') : u.checking ? _('обновляю…') : null;
 		// Одно расписание на все обновления: подписки, списки, каталоги и новые версии.
-		rows.push(...sui.info(_('Обновление'), [ this.autoUpd,
+		rows.push(...sui.kv(_('Обновление'), [ this.autoUpd,
 			busy ? E('em', { 'class': 'spinning' }, busy) :
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, 'handleUpdateCheck') }, _('Проверить и обновить')),
 			sui.dim(info ? _('обновлено %s').format(sui.time(info.at)) : _('ещё не обновлялось')),
 			sui.hint(_('Подписки, списки, каталоги Zapret и DNS, новые версии.')) ]));
 
-		dom.content(this.updBox, sui.infoTable(rows));
+		dom.content(this.updBox, sui.card(rows));
 	},
 
 	pollUpdates() {
@@ -187,7 +185,9 @@ return view.extend({
 	},
 
 	handleEnable(on) {
-		return callSetEnabled(on).then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
+		// Настройка — в конфиг, служба — запуском или остановкой (после остановки её reload-триггера нет).
+		return sui.saveSettings({ enabled: on ? '1' : '0' }).then((ok) => ok && sui.service(on ? 'start' : 'stop'))
+			.then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
 	},
 
 	handleSpeed() {
@@ -195,7 +195,7 @@ return view.extend({
 	},
 
 	handleRestart() {
-		return callRestart().then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
+		return sui.service('restart').then(() => new Promise((r) => setTimeout(r, 2500))).then(() => this.poll());
 	},
 
 	handleCheck() {
@@ -208,7 +208,9 @@ return view.extend({
 	},
 
 	handleLog() {
-		return callLog().then((log) => {
+		// Системный журнал — тем же способом, что «Состояние → Системный журнал».
+		return fs.exec_direct('/usr/libexec/syslog-wrapper').then((text) => {
+			const log = String(text || '').split('\n').filter((l) => /xray|stella/.test(l)).slice(-LOG_LINES).join('\n');
 			this.logBox.value = log || _('Лог пуст.');
 			this.logBox.scrollTop = this.logBox.scrollHeight;
 		});
@@ -242,8 +244,9 @@ return view.extend({
 
 		const level = sui.select(cfg.log_level, [ 'error', 'warning', 'info', 'debug' ].map((l) => [ l, l ]), (v) => this.save({ log_level: v }));
 
-		const log = E('details', { 'class': 'st-log' }, [
-			E('summary', {}, _('Лог')),
+		// Сворачиваемый раздел — как группы узлов на «Серверах» и серверы на «DNS».
+		const log = E('details', { 'class': 'cbi-section st-group st-log' }, [
+			E('summary', {}, E('h3', {}, _('Лог'))),
 			this.logBox,
 			E('div', { 'class': 'st-row', 'style': 'justify-content:flex-end' }, [
 				_('Уровень лога:'), level,

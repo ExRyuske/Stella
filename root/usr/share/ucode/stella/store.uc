@@ -245,7 +245,8 @@ export function task_busy(name) {
 	return match(v, /^[0-9]+$/) != null && system(`kill -0 ${v} 2>/dev/null`) == 0;
 };
 
-// Скрипт задачи: пишет свой PID во флаг, выполняет cmd с логом в <имя>.log, снимает флаг.
+// Скрипт задачи: пишет свой PID во флаг, выполняет cmd с логом в <имя>.log, снимает флаг;
+// код возврата — от cmd.
 export function task_script(name, cmd) {
 	let run = `${RUN_DIR}/${name}.running`;
 	system(`mkdir -p ${RUN_DIR}`);
@@ -253,7 +254,7 @@ export function task_script(name, cmd) {
 	let script = `${RUN_DIR}/${name}.sh`;
 	// umask — как у обычной оболочки: у rpcd она строже, и созданные задачей файлы (хостлисты
 	// Zapret) не мог бы прочитать nfqws, который работает не от root.
-	writefile(script, `echo $$ >${run}\numask 022\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrm -f ${run}\n`);
+	writefile(script, `echo $$ >${run}\numask 022\n{ ${cmd}; } >${RUN_DIR}/${name}.log 2>&1\nrc=$?\nrm -f ${run}\nexit $rc\n`);
 	return script;
 };
 

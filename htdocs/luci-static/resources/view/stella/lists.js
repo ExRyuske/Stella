@@ -4,17 +4,12 @@
 'require ui';
 'require poll';
 'require dom';
+'require uci';
 'require stella.common as sui';
 
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
-const callAdd = rpc.declare({ object: 'stella', method: 'list_add', params: [ 'items', 'action', 'devices_mode', 'macs' ] });
-const callEdit = rpc.declare({ object: 'stella', method: 'list_edit', params: [ 'id', 'name', 'urls', 'geo', 'entries', 'action', 'enabled', 'devices_mode', 'macs' ] });
-const callRemove = rpc.declare({ object: 'stella', method: 'list_remove', params: [ 'id' ] });
-const callMove = rpc.declare({ object: 'stella', method: 'list_move', params: [ 'id', 'dir' ] });
 const callUpdate = rpc.declare({ object: 'stella', method: 'lists_update', params: [ 'id' ] });
 const callGeoIndex = rpc.declare({ object: 'stella', method: 'geo_index', params: [ 'update' ] });
-const callDefault = rpc.declare({ object: 'stella', method: 'set_default_action', params: [ 'action' ] });
-const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callZapretInfo = rpc.declare({ object: 'stella', method: 'zapret_info' });
 const callZapretOff = rpc.declare({ object: 'stella', method: 'zapret_service_off' });
@@ -24,7 +19,7 @@ const callZTest = rpc.declare({ object: 'stella', method: 'zapret_test', params:
 const callZTestStop = rpc.declare({ object: 'stella', method: 'zapret_test_stop' });
 const callUpdateInstall = rpc.declare({ object: 'stella', method: 'update_install', params: [ 'what' ] });
 
-const FAMILIES = { v: 'Zapret Manager', yv: 'YouTube', fs: 'Flowseal', dv: 'Discord', gv: _('игры'), current: _('текущая') };
+const FAMILIES = { v: 'Zapret Manager', fs: 'Flowseal' };
 
 const ITD = 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/';
 
@@ -52,6 +47,7 @@ const CSS = `
 .st-table select { width:auto }
 .st-order .btn { line-height:1.8em; min-height:0 }
 .st-order { white-space:nowrap; width:1% }
+@media (max-width:854px) { .st-lists .td.st-act { flex:1 1 100%; text-align:left } }
 .st-scope { color:#39f }
 .st-cat h5 { margin:.4em 0 .15em; font-size:90%; opacity:.8 }
 .st-cols { columns:2 }
@@ -66,12 +62,6 @@ const CSS = `
 .st-chips:empty { display:none }
 .st-chip { display:inline-flex; gap:.4em; align-items:center; padding:.1em .5em; border-radius:3px; background:rgba(60,140,220,.18); font-size:90% }
 .st-chip a { text-decoration:none; opacity:.7 }
-.st-zres { flex-basis:100%; max-height:18em; overflow-y:auto; margin-top:.4em; border:1px solid rgba(128,128,128,.2); border-radius:4px }
-.st-zres table { width:100%; border-collapse:collapse }
-.st-zres .td { padding:.2em .6em; border-bottom:1px solid rgba(128,128,128,.1) }
-.st-zres .tr.st-cur .td { background:rgba(60,160,60,.14) }
-.st-bar-bg { display:inline-block; width:6em; height:.5em; background:rgba(128,128,128,.2); border-radius:3px; vertical-align:middle; overflow:hidden }
-.st-bar-bg > span { display:block; height:100%; background:#3a3 }
 `;
 
 function actionSelect(value, onchange) {
@@ -117,19 +107,19 @@ function listName(url) {
 
 return view.extend({
 	load() {
-		return sui.need(14).then(() => Promise.all([ callLists(), callDevices(), callSettings(), callZapretInfo(), callZCatalog() ]));
+		return sui.need(21).then(() => Promise.all([ callLists(), sui.devices(), callSettings(), callZapretInfo(), callZCatalog() ]));
 	},
 
 	setDevices(dr) {
-		this.devices = dr.devices;
+		this.devices = dr;
 		this.devNames = {};
-		for (const d of dr.devices)
+		for (const d of dr)
 			this.devNames[d.mac] = d.name || d.hostname || d.ip || d.mac;
 	},
 
 	refresh() {
 		// Настройки тоже: стратегию меняют и выбор из каталога, и автоподбор.
-		return Promise.all([ callLists(), callDevices(), callZapretInfo(), callZCatalog(), callSettings() ]).then(([ d, dr, zi, zc, cfg ]) => {
+		return Promise.all([ callLists(), sui.devices(), callZapretInfo(), callZCatalog(), callSettings() ]).then(([ d, dr, zi, zc, cfg ]) => {
 			const was = this.data && this.data.updating;
 			const wasTesting = this.zc && this.zc.testing;
 			this.data = d;
@@ -173,6 +163,28 @@ return view.extend({
 				ui.addNotification(null, E('p', {}, r.error), 'danger');
 			return this.refresh();
 		});
+	},
+
+	// Записать список (секция list): новый — в конец; sources — его ссылки и наборы изменились,
+	// роутер скачивает их сразу.
+	saveList(id, v, sources) {
+		return this.call(sui.edit(() => {
+			// Новый — только когда в нём есть название; прежнего уже нет (удалили в другом окне) —
+			// не создавать его обрывком.
+			if (!uci.get('stella', id)) {
+				if (v.name == null)
+					return false;
+				uci.add('stella', 'list', id);
+			}
+			for (const key in v)
+				sui.set(id, key, v[key]);
+		}).then((ok) => (ok && sources) ? callUpdate(id) : null));
+	},
+
+	// Порядок важен: срабатывает первый совпавший список. dir: -1 — выше, 1 — ниже.
+	moveList(id, dir) {
+		const ids = this.data.lists.map((l) => l.id), other = ids[ids.indexOf(id) + dir];
+		return this.call(sui.edit(() => other ? uci.move('stella', id, other, dir > 0) : false));
 	},
 
 	// Одно окно для создания и изменения. Для нового списка — ещё и каталог itdoginfo.
@@ -266,6 +278,8 @@ return view.extend({
 			])) : E('div', { 'class': 'st-dev st-dim' }, _('ничего не найдено')));
 		};
 		search.addEventListener('input', drawHits);
+		// Что в индексе: время и сколько чего (часть могла не скачаться — время тогда прежнее).
+		const geoSig = (r) => [ r.at, r.geosite.length, r.geoip.length, (r.itdog || []).length ].join();
 		const useGeo = (r) => {
 			this.geo = r;
 			if ((r.itdog || []).length)
@@ -278,31 +292,36 @@ return view.extend({
 		let asked = false;
 		const loadGeo = (update) => callGeoIndex(update).then((r) => {
 			const have = r.geosite.length + r.geoip.length + (r.itdog || []).length > 0;
-			if (have && (!this.geo || this.geo.at != r.at))
+			if (have && (!this.geo || geoSig(this.geo) != geoSig(r)))
 				useGeo(r);
-			if (!r.loading && !asked && (!have || Date.now() / 1000 - r.at > 7 * 86400)) {
+			// Нет наборов или списков itdoginfo (часть не скачалась) либо индексу больше недели.
+			const full = r.geosite.length && r.geoip.length && (r.itdog || []).length;
+			if (!r.loading && !asked && (!full || Date.now() / 1000 - r.at > 7 * 86400)) {
 				asked = true;
 				return loadGeo(true);
 			}
 			if (r.loading)
 				return new Promise((res) => window.setTimeout(res, 1500)).then(() => document.body.contains(search) && loadGeo(false));
+			const retry = (box, text) => dom.content(box, [ text + ' ', E('a', { 'href': '#', 'click': (ev) => {
+				ev.preventDefault();
+				dom.content(geoState, '');
+				if (!catDrawn)
+					dom.content(cat, E('em', { 'class': 'spinning' }, _('загружаю списки…')));
+				loadGeo(true);
+			} }, _('Повторить')) ]);
 			if (!catDrawn)
-				dom.content(cat, sui.dim(_('Списки itdoginfo не загружены.')));
-			if (!have) {
+				retry(cat, _('Списки itdoginfo не загружены.'));
+			if (!r.geosite.length && !r.geoip.length) {
 				search.placeholder = '';
-				dom.content(geoState, [ _('Не удалось загрузить наборы.') + ' ', E('a', { 'href': '#', 'click': (ev) => {
-					ev.preventDefault();
-					dom.content(geoState, '');
-					search.placeholder = _('загружаю наборы…');
-					loadGeo(true);
-				} }, _('Повторить')) ]);
+				retry(geoState, _('Не удалось загрузить наборы.'));
 			}
 		}).catch((e) => dom.content(geoState, [ _('Поиск недоступен: %s').format(e.message) ]));
 		drawChips();
+		// Индекс со страницы — сразу, и всегда сверка с роутером: без неё окно, открытое после
+		// неполной загрузки, так и показывало бы «загружаю списки…».
 		if (this.geo)
 			useGeo(this.geo);
-		else
-			loadGeo(false);
+		loadGeo(false);
 
 		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': l.name, 'placeholder': isNew ? _('необязательно') : '' });
 		text = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4, 'input': () => textEdited = true,
@@ -338,12 +357,15 @@ return view.extend({
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
 			const geo = geoSel.map((p) => p[0] + ':' + p[1]);
 
+			// Для каких устройств: «все» — без отметок.
+			const scope = { devices_mode: devMode == 'all' ? null : devMode, mac: devMode == 'all' ? null : macs };
 			if (!isNew) {
 				const all_urls = [ ...new Set([ ...checks.filter(([ cb ]) => cb.checked).flatMap(([ , , u ]) => u), ...urls ]) ];
 				if (!all_urls.length && !geo.length && !sites.length)
 					return ui.addNotification(null, E('p', {}, _('Список пуст.')), 'warning');
 				ui.hideModal();
-				return this.call(callEdit(l.id, name.value.trim() || l.name, all_urls, geo, sites, action, undefined, devMode, macs));
+				return this.saveList(l.id, Object.assign({ name: name.value.trim() || l.name, action, url: all_urls, geo, entry: sites }, scope),
+					all_urls.join() != l.urls.join() || geo.join() != l.geo.join());
 			}
 
 			// Всё выбранное — один список: пункты каталога, наборы, свои ссылки и сайты.
@@ -355,7 +377,8 @@ return view.extend({
 				...(sites.length ? [ _('свои сайты') ] : []) ];
 			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
 			ui.hideModal();
-			return this.call(callAdd([ { name: name.value.trim() || auto, urls: all_urls, geo, entries: sites } ], action, devMode, macs));
+			return this.saveList(sui.newId('list'), Object.assign({ name: name.value.trim() || auto, action, enabled: '1', url: all_urls, geo, entry: sites }, scope),
+				all_urls.length + geo.length > 0);
 		};
 
 		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
@@ -367,7 +390,7 @@ return view.extend({
 				sui.field(_('Свои сайты и ссылки'), [ text, sui.hint(_('Сайты, подсети и ссылки на списки, по одному в строке.')) ]),
 				sui.field(_('Устройства'), [ mode, devList ])
 			]),
-			E('div', { 'style': 'display:flex;gap:.5em' }, [
+			E('div', { 'class': 'st-buttons' }, [
 				isNew ? '' : E('button', { 'class': 'btn cbi-button-negative', 'click': () => { ui.hideModal(); this.handleRemove(l); } }, _('Удалить')),
 				E('span', { 'style': 'flex:1' }),
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
@@ -386,7 +409,7 @@ return view.extend({
 	commitRemove(id) {
 		window.clearTimeout(this.pending[id]);
 		delete this.pending[id];
-		return this.call(callRemove(id));
+		return this.call(sui.edit(() => uci.remove('stella', id)));
 	},
 
 	handleRestore(id) {
@@ -397,7 +420,7 @@ return view.extend({
 
 	goneRow(l) {
 		return sui.tr([
-			sui.td(null, _('Список «%s» удалён').format(l.name), 'st-dim', { 'colspan': 4 }),
+			sui.td(null, _('Список «%s» удалён').format(l.name), 'st-dim', { 'colspan': 5 }),
 			sui.td(null, E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': () => this.handleRestore(l.id) }, _('Вернуть')), 'st-act')
 		]);
 	},
@@ -426,7 +449,7 @@ return view.extend({
 				sui.field(_('Порты TCP'), tcp),
 				sui.field(_('Порты UDP'), udp)
 			]),
-			E('div', { 'style': 'display:flex;gap:.5em' }, [
+			E('div', { 'class': 'st-buttons' }, [
 				zi.import_opts ? E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': () => {
 					opts.value = String(zi.import_opts).trim();
 					if (zi.import_tcp) tcp.value = zi.import_tcp;
@@ -459,29 +482,34 @@ return view.extend({
 			return (r && r.ok >= 0) ? '%d из %d'.format(r.ok, r.total) : (r ? _('ошибка') : '');
 		};
 
-		// Выбор стратегии: каталог по источникам (без YouTube — у неё свой выбор ниже);
-		// смена применяется сразу.
-		const groups = {};
-		for (const st of zc.strategies)
-			if (st.family == 'v' || st.family == 'fs')
-				(groups[st.family] = groups[st.family] || []).push(st);
+		// Стратегии в списках — по итогам последней проверки: лучшие сверху, за ними непроверенные
+		// (по порядку каталога), ошибки — в конце. Оценка — серой припиской к названию; у «выключено»
+		// — сколько открывается без обхода.
+		const rank = (st) => {
+			const r = res[st.name];
+			return !r ? -1 : (r.ok < 0) ? -2 : r.ok / (r.total || 1);
+		};
+		const byScore = (list) => list.map((st, i) => [ st, i ]).sort((a, b) => rank(b[0]) - rank(a[0]) || a[1] - b[1]).map((x) => x[0]);
+		const base = (zc.results && zc.results.baseline) || {};
+		const off = (k) => base[k] ? sui.label(_('выключено'), _('без обхода %d из %d').format(base[k].ok, base[k].total)) : _('выключено');
+		const tested = (zc.results && zc.results.at) ? _('проверено %s').format(sui.time(zc.results.at)) : '';
 
 		// YouTube, Discord и игры — отдельные наборы, как в Zapret Manager.
-		const fam = (f) => zc.strategies.filter((st) => st.family == f);
+		const fam = (f) => byScore(zc.strategies.filter((st) => st.family == f));
 		const cur = (key) => cfg[key] || '';
-		// Оценка из последней проверки — серой припиской к названию.
 		const stLabel = (st) => res[st.name] ? sui.label(st.name, score(st.name)) : st.name;
-		const setSel = (key, f) => sui.select(cur(key, f), [ [ '', _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
+		const setSel = (key, f) => sui.select(cur(key, f), [ [ '', f == 'yv' ? off('yv') : _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
 			(v) => this.saveSetting({ [key]: v }));
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
 		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
 		const fakeSel = (key) => [ sui.dim(_('подделка')), sui.select(cfg[key] || '', [ [ '', _('stun (по умолчанию)') ],
 			...(zc.fakes || []).map((f) => [ f, fakeName(f) ]) ], (v) => this.saveSetting({ [key]: v })) ];
-		// Основная: каталог по источникам (источник — серой припиской), выключено и своя.
+		// Основная: стратегии Zapret Manager и Flowseal одним списком (источник — серой припиской),
+		// выключено и своя; смена применяется сразу.
 		const sel = sui.select(zc.custom ? '__custom' : (zc.current || ''), [
-			[ '', _('выключено') ],
-			...Object.keys(groups).reduce((all, f) => all.concat(groups[f].map((st) =>
-				[ st.name, sui.label(st.name, (FAMILIES[f] || f) + (res[st.name] ? ', ' + score(st.name) : '')) ])), []),
+			[ '', off('general') ],
+			...byScore(zc.strategies.filter((st) => st.family == 'v' || st.family == 'fs')).map((st) =>
+				[ st.name, sui.label(st.name, (FAMILIES[st.family] || st.family) + (res[st.name] ? ', ' + score(st.name) : '')) ]),
 			[ '__custom', zc.custom ? _('своя стратегия') : _('своя стратегия…') ]
 		], (v) => {
 			if (v == '__custom')
@@ -527,30 +555,6 @@ return view.extend({
 			];
 		};
 
-		// Результаты: лучшие сверху, с кнопкой «Применить».
-		const names = Object.keys(res).filter((n) => res[n].family != 'current').sort((a, b) => res[b].ok - res[a].ok);
-		const base = zc.results && zc.results.baseline;
-		const baseText = base ? Object.keys(base).map((k) => (k == 'yv' ? _('YouTube') : _('общие')) + ' ' + base[k].ok + '/' + base[k].total).join(', ') : '';
-		const isCur = (n, r) => (r.family == 'yv') ? n == cur('zapret_yt', 'yv') : (n == zc.current && !zc.custom);
-		const apply = (n) => this.call(callZApply(n));
-		const results = names.length ? E('details', { 'class': 'st-full' }, [
-			E('summary', { 'style': 'cursor:pointer' }, _('Результаты проверки (%d)').format(names.length) +
-				(zc.results.at ? ' · ' + sui.time(zc.results.at) : '') + (baseText ? ' · ' + _('без обхода: %s').format(baseText) : '')),
-			E('div', { 'class': 'st-zres' }, E('table', { 'class': 'table st-table' }, names.map((n) => {
-				const r = res[n];
-				const pct = (r.ok > 0 && r.total) ? Math.round(100 * r.ok / r.total) : 0;
-				return sui.tr([
-					sui.td(_('Стратегия'), [ n ]),
-					sui.td(_('Источник'), FAMILIES[r.family] || r.family, 'st-dim'),
-					// У ошибки — причина: nfqws не принял ключи, нет файла и т. п.
-					r.ok >= 0 ? sui.td(_('Открыто'), [ E('span', { 'class': 'st-bar-bg' }, E('span', { 'style': 'width:' + pct + '%' })), ' ', score(n) ], null, { 'style': 'white-space:nowrap' })
-						: sui.td(_('Открыто'), [ r.error ? _('ошибка: %s').format(r.error) : _('ошибка') ], 'st-bad'),
-					sui.td(null, isCur(n, r) ? _('текущая') :
-						E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': ui.createHandlerFn(this, () => apply(n)) }, _('Применить')), 'st-act')
-				], isCur(n, r) ? 'st-cur' : '');
-			})))
-		]) : '';
-
 		const svcBad = zi.service_running || zi.service_enabled || zi.leftover_tables;
 		const svc = [
 			zi.service_running ? E('span', { 'class': 'st-bad' }, _('запущена и мешает')) :
@@ -573,17 +577,13 @@ return view.extend({
 		const needDefault = (cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret';
 		dom.content(this.zapretBox, [
 			// Состояние и каталог — одной строкой; каталог обновляется вместе со всем остальным
-			// (расписание и кнопка на «Обзоре»).
-			...sui.kv(_('Состояние'), [ state, sui.dim([
-				zc.strategies.length ? _('каталог: %d стратегий').format(zc.strategies.length) : _('каталог не загружен'),
-				zc.updated ? _('обновлён %s').format(sui.time(zc.updated)) : ''
-			].filter((x) => x).join(', ')), zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю каталог…')) : '' ]),
+			// (расписание и кнопка на «Обзоре») — когда, видно там.
+			...sui.kv(_('Состояние'), [ state, tested ? sui.dim(tested) : '', zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю каталог…')) : '' ]),
 			...sui.kv(_('Основная'), [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs') ]),
 			...sui.kv('YouTube', [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
 			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []),
 				needDefault ? sui.hint(_('Работает, когда остальной трафик идёт через Zapret.')) : '' ]),
-			...(results ? sui.kv(_('Результаты'), results) : []),
 			// Конфликт с отдельной службой zapret — только если он есть.
 			...(svcBad ? sui.kv(_('Служба zapret'), svc) : [])
 		]);
@@ -595,7 +595,7 @@ return view.extend({
 		// Списки обновляются вместе со всем остальным — расписание и кнопка на «Обзоре».
 		dom.content(this.defaultBox, [
 			...sui.kv(_('Остальной трафик'), [ sui.select(d.default_action,
-				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.call(callDefault(v))),
+				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.saveSetting({ default_action: v })),
 				d.updating ? E('em', { 'class': 'spinning' }, _('загружаю списки…')) : '' ])
 		]);
 
@@ -605,18 +605,16 @@ return view.extend({
 		const rows = d.lists.map((l, i) => (l.id in this.pending) ? this.goneRow(l) : sui.tr([
 			sui.td(null, [
 				E('button', { 'class': 'btn cbi-button cbi-button-up', 'title': _('Выше'), 'disabled': i == 0 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, -1))) }, '▲'),
+					'click': ui.createHandlerFn(this, () => this.moveList(l.id, -1)) }, '▲'),
 				' ',
 				E('button', { 'class': 'btn cbi-button cbi-button-down', 'title': _('Ниже'), 'disabled': i == n - 1 ? '' : null,
-					'click': ui.createHandlerFn(this, () => this.call(callMove(l.id, 1))) }, '▼')
+					'click': ui.createHandlerFn(this, () => this.moveList(l.id, 1)) }, '▼')
 			], 'st-order'),
 			sui.td(null, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
-				'change': (ev) => this.call(callEdit(l.id, undefined, undefined, undefined, undefined, undefined, ev.target.checked)) }), 'st-order'),
+				'change': (ev) => this.saveList(l.id, { enabled: ev.target.checked ? '1' : '0' }) }), 'st-order'),
 			sui.td(_('Список'), [ E('div', {}, [ l.name ]), this.scopeLabel(l) ]),
-			sui.td(_('Содержимое'), [
-				E('div', {}, countLabel(l)),
-				l.updated ? E('div', {}, sui.time(l.updated)) : ''
-			], 'st-dim'),
+			sui.td(_('Содержимое'), countLabel(l)),
+			sui.td(_('Обновлён'), l.updated ? sui.time(l.updated) : '—'),
 			sui.td(null, [
 				(l.urls.length || l.geo.length) ? sui.rowButton(_('Обновить'), 'action', () => this.call(callUpdate(l.id))) : '',
 				' ',
@@ -628,8 +626,8 @@ return view.extend({
 
 		dom.content(this.tableBox, sui.table([
 			[ _('Проверка сверху вниз'), { 'colspan': 2, 'style': 'white-space:nowrap', 'title': _('Срабатывает первый подходящий список') } ],
-			_('Список'), _('Содержимое'), ''
-		], rows, null, _('Списков пока нет.')));
+			_('Список'), _('Содержимое'), _('Обновлён'), ''
+		], rows, 'st-lists', _('Списков пока нет.')));
 	},
 
 	render([ data, dr, cfg, zi, zc ]) {
@@ -641,9 +639,11 @@ return view.extend({
 		this.pending = {};
 		// Ушли со страницы раньше — удалить сейчас: обычный запрос при уходе может не дойти.
 		window.addEventListener('pagehide', () => {
-			for (const id in this.pending)
-				navigator.sendBeacon(rpc.getBaseURL(), JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'call',
-					params: [ rpc.getSessionID(), 'stella', 'list_remove', { id } ] }));
+			const req = (method, args) => ({ jsonrpc: '2.0', id: 0, method: 'call', params: [ rpc.getSessionID(), 'uci', method, args ] });
+			const ids = Object.keys(this.pending);
+			if (ids.length)
+				navigator.sendBeacon(rpc.getBaseURL(), JSON.stringify([ ...ids.map((id) => req('delete', { config: 'stella', section: id })),
+					req('commit', { config: 'stella' }) ]));
 		});
 		this.defaultBox = sui.card([]);
 		this.tableBox = E('div');

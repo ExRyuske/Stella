@@ -211,7 +211,24 @@ mkdir -p "$T/trees"
 echo '{"tree":[{"path":"geosite-youtube.srs","type":"blob"},{"path":"geosite-ru-blocked.srs","type":"blob"},{"path":"geosite-geolocation-!cn.srs","type":"blob"},{"path":"geoip-ru.srs","type":"blob"},{"path":"youtube.json","type":"blob"},{"path":"geosite-x","type":"tree"}]}' > "$T/trees/rule-set-geosite"
 echo '{"tree":[{"path":"geoip-ru.srs","type":"blob"}]}' > "$T/trees/rule-set-geoip"
 cp tests/fixtures/itdog-tree.json "$T/itdog-tree.json"
-export STELLA_ITDOG_TREE=http://127.0.0.1:18765/itdog-tree.json
+# Списки itdoginfo — по именам файлов архива репозитория (без API GitHub); архива нет — по дереву API.
+python3 - "$T/itdog.tgz" tests/fixtures/itdog-tree.json <<'PY' || exit 1
+import io, json, sys, tarfile
+with tarfile.open(sys.argv[1], 'w:gz') as tar:
+    for e in json.load(open(sys.argv[2]))['tree']:
+        if e['type'] == 'blob':
+            tar.addfile(tarfile.TarInfo('allow-domains-main/' + e['path']), io.BytesIO(b''))
+PY
+export STELLA_ITDOG_TGZ=http://127.0.0.1:18765/itdog.tgz STELLA_ITDOG_TREE=http://127.0.0.1:18765/missing
+STELLA_GEO_TREES=http://127.0.0.1:18765/trees/rule-set- run geo-index >/dev/null
+python3 - "$T/run/geo-index.json" <<'PY' || exit 1
+import json, sys
+d = json.load(open(sys.argv[1]))
+if len(d['itdog']) != 7 or d['itdog'][2]['files'] != ['Services/discord.lst', 'Subnets/IPv4/discord.lst']:
+    print('FAIL: geo-index по архиву itdoginfo', d['itdog']); sys.exit(1)
+PY
+rm -f "$T/run/geo-index.json"
+export STELLA_ITDOG_TGZ=http://127.0.0.1:18765/missing.tgz STELLA_ITDOG_TREE=http://127.0.0.1:18765/itdog-tree.json
 STELLA_GEO_TREES=http://127.0.0.1:18765/trees/rule-set- run geo-index >/dev/null
 # Сервер наборов не ответил — прежние имена и списки itdoginfo остаются, отметка времени — прежняя.
 if STELLA_GEO_TREES=http://127.0.0.1:18765/missing/ run geo-index 2>/dev/null; then echo "FAIL: geo-index без ответа сервера"; exit 1; fi
@@ -222,7 +239,7 @@ if d['geosite'] != ['geolocation-!cn', 'ru-blocked', 'youtube'] or d['geoip'] !=
    d['itdog'][2]['files'] != ['Services/discord.lst', 'Subnets/IPv4/discord.lst'] or not d['at']:
     print('FAIL: geo-index', d); sys.exit(1)
 PY
-unset STELLA_ITDOG_TREE
+unset STELLA_ITDOG_TREE STELLA_ITDOG_TGZ
 
 # Исключения Zapret — всегда оба списка (Zapret Manager и Flowseal), какой бы ни была стратегия:
 # и в сете, и в ключах nfqws вместо заложенных в стратегию.

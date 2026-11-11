@@ -4,16 +4,14 @@
 'require ui';
 'require dom';
 'require poll';
+'require uci';
 'require stella.common as sui';
 
-// Устройства сети — все, что видны роутеру на интерфейсах LAN (аренды DHCP, соседи ARP), и
-// добавленные вручную. Чтобы устройство было легко узнать: название (своё или имя из DHCP), IP,
-// MAC и в сети ли оно сейчас. Режим меняется прямо в строке и применяется сразу.
+// Устройства сети — стоковый список LuCI (аренды DHCP, соседи) и добавленные вручную. Чтобы
+// устройство было легко узнать: название (своё или имя из DHCP), IP и MAC. Режим меняется прямо
+// в строке и применяется сразу.
 
-const callDevices = rpc.declare({ object: 'stella', method: 'devices' });
 const callLists = rpc.declare({ object: 'stella', method: 'lists' });
-const callSet = rpc.declare({ object: 'stella', method: 'device_set', params: [ 'mac', 'name', 'policy' ] });
-const callRemove = rpc.declare({ object: 'stella', method: 'device_remove', params: [ 'id' ] });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 const callNetDevices = rpc.declare({ object: 'luci-rpc', method: 'getNetworkDevices', expect: { '': {} } });
 
@@ -26,28 +24,15 @@ const POLICIES = [
 const CSS = `
 .st-devtable .cbi-dropdown { min-width:10em; max-width:14em }
 @media (max-width:854px) { .st-devtable .cbi-dropdown { min-width:0; max-width:100% } }
-.st-on { color:#2a2; white-space:nowrap }
-.st-on::before { content:'●'; margin-right:.3em }
-.st-offline { opacity:.55 }
 `;
 
 function label(d) {
 	return d.name || d.hostname || '';
 }
 
-// «был в 10:42» сегодня, иначе с датой.
-function seenText(ts) {
-	if (!ts)
-		return '—';
-	const t = new Date(ts * 1000), now = new Date();
-	return (t.toDateString() == now.toDateString())
-		? _('был в %s').format(t.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))
-		: _('был %s').format(t.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
-}
-
 return view.extend({
 	load() {
-		return sui.need(14).then(() => Promise.all([ callDevices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
+		return sui.need(21).then(() => Promise.all([ sui.devices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
 	},
 
 	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).
@@ -80,19 +65,25 @@ return view.extend({
 	},
 
 	refresh() {
-		return Promise.all([ callDevices(), callLists() ]).then(([ d, l ]) => {
-			this.devices = d.devices;
+		return Promise.all([ sui.devices(), callLists() ]).then(([ d, l ]) => {
+			this.devices = d;
 			this.lists = l.lists;
 			this.renderTable();
 		});
 	},
 
+	// Название и режим устройства — секция device (у нового — dev_<MAC>); name не задан — не трогать.
 	save(mac, name, policy) {
-		return callSet(mac, name, policy).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-			return this.refresh();
-		});
+		const known = this.devices.find((d) => d.mac == mac && d.id);
+		return sui.edit(() => {
+			const sid = known ? known.id : 'dev_' + mac.replace(/:/g, '');
+			if (!uci.get('stella', sid))
+				uci.add('stella', 'device', sid);
+			sui.set(sid, 'mac', mac);
+			if (name != null)
+				sui.set(sid, 'name', name);
+			sui.set(sid, 'policy', policy);
+		}).then(() => this.refresh());
 	},
 
 	// Окно: новое устройство (по MAC) или название и режим известного.
@@ -115,7 +106,8 @@ return view.extend({
 				sui.field(_('Название'), name),
 				sui.field(_('Режим'), sel)
 			]),
-			E('div', { 'class': 'button-row' }, [
+			E('div', { 'class': 'st-buttons' }, [
+				E('span', { 'style': 'flex:1' }),
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
 				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, save) }, _('Сохранить'))
 			])
@@ -136,37 +128,36 @@ return view.extend({
 		const devs = this.devices.filter((d) => !q ||
 			[ label(d), d.ip || '', d.mac ].some((v) => v.toLowerCase().indexOf(q) >= 0)
 		).sort((a, b) =>
-			(b.online - a.online) || (b.configured - a.configured) || (!label(a) - !label(b)) ||
+			(b.configured - a.configured) || (!label(a) - !label(b)) ||
 			label(a).localeCompare(label(b)) || String(a.ip || '').localeCompare(String(b.ip || ''), undefined, { numeric: true }));
 
-		dom.content(this.tableBox, sui.table([ _('Устройство'), 'IP', 'MAC', _('В сети'), _('Режим'), '' ], devs.map((d) => {
+		dom.content(this.tableBox, sui.dataTable('devices', [ _('Устройство'), 'IP', 'MAC', _('Режим'), [ '', 'cbi-section-actions' ] ], devs.map((d) => {
 			const sp = this.special(d);
-			return sui.tr([
-				sui.td(_('Устройство'), [
+			return { cells: [
+				E('div', {}, [
 					E('div', {}, [ label(d) || E('span', { 'class': 'st-dim' }, _('без имени')) ]),
 					sp ? E('div', { 'class': 'st-dim st-scope' }, [ sp ]) : ''
 				]),
-				sui.td('IP', d.ip || '—'),
-				sui.td('MAC', E('span', { 'class': 'st-dim' }, d.mac)),
-				sui.td(_('В сети'), d.online ? E('span', { 'class': 'st-on' }, _('в сети')) : sui.dim(seenText(d.seen))),
-				sui.td(_('Режим'), sui.select(d.policy, POLICIES, (v) => this.save(d.mac, undefined, v))),
-				sui.td(null, [
+				d.ip || '—',
+				d.mac,
+				// Сортировка — по названию режима, а не по тексту всего списка.
+				E('div', { 'data-value': d.policy }, sui.select(d.policy, POLICIES, (v) => this.save(d.mac, undefined, v))),
+				E('div', {}, [
 					sui.rowButton(_('Изменить'), 'edit', () => this.showEdit(d)),
-					' ',
-					d.configured ? sui.rowButton(_('Забыть'), 'remove', () => callRemove(d.id).then(() => this.refresh())) : ''
-				], 'st-act')
-			], d.online ? '' : 'st-offline');
+					d.configured ? sui.rowButton(_('Забыть'), 'remove', () => sui.edit(() => uci.remove('stella', d.id)).then(() => this.refresh())) : ''
+				])
+			] };
 		}), 'st-devtable', this.devices.length ? _('Ничего не найдено.') : _('Устройства не найдены.')));
 	},
 
 	render([ devs, lists, cfg, netdevs ]) {
-		this.devices = devs.devices;
+		this.devices = devs;
 		this.lists = lists.lists;
 		this.cfg = cfg;
 		this.netdevs = netdevs || {};
 		this.tableBox = E('div');
 		this.renderTable();
-		// Кто в сети — меняется: раз в 30 с.
+		// Новые устройства появляются сами: раз в 30 с.
 		poll.add(() => this.tableBox.querySelector('.cbi-dropdown[open]') ? Promise.resolve() : this.refresh(), 30);
 
 		return E([], [

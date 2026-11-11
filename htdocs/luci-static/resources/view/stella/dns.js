@@ -29,6 +29,10 @@ const GROUPS = [
 const KIND = Object.fromEntries(KINDS);
 const MAX = 4;
 
+const CSS = `
+.st-dns .td:nth-child(1) { width:30% } .st-dns .td:nth-child(2) { width:40% }
+`;
+
 // Название из каталога, фильтр — в скобках: «Cloudflare · Защита от угроз» → «Cloudflare (защита от
 // угроз)».
 function title(c) {
@@ -39,10 +43,9 @@ function title(c) {
 }
 
 return view.extend({
-	sort: {},
 
 	load() {
-		return sui.need(14).then(() => Promise.all([ callInfo(), callSettings() ]));
+		return sui.need(21).then(() => Promise.all([ callInfo(), callSettings() ]));
 	},
 
 	// Сервер — названием из каталога и адресом.
@@ -150,73 +153,46 @@ return view.extend({
 		dom.content(this.mainBox, sui.card(rows));
 	},
 
-	// Каталог — двумя строками, как у Zapret: что в нём и проверка, итоги — раскрываются.
+	// Серверы обхода геоблокировок с итогами проверки — сворачиваемым разделом, как группы на
+	// «Серверах»; остальные серверы каталога (без фильтрации, с фильтрацией) — только в списках
+	// выбора выше: проверять у них нечего.
 	renderCatalog() {
 		const d = this.info;
 		const busy = d.checking ? _('проверяю…') : d.updating ? _('загружаю каталог…') : null;
 		const btn = (text, tip, fn) => E('button', { 'class': 'btn cbi-button cbi-button-action', 'title': tip || null,
-			'click': ui.createHandlerFn(this, () => fn().then(() => this.refresh())) }, text);
-		const geo = (this.cfg.dns_mode || 'geo') != 'manual';
-
-		// Каталог обновляется вместе со всем остальным — расписание и кнопка на «Обзоре».
-		const rows = [
-			...sui.kv(_('Каталог'), [
-				d.catalog.length ? _('%d серверов').format(d.catalog.length) : _('не загружен'),
-				sui.dim([ d.updated ? _('обновлён %s').format(sui.time(d.updated)) : '', d.check.at ? _('проверено %s').format(sui.time(d.check.at)) : '' ]
-					.filter((x) => x).join(', ')),
-				...(busy ? [ E('em', { 'class': 'spinning' }, busy) ] : [
-					btn(_('Проверить все'), _('Проверить все серверы каталога'), () => callCheck(false)),
-					geo ? btn(_('Подобрать сейчас'), _('Проверить серверы обхода геоблокировок и взять лучшие'), () => callCheck(true)) : ''
-				])
-			])
-		];
-
-		// Каталог по группам, каждая — своей таблицей: в группе — по времени ответа, щелчок по
-		// заголовку — своя сортировка (одна на все группы).
+			'click': (ev) => { ev.preventDefault(); ev.stopPropagation(); return fn().then(() => this.refresh()); } }, text);
+		const auto = (this.cfg.dns_mode || 'geo') != 'manual';
 		const items = d.check.items || {};
 		const ms = (u) => (items[u] && items[u].ok) ? items[u].ms : 1e9;
-		const resort = () => this.renderCatalog();
-		const used = d.chain.concat(d.fallback || []);
-		const ping = (u) => {
-			const r = items[u];
-			return (!r || !r.ok) ? this.result(u) : E('span', { 'class': r.ms < 150 ? 'st-ok' : r.ms < 400 ? 'st-mid' : 'st-slow' }, _('%d мс').format(r.ms));
-		};
-		const groups = GROUPS.map(([ group, kinds ]) => {
-			let list = d.catalog.filter((c) => kinds.indexOf(c.kind) >= 0).sort((a, b) => ms(a.url) - ms(b.url));
-			if (!list.length)
-				return '';
-			list = sui.sorted(list, this.sort, (c, key) => (key == 'name') ? title(c)
-				: (key == 'geo') ? -((items[c.url] || {}).geo || 0) : ms(c.url));
-			const geo = kinds[0] == 'geo';
-			return E('div', {}, [
-				E('h5', {}, [ group ]),
-				sui.table([
-					sui.sortHead(_('Сервер'), 'name', this.sort, resort),
-					sui.sortHead(_('Ответ'), 'ms', this.sort, resort),
-					...(geo ? [ sui.sortHead(_('Обход'), 'geo', this.sort, resort) ] : [])
-				], list.map((c) => {
-					const r = items[c.url];
-					return sui.tr([
-						sui.td(_('Сервер'), [
-							E('div', {}, [ title(c), ...((used.indexOf(c.url) >= 0) ? [ ' ', E('span', { 'class': 'st-ok', 'title': _('в цепочке') }, '●') ] : []) ]),
-							E('div', { 'class': 'st-dim' }, [ c.url ])
-						]),
-						sui.td(_('Ответ'), ping(c.url)),
-						...(geo ? [ sui.td(_('Обход'), (r && r.ok && r.geo_of) ? _('%d из %d').format(r.geo, r.geo_of) : sui.dim('—')) ] : [])
-					]);
-				}))
-			]);
-		});
-		// Итоги по группам — раскрываются, как результаты автоподбора Zapret.
-		if (d.catalog.length) {
-			const details = E('details', { 'class': 'st-full', 'open': this.resultsOpen ? '' : null }, [
-				E('summary', { 'style': 'cursor:pointer' }, _('Серверы каталога (%d)').format(d.catalog.length)),
-				...groups
-			]);
-			details.addEventListener('toggle', () => this.resultsOpen = details.open);
-			rows.push(...sui.kv(_('Результаты'), details));
-		}
-		dom.content(this.catalogBox, sui.card(rows));
+		// По умолчанию — как при подборе: кто открывает больше сервисов, при равенстве — быстрее.
+		const score = (u) => (items[u] && items[u].ok && items[u].geo) || 0;
+		const list = d.catalog.filter((c) => c.kind == 'geo').sort((a, b) => score(b.url) - score(a.url) || ms(a.url) - ms(b.url));
+
+		const el = E('details', { 'class': 'cbi-section st-group', 'open': this.catalogOpen ? '' : null }, [
+			E('summary', {}, [
+				E('h3', {}, _('Серверы обхода геоблокировок')),
+				E('span', { 'class': 'st-meta' }, [ [ list.length ? '%d'.format(list.length) : _('каталог не загружен'),
+					d.check.at ? _('проверено %s').format(sui.time(d.check.at)) : '' ].filter((x) => x).join(' · ') ]),
+				// Каталог обновляется вместе со всем остальным — расписание и кнопка на «Обзоре».
+				E('span', { 'class': 'st-actions' }, busy ? [ E('em', { 'class': 'spinning' }, busy) ] : !list.length ? [] : [
+					btn(_('Проверить'), _('Проверить время ответа и обход'), () => callCheck(false)),
+					auto ? btn(_('Подобрать сейчас'), _('Проверить и взять лучшие'), () => callCheck(true)) : ''
+				])
+			]),
+			sui.dataTable('dns', [ _('Сервер'), _('Адрес'), _('Ответ'), _('Обход') ], list.map((c) => {
+				const r = items[c.url];
+				return { cells: [
+					E('span', {}, [ title(c), ...((d.chain.indexOf(c.url) >= 0) ? [ ' ', E('span', { 'class': 'st-ok' }, _('в цепочке')) ] : []) ]),
+					c.url,
+					// В таблице — обычным текстом, как соседние столбцы; сортировка — по миллисекундам.
+					E('span', { 'data-value': ms(c.url) }, [ !r ? _('не проверялся') : !r.ok ? this.result(c.url) :
+						E('span', { 'class': r.ms < 150 ? 'st-ok' : r.ms < 400 ? 'st-mid' : 'st-slow' }, _('%d мс').format(r.ms)) ]),
+					E('span', { 'data-value': score(c.url) }, [ (r && r.ok && r.geo_of) ? _('%d из %d').format(r.geo, r.geo_of) : '—' ])
+				] };
+			}), 'st-dns', _('Серверов нет.'))
+		]);
+		el.addEventListener('toggle', () => this.catalogOpen = el.open);
+		dom.content(this.catalogBox, el);
 	},
 
 	refresh() {
@@ -253,8 +229,10 @@ return view.extend({
 			this.refresh();
 
 		return E([], [
+			E('style', {}, CSS),
 			E('h2', {}, 'DNS'),
-			sui.section(null, [ this.mainBox, this.catalogBox ])
+			sui.section(null, this.mainBox),
+			this.catalogBox
 		]);
 	},
 

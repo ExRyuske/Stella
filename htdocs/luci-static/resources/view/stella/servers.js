@@ -4,40 +4,29 @@
 'require ui';
 'require poll';
 'require dom';
+'require uci';
 'require stella.common as sui';
 
 const callNodes = rpc.declare({ object: 'stella', method: 'nodes' });
-const callSelect = rpc.declare({ object: 'stella', method: 'select', params: [ 'id' ] });
 const callUpdate = rpc.declare({ object: 'stella', method: 'update', params: [ 'id' ] });
 const callPing = rpc.declare({ object: 'stella', method: 'ping', params: [ 'ids' ] });
 const callAdd = rpc.declare({ object: 'stella', method: 'add', params: [ 'text', 'name' ] });
-const callEdit = rpc.declare({ object: 'stella', method: 'edit', params: [ 'id', 'name', 'url', 'user_agent', 'enabled' ] });
-const callRemove = rpc.declare({ object: 'stella', method: 'remove', params: [ 'id' ] });
-const callAuto = rpc.declare({ object: 'stella', method: 'auto_set', params: [ 'mode', 'id', 'on' ] });
 const callPick = rpc.declare({ object: 'stella', method: 'node_pick', params: [ 'backup' ] });
 const callWarp = rpc.declare({ object: 'stella', method: 'warp', params: [ 'name' ] });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 
 const PROTO = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'SS', hysteria: 'Hysteria2', wireguard: 'WireGuard' };
+// Узлов в автовыборе ★: у каждого свой выход в xray, и он проверяет их раз в минуту.
+const AUTO_MAX = 30;
 const NET = { raw: 'TCP', xhttp: 'XHTTP', ws: 'WS', httpupgrade: 'HTTPUpgrade', grpc: 'gRPC' };
 
 const CSS = `
-.st-group { margin-bottom:1.5em }
-.st-group > summary { display:flex; flex-wrap:wrap; gap:.3em .8em; align-items:center; cursor:pointer; list-style:none; padding:.2em 0 .5em }
-.st-group > summary::-webkit-details-marker { display:none }
-.st-group > summary::before { content:'▸'; width:1em; opacity:.6 }
-.st-group[open] > summary::before { content:'▾' }
-.st-group > summary > h3 { display:inline; margin:0; padding:0; border:0 }
-.st-group .st-meta { opacity:.6; font-size:90% }
-.st-group .st-actions { margin-left:auto; display:flex; flex-wrap:wrap; gap:.25em }
 .st-list { max-height:32em; overflow-y:auto }
 .st-nodes { margin:0 }
-.st-nodes .tr.st-sel .td { background:rgba(60,160,60,.14) }
-.st-nodes .td.st-starcell { width:1.5em }
-.st-nodes .st-type { display:block; opacity:.6; font-size:85% }
-.st-ping { white-space:nowrap; text-align:right; width:5.5em }
-@media (hover:hover) { .st-nodes .tr:not(:hover) .st-act .btn { visibility:hidden } }
-@media (max-width:854px) { .st-nodes .tr { flex-wrap:nowrap; align-items:center } .st-nodes .td { flex:0 0 auto } .st-nodes .td.st-name { flex:1 1 auto } }
+.st-nodes .tr.st-sel { background:rgba(60,160,60,.14) }
+.st-nodes .tr.st-sel .td { background:none }
+.st-nodes .td:nth-child(1) { width:1.5em } .st-nodes .td:nth-child(2) { width:35% } .st-nodes .td:nth-child(3) { width:30% } .st-nodes .td:nth-child(4) { width:12%; white-space:nowrap }
+@media (max-width:854px) { .st-nodes .td.cbi-section-actions { flex:1 1 100% } }
 .st-star { cursor:pointer; color:#d9a400; user-select:none; display:inline-flex }
 .st-star.off { color:inherit; opacity:.3 }
 `;
@@ -89,12 +78,10 @@ function smallBtn(label, title, handler, cls) {
 
 return view.extend({
 	filter: '',
-	// Сортировка узлов — по заголовку столбца: { key: name | ping, desc }.
-	sort: {},
 	open: null,
 
 	load() {
-		return sui.need(14).then(() => Promise.all([ callNodes(), callSettings() ]));
+		return sui.need(21).then(() => Promise.all([ callNodes(), callSettings() ]));
 	},
 
 	refresh() {
@@ -105,7 +92,7 @@ return view.extend({
 			this.data = data;
 			// Во время опроса меняются только задержки и счётчики — обновляем их на месте,
 			// иначе перерисовка сбрасывает прокрутку.
-			if (same && !this.sort.key)
+			if (same)
 				this.updateInPlace();
 			else
 				this.renderAll();
@@ -129,11 +116,7 @@ return view.extend({
 	/* действия */
 
 	handleSelect(id) {
-		return callSelect(id).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-			return this.refresh();
-		});
+		return sui.edit(() => sui.set('main', 'node', id)).then(() => this.refresh());
 	},
 
 	handleUpdate(id) {
@@ -147,7 +130,18 @@ return view.extend({
 	handleRemove(id, what) {
 		if (!confirm(_('Удалить «%s»?').format(what)))
 			return;
-		return callRemove(id).then(() => this.refresh());
+		// Подписка или отдельная ссылка; с ней — отметки ★ и узел резервного канала, если это её узлы.
+		// Удалённый узел не остаётся выбранным: иначе Stella работала бы на прежнем конфиге с ним.
+		const gone = (x) => x == id || String(x).indexOf(id + '_') == 0;
+		const d = this.data, sel = gone(d.selected || '');
+		return sui.edit(() => {
+			uci.remove('stella', id);
+			sui.set('main', 'auto_node', L.toArray(uci.get('stella', 'main', 'auto_node')).filter((x) => !gone(x)));
+			for (const key of [ 'node', 'backup_node' ])
+				if (gone(uci.get('stella', 'main', key) || ''))
+					sui.set('main', key, null);
+		// В режиме «лучший по проверке» замену подбирает роутер — сразу.
+		}).then((ok) => (ok && sel && d.select_mode == 'best' && !d.pinging) ? callPick() : null).then(() => this.refresh());
 	},
 
 	showAdd() {
@@ -162,7 +156,8 @@ return view.extend({
 				sui.field(_('Подписка или ссылки'), [ text, sui.hint(_('По одной в строке.')) ]),
 				sui.field(_('Название'), name)
 			]),
-			E('div', { 'class': 'button-row' }, [
+			E('div', { 'class': 'st-buttons' }, [
+				E('span', { 'style': 'flex:1' }),
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
 				E('button', {
 					'class': 'btn cbi-button-positive',
@@ -198,7 +193,7 @@ return view.extend({
 				sui.field(_('Ссылка'), url),
 				sui.field(_('User-Agent'), ua)
 			]),
-			E('div', { 'style': 'display:flex;gap:.5em' }, [
+			E('div', { 'class': 'st-buttons' }, [
 				E('button', {
 					'class': 'btn cbi-button-negative',
 					'click': () => { ui.hideModal(); this.handleRemove(src.id, src.name); }
@@ -208,9 +203,16 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-positive',
 					'click': ui.createHandlerFn(this, () => {
-						return callEdit(src.id, name.value.trim(), url.value.trim(), ua.value.trim(), src.enabled ? undefined : true).then((r) => {
-							if (r && r.error)
-								return ui.addNotification(null, E('p', {}, r.error), 'danger');
+						if (!/^https?:\/\/\S+$/.test(url.value.trim()))
+							return ui.addNotification(null, E('p', {}, _('Нужна ссылка http(s)://')), 'danger');
+						return sui.edit(() => {
+							sui.set(src.id, 'name', name.value.trim());
+							sui.set(src.id, 'url', url.value.trim());
+							sui.set(src.id, 'user_agent', ua.value.trim());
+							sui.set(src.id, 'enabled', '1');
+						}).then((ok) => {
+							if (!ok)
+								return;
 							ui.hideModal();
 							return this.refresh();
 						});
@@ -222,12 +224,21 @@ return view.extend({
 
 	/* отрисовка */
 
+	// Режим выбора узла (mode) или отметка ★ узла id (on — поставить).
 	handleAuto(mode, id, on) {
-		return callAuto(mode, id, on).then((r) => {
-			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
-			return this.refresh();
-		});
+		return sui.edit(() => {
+			if (mode != null)
+				sui.set('main', 'select_mode', mode);
+			if (id == null)
+				return;
+			const ids = L.toArray(uci.get('stella', 'main', 'auto_node')).filter((x) => x != id);
+			if (on && ids.length >= AUTO_MAX) {
+				ui.addNotification(null, E('p', {}, _('В автовыборе не больше %d узлов.').format(AUTO_MAX)), 'warning');
+				return false;
+			}
+			sui.set('main', 'auto_node', on ? ids.concat(id) : ids);
+		// Включили подбор по проверке — первый подбор сразу, не дожидаясь расписания.
+		}).then((ok) => (ok && mode == 'best') ? callPick() : null).then(() => this.refresh());
 	},
 
 	renderCurrent() {
@@ -324,7 +335,14 @@ return view.extend({
 
 	// Сохранить настройку и запомнить её у себя.
 	setting(key, v) {
-		return sui.saveSettings({ [key]: v }).then((ok) => ok && (this.cfg[key] = v));
+		return sui.saveSettings({ [key]: v }).then((ok) => {
+			if (!ok)
+				return;
+			this.cfg[key] = v;
+			// Подбор узла резервного канала включили, пока он работает, — первый подбор сразу.
+			if (key == 'backup_mode' && v == 'best' && this.data.backup)
+				return callPick(true);
+		});
 	},
 
 	signature(d) {
@@ -353,10 +371,18 @@ return view.extend({
 		]);
 	},
 
+	// Задержка узла в его ячейке; data-value — по нему таблица сортирует (без ответа — в конец).
+	setPing(el, id) {
+		const d = this.data, v = d.ping[id];
+		el.setAttribute('data-value', (v == null || v < 0) ? 99999999 : v);
+		dom.content(el, pingLabel(v, d.stability[id]));
+		return el;
+	},
+
 	updateInPlace() {
 		const d = this.data;
 		for (const id in this.cells)
-			dom.content(this.cells[id], pingLabel(d.ping[id], d.stability[id]));
+			this.setPing(this.cells[id], id);
 		for (const src of d.sources)
 			if (this.metas[src.id])
 				this.metas[src.id].textContent = this.metaText(src);
@@ -379,7 +405,6 @@ return view.extend({
 		this.metas = {};
 		this.renderBusy();
 		const q = this.filter.toLowerCase();
-		const rank = (n) => { const v = d.ping[n.id]; return (v == null || v < 0) ? Infinity : v; };
 
 		if (this.open == null) {
 			const sel = d.nodes.find((x) => x.id == d.selected);
@@ -400,33 +425,30 @@ return view.extend({
 				list = list.filter((n) => n.name.toLowerCase().indexOf(q) >= 0);
 			if (q && !list.length)
 				return null;
-			list = sui.sorted(list, this.sort, (n, key) => (key == 'ping') ? rank(n) : n.name);
 
 			const isSub = (src.kind == 'subscription'), isWarp = (src.kind == 'warp');
 
 			const rows = list.map((n) => {
 				const sel = (n.id == d.selected);
 				const star = d.auto_nodes.indexOf(n.id) >= 0;
-				return sui.tr([
-					sui.td(null, E('span', {
-						'class': 'st-star' + (star ? '' : ' off'),
+				return { cls: sel ? 'st-sel' : '', cells: [
+					E('span', {
+						'class': 'st-star' + (star ? '' : ' off'), 'data-value': star ? 0 : 1,
 						'title': star ? _('Убрать из автовыбора') : _('Добавить в автовыбор'),
 						'click': ui.createHandlerFn(this, 'handleAuto', undefined, n.id, !star)
-					}, sui.icon('star', star)), 'st-starcell'),
-					sui.td(null, [
+					}, sui.star(star)),
+					E('span', { 'data-value': n.name }, [
 						sel ? E('strong', {}, [ '✓ ' + n.name ]) : n.name,
-						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : '',
-						E('span', { 'class': 'st-type' }, typeLabel(n))
-					], 'st-name'),
-					(this.cells[n.id] = sui.td(null, pingLabel(d.ping[n.id], d.stability[n.id]), 'st-ping')),
-					sui.td(null, [
+						(n.warnings && n.warnings.length) ? E('span', { 'title': n.warnings.join('\n'), 'style': 'cursor:help' }, ' ⚠') : ''
+					]),
+					typeLabel(n),
+					(this.cells[n.id] = this.setPing(E('span'), n.id)),
+					E('div', {}, [
 						sel ? '' : smallBtn(_('Выбрать'), '', () => this.handleSelect(n.id), 'cbi-button-apply'),
-						' ',
 						smallBtn(_('Проверить'), _('Проверить задержку'), () => this.handlePing([ n.id ]), 'cbi-button-action'),
-						' ',
 						isSub ? '' : smallBtn(_('Удалить'), '', () => this.handleRemove(n.id, n.name), 'cbi-button-remove')
-					], 'st-act')
-				], sel ? 'st-sel' : '');
+					])
+				] };
 			});
 
 			// Группа — раздел, как в LuCI: заголовок h3 (сворачивается), под ним таблица узлов.
@@ -444,8 +466,8 @@ return view.extend({
 						list.length ? smallBtn(_('Проверить задержку'), '', () => this.handlePing(list.map((n) => n.id)), 'cbi-button-action') : ''
 					])
 				]),
-				E('div', { 'class': 'st-list', 'data-src': src.id }, sui.table([ '', sui.sortHead(_('Узел'), 'name', this.sort, () => this.renderGroups()),
-					sui.sortHead(_('Задержка'), 'ping', this.sort, () => this.renderGroups()), '' ], rows, 'st-nodes',
+				E('div', { 'class': 'st-list', 'data-src': src.id }, sui.dataTable('nodes-' + src.id,
+					[ '', _('Узел'), _('Тип'), _('Задержка'), [ '', 'cbi-section-actions' ] ], rows, 'st-nodes',
 					isWarp ? _('Узла пока нет.') : _('Узлов нет.')))
 			]);
 			el.addEventListener('toggle', () => { if (!q) el.open ? this.open.add(src.id) : this.open.delete(src.id); });

@@ -6,7 +6,8 @@ STOP=10
 
 CONF_DIR=/var/etc/stella
 CONF="$CONF_DIR/config.json"
-NEW="$CONF_DIR/config.new.json"
+# Свой у каждого запуска: reload по триггеру procd и reload после задачи могут совпасть.
+NEW="$CONF_DIR/config.new.$$.json"
 
 start_service() {
 	config_load stella
