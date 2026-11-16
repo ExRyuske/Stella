@@ -256,6 +256,25 @@ done
 ARGS=$(run zapret-cmd 2>/dev/null || true)
 case "$ARGS" in *hosts-exclude.txt*hosts-exclude_fs.txt*) ;; *) echo "FAIL: nfqws не получил оба списка исключений: $ARGS"; exit 1 ;; esac
 
+# Остальной трафик напрямую: отдельный профиль запускается без Zapret-списков,
+# а основная стратегия не попадает в специальную очередь.
+cp "$T/uci.json" "$T/uci-special-backup.json"
+python3 - "$T/uci.json" "$T/zapret/catalog.json" <<'PYTEST'
+import json, sys
+json.dump({'main': {'.type': 'stella', 'default_action': 'direct',
+    'zapret_bin': '/bin/sh', 'zapret_games': 'GvTest',
+    'zapret_opts': '--filter-tcp=443 --dpi-desync=multisplit'}}, open(sys.argv[1], 'w'))
+json.dump([{'name': 'GvTest', 'family': 'gv', 'args': [
+    '--filter-udp=21000-21999', '--dpi-desync=fake']}], open(sys.argv[2], 'w'))
+PYTEST
+ARGS=$(run zapret-cmd special)
+case "$ARGS" in *--qnum=203*--filter-udp=21000-21999*) ;; *) echo 'FAIL: отдельная очередь'; exit 1 ;; esac
+case "$ARGS" in *multisplit*) echo 'FAIL: основная стратегия попала в отдельную очередь'; exit 1 ;; esac
+OUT=$(run fw show)
+echo "$OUT" | grep -qF 'udp dport { 21000-21999 } goto act_special' || { echo 'FAIL: прямой маршрут без специального профиля'; exit 1; }
+mv "$T/uci-special-backup.json" "$T/uci.json"
+rm "$T/zapret/catalog.json"
+
 # migrate: анонимная подписка переименовывается, кэш и выбранный узел следуют за ней.
 cat > "$T/uci.json" <<EOF
 {

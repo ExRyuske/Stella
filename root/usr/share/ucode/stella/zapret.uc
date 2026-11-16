@@ -313,14 +313,15 @@ export function merge_ports(list) {
 	return join(',', map(out, (r) => (r[0] == r[1]) ? `${r[0]}` : `${r[0]}-${r[1]}`));
 };
 
-// Итоговые ключи nfqws и порты очереди. YouTube — первым: nfqws берёт первый подходящий
-// профиль, а Yv ограничены доменами YouTube и остальному не мешают.
+// Итоговые ключи nfqws и порты очереди. Сначала специальные профили, затем основной:
+// nfqws берёт первый подходящий профиль. Основной без фильтра или с широкими портами
+// иначе перехватывает Discord и игры, особенно после автоматической смены стратегии.
 // opts: { main: [ключи], yt: стратегия | null, discord: стратегия | null, voice: блок голоса
 //         Discord | null, games: стратегия | null, games_fake: путь | null, discord_fake: путь | null,
 //         tcp_ports, udp_ports }
 // Порты Discord и игр — из ключей их блоков.
 export function compose(opts) {
-	let blocks = [ opts.yt?.args, opts.main ];
+	let blocks = [ opts.yt?.args ];
 	let extra = [];
 	if (opts.discord) {
 		// Своя подделка для голоса Discord — как смена fake в Zapret Manager.
@@ -338,6 +339,7 @@ export function compose(opts) {
 		push(blocks, g);
 		push(extra, ...g);
 	}
+	push(blocks, opts.main);
 
 	let args = [];
 	for (let b in filter(blocks, (b) => length(b))) {

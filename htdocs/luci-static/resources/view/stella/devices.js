@@ -32,7 +32,7 @@ function label(d) {
 
 return view.extend({
 	load() {
-		return sui.need(21).then(() => Promise.all([ sui.devices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
+		return sui.need(22).then(() => Promise.all([ sui.devices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
 	},
 
 	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).
@@ -170,7 +170,8 @@ return view.extend({
 						'input': (ev) => { this.filter = ev.target.value; this.renderTable(); } })
 				]),
 				this.tableBox,
-				sui.create(_('Добавить'), () => this.showEdit(null))
+				sui.hint(_('Устройства, известные роутеру, появляются автоматически. Список обновляется каждые 30 секунд.')),
+				sui.create(_('Добавить вручную'), () => this.showEdit(null))
 			])
 		]);
 	},

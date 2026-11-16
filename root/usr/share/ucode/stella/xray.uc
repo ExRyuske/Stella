@@ -209,6 +209,11 @@ export function build_config(opts) {
 	// Адреса прокси-серверов xray узнаёт своим DNS — он и так напрямую.
 	let add_proxy = (n, tag) => {
 		let ob = outbound(n, tag);
+		// Прозрачный VPN обслуживает и приложения без отката с QUIC на TCP. Обычный
+		// Vision блокирует UDP/443; udp443 снимает запрет на клиенте без смены
+		// серверного flow или ссылки подписки.
+		if (opts.intercept && n.protocol == 'vless' && n.flow == 'xtls-rprx-vision')
+			ob.settings.vnext[0].users[0].flow = 'xtls-rprx-vision-udp443';
 		if (opts.intercept)
 			ob.streamSettings = { ...(ob.streamSettings || {}), sockopt: { domainStrategy: 'UseIPv4' } };
 		push(outbounds, ob);

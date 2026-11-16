@@ -84,11 +84,11 @@ function fakes() {
 }
 
 // Работает ли чужой nfqws (отдельная служба zapret), а не запущенный Stella: свой — на
-// очереди 202, проверочный при автоподборе — на 205.
+// очередях 202 и 203, проверочный при автоподборе — на 205.
 function zapret_foreign_nfqws() {
 	for (let line in split(cmd_output('ps w') || '', '\n'))
 		// Сама программа (путь или имя с пробелом после), а не любая строка со словом nfqws.
-		if (match(line, /[ \/]nfqws2?( |$)/) && !match(line, regexp(`--qnum=(${ZAPRET_QNUM}|${ZT_QNUM})( |$)`)))
+		if (match(line, /[ \/]nfqws2?( |$)/) && !match(line, regexp(`--qnum=(${ZAPRET_QNUM}|${ZAPRET_QNUM + 1}|${ZT_QNUM})( |$)`)))
 			return true;
 	return false;
 }
@@ -388,7 +388,7 @@ const methods = {
 		call: function() {
 			let uci = cursor();
 			return {
-				default_action: uci.get('stella', 'main', 'default_action') || 'vpn',
+				default_action: uci.get('stella', 'main', 'default_action') || 'direct',
 				lists: map(load_lists(uci), (l) => ({
 					id: l.id, name: l.name, enabled: l.enabled, action: l.action,
 					urls: l.urls, geo: l.geo, entries: l.entries, updated: l.updated,

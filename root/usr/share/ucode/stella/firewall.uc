@@ -81,7 +81,7 @@ function list_rules(l, verdict) {
 // opts: { lan_ifnames, tproxy_port, default_action, dns_hijack,
 //         lists:   [ { id, action, cidrs, devices_mode, macs } ]   — включённые, по порядку,
 //         devices: [ { mac, policy } ]                               — vpn/direct в обход списков,
-//         zapret:  { qnum, tcp_ports, udp_ports } | null,
+//         zapret:  { qnum, tcp_ports, udp_ports, special: { qnum, tcp_ports, udp_ports } | null } | null,
 //         all_vpn: работает резервный канал, и на нём всё через VPN,
 //         block_ipv6: устройствам закрыт выход в интернет по IPv6 }
 export function nft_script(opts) {
@@ -139,11 +139,20 @@ export function nft_script(opts) {
 			continue;
 		push(out, ...list_rules(l, `goto act_${l.action}`));
 	}
+	// Только остаточный трафик: явные списки и политики устройств уже обработаны.
+	// Своя очередь исключает основную стратегию на совпадающих портах.
+	if (opts.default_action == 'direct' && opts.zapret?.special) {
+		for (let proto in [ 'tcp', 'udp' ]) {
+			let p = ports(opts.zapret.special[`${proto}_ports`]);
+			if (p)
+				push(out, `		${proto} dport { ${p} } goto act_special`);
+		}
+	}
 	push(out, `		goto act_${(opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
 
 	push(out, '',
 		'	chain act_vpn {',
-		`		meta l4proto { tcp, udp } tproxy ip to 127.0.0.1:${opts.tproxy_port} meta mark set ${hex(FW_MARK)} accept`,
+		`		meta l4proto { tcp, udp } tproxy ip to 127.0.0.1:${opts.tproxy_port} meta mark set meta mark | ${hex(FW_MARK)} accept`,
 		'		accept',
 		'	}',
 		'',
@@ -161,6 +170,11 @@ export function nft_script(opts) {
 		...(opts.zapret ? [ `		${dns_match('zapret_excl')} accept` ] : []),
 		`		ct mark set ct mark | ${hex(ZAPRET_MARK)} accept`,
 		'	}');
+
+	if (opts.zapret?.special)
+		push(out, '', '\tchain act_special {',
+			`\t\t${dns_match('zapret_excl')} accept`,
+			'\t\tct mark set ct mark | 0x00400000 accept', '\t}');
 
 	// IPv6 устройств: перехват Stella — только для IPv4, а по IPv6 сайты шли бы мимо списков.
 	// Отказ, а не тишина: приложения сразу переходят на IPv4. Внутри сети IPv6 работает.
@@ -185,16 +199,22 @@ export function nft_script(opts) {
 			'		meta l4proto { tcp, udp } th dport 53 redirect to :53',
 			'	}');
 
-	let z = opts.zapret;
-	if (z) {
+	for (let kind in [ 'zapret', 'special' ]) {
+		let z = kind == 'zapret' ? opts.zapret : opts.zapret?.special;
+		if (!z)
+			continue;
+		let mark = kind == 'zapret' ? ZAPRET_MARK : 0x00400000;
 		let tcp = ports(z.tcp_ports), udp = ports(z.udp_ports);
 		let guard = [
-			`		ct mark & ${hex(ZAPRET_MARK)} == 0 return`,
+			`		ct mark & ${hex(mark)} == 0 return`,
 			`		meta mark & ${hex(NFQWS_DESYNC_MARK)} != 0 return`
 		];
 		push(out, '',
-			'	chain zapret_out {',
+			`	chain ${kind}_out {`,
 			'		type filter hook postrouting priority srcnat - 2; policy accept;',
+			// Счётчик направления не фильтрует направление текущего пакета:
+			// ответы на высокие клиентские UDP-порты тоже совпадали с игровыми.
+			'		ct direction != original return',
 			...guard);
 		if (tcp)
 			push(out, `		tcp dport { ${tcp} } ct original packets 1-9 queue flags bypass to ${z.qnum}`);
@@ -205,8 +225,9 @@ export function nft_script(opts) {
 		// Ответы сервера (SYN-ACK) нужны nfqws для autottl и подобных приёмов.
 		if (tcp)
 			push(out, '',
-				'	chain zapret_in {',
+				`	chain ${kind}_in {`,
 				'		type filter hook prerouting priority filter; policy accept;',
+				'		ct direction != reply return',
 				...guard,
 				`		tcp sport { ${tcp} } ct reply packets 1-3 queue flags bypass to ${z.qnum}`,
 				'	}');

@@ -475,7 +475,7 @@ return view.extend({
 
 	renderZapret() {
 		const zi = this.zi, cfg = this.cfg, zc = this.zc;
-		const used = this.data.default_action == 'zapret' || this.data.lists.some((l) => l.enabled && l.action == 'zapret');
+		const used = cfg.zapret_yt || cfg.zapret_discord || cfg.zapret_games || this.data.default_action == 'zapret' || this.data.lists.some((l) => l.enabled && l.action == 'zapret');
 		const res = (zc.results && zc.results.items) || {};
 		const score = (name) => {
 			const r = res[name];
@@ -494,7 +494,7 @@ return view.extend({
 		const off = (k) => base[k] ? sui.label(_('выключено'), _('без обхода %d из %d').format(base[k].ok, base[k].total)) : _('выключено');
 		const tested = (zc.results && zc.results.at) ? _('проверено %s').format(sui.time(zc.results.at)) : '';
 
-		// YouTube, Discord и игры — отдельные наборы, как в Zapret Manager.
+		// YouTube, Discord и игры действуют и при прямом маршруте по умолчанию.
 		const fam = (f) => byScore(zc.strategies.filter((st) => st.family == f));
 		const cur = (key) => cfg[key] || '';
 		const stLabel = (st) => res[st.name] ? sui.label(st.name, score(st.name)) : st.name;
@@ -574,16 +574,17 @@ return view.extend({
 			return dom.content(this.zapretBox, sui.kv(_('Пакет'), [ sui.dim(_('не установлен')),
 				zi.installing ? E('em', { 'class': 'spinning' }, _('устанавливаю…')) :
 				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, () => callUpdateInstall('zapret').then(() => this.refresh())) }, _('Установить')) ]));
-		const needDefault = (cur('zapret_games', 'gv') || cur('zapret_discord', 'dv')) && this.data.default_action != 'zapret';
 		dom.content(this.zapretBox, [
 			// Состояние и каталог — одной строкой; каталог обновляется вместе со всем остальным
 			// (расписание и кнопка на «Обзоре») — когда, видно там.
 			...sui.kv(_('Состояние'), [ state, tested ? sui.dim(tested) : '', zc.updating ? E('em', { 'class': 'spinning' }, _('обновляю каталог…')) : '' ]),
-			...sui.kv(_('Основная'), [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs') ]),
+			...sui.kv(_('Основная'), [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs'),
+				!cfg.zapret_opts && this.data.default_action == 'zapret'
+					? sui.hint(_('Основная стратегия не выбрана. Обход Zapret действует только для выбранных ниже профилей.')) : '' ]),
+			sui.hint(_('YouTube, Discord и игры работают и при режиме «остальной трафик напрямую». Правила списков и устройств имеют приоритет.')),
 			...sui.kv('YouTube', [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
 			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
-			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []),
-				needDefault ? sui.hint(_('Работает, когда остальной трафик идёт через Zapret.')) : '' ]),
+			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
 			// Конфликт с отдельной службой zapret — только если он есть.
 			...(svcBad ? sui.kv(_('Служба zapret'), svc) : [])
 		]);

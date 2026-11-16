@@ -236,6 +236,19 @@ if (wo.protocol == 'wireguard' && wo.settings.noKernelTun === true && wo.targetS
 else
 	fail(`wireguard: ${sprintf('%J', wo)}`);
 
+// В прозрачном VPN Vision пропускает QUIC и для ручного узла, и для автовыбора.
+// Исходная ссылка и режим проверки SOCKS сохраняют flow подписки.
+let vn = parse(CASES[0].link);
+let vc = build_config({ node: vn, auto_nodes: [ vn, vn ], ...INTERCEPT });
+if (length(filter(vc.outbounds, (o) => o.protocol == 'vless' &&
+        o.settings.vnext[0].users[0].flow == 'xtls-rprx-vision-udp443')) == 3 &&
+    vn.flow == 'xtls-rprx-vision' &&
+    build_config({ node: vn }).outbounds[0].settings.vnext[0].users[0].flow == vn.flow &&
+    build_config({ node: { ...vn, flow: null }, ...INTERCEPT }).outbounds[0].settings.vnext[0].users[0].flow == null)
+	passed++;
+else
+	fail('Vision: UDP/443 в прозрачном VPN');
+
 // Данные WARP из файлов генератора: подсети, порты, ключ, маски QUIC, API и User-Agent; из
 // чужого текста — ничего.
 if (length(WD.hosts) == 14 && WD.hosts[0] == '162.159.192' && length(WD.ports) == 54 && WD.ports[33] == 2408 &&
@@ -377,6 +390,45 @@ if (ok)
 else
 	fail(`nft_script:\n${nft}`);
 
+// Специальные профили обслуживают только остаточный прямой трафик, в своей очереди.
+let special_opts = { lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'direct',
+ lists: [ { id: 'explicit', action: 'direct', cidrs: [] } ],
+ devices: [ { mac: 'aa:bb:cc:dd:ee:ff', policy: 'direct' } ],
+ zapret: { qnum: 202, tcp_ports: '80,443', udp_ports: '443',
+ special: { qnum: 203, tcp_ports: '443', udp_ports: '21000-21999' } } };
+let special_nft = nft_script(special_opts);
+let special_pol = split(split(special_nft, 'chain pol_global {')[1], '\n\t}')[0];
+if (index(special_pol, 'goto act_direct') < index(special_pol, 'tcp dport { 443 } goto act_special') &&
+ index(special_pol, 'udp dport { 21000-21999 } goto act_special') > 0 &&
+ index(special_nft, 'ether saddr { aa:bb:cc:dd:ee:ff } goto act_direct') > 0 &&
+ index(special_nft, 'ct mark & 0x00400000 == 0 return') > 0 &&
+ index(special_nft, 'tcp dport { 443 } ct original packets 1-9 queue flags bypass to 203') > 0 &&
+ index(special_nft, 'tcp sport { 443 } ct reply packets 1-3 queue flags bypass to 203') > 0 &&
+ index(special_nft, 'tcp dport { 80, 443 } ct original packets 1-9 queue flags bypass to 203') < 0)
+ passed++;
+else
+ fail('специальные профили при прямом маршруте');
+special_opts.default_action = 'vpn';
+if (index(nft_script(special_opts), 'goto act_special') < 0)
+ passed++;
+else
+ fail('специальные профили перехватили VPN по умолчанию');
+
+// Ответы на клиентские порты не должны попадать в исходящую очередь zapret.
+// Метка TPROXY сохраняет биты других служб (например, mwan3).
+let queues = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'zapret',
+	zapret: { qnum: 202, tcp_ports: '443', udp_ports: '1024-65535' } });
+let zout = split(split(queues, 'chain zapret_out {')[1], '\n\t}')[0];
+let zin = split(split(queues, 'chain zapret_in {')[1], '\n\t}')[0];
+if (index(zout, 'ct direction != original return') >= 0 &&
+    index(zout, 'ct direction != original return') < index(zout, 'udp dport') &&
+    index(zin, 'ct direction != reply return') >= 0 &&
+    index(zin, 'ct direction != reply return') < index(zin, 'tcp sport') &&
+    index(queues, 'meta mark set meta mark | 0x00100000 accept') >= 0)
+	passed++;
+else
+	fail(`направления очередей и метка TPROXY:\n${queues}`);
+
 // Резервный канал «всё через VPN»: блок-списки (со своими устройствами) действуют, остальное —
 // в VPN мимо списков и устройств «всё напрямую».
 let nb = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 1, default_action: 'direct', zapret: null, all_vpn: true,
@@ -471,11 +523,12 @@ if (sprintf('%J', ytt) == sprintf('%J', [ 'youtu.be', 'youtube.com', 'i.ytimg.co
 else
 	fail(`цели YouTube: ${sprintf('%J', ytt)}`);
 
-// Сборка: YouTube первым, Discord — голос + Dv, игры — Gv; порты дополняются и сливаются.
+// Сборка: YouTube первым, затем Discord и игры, основная — последней.
 let z = compose({ main: [ '--filter-tcp=443', '--dpi-desync=fake' ], yt: { args: [ '--filter-tcp=443', '--hostlist=g.txt' ] },
 	discord: dv[0], voice, games: gv[1], tcp_ports: '80,443', udp_ports: '443' });
 let zj = join(' ', z.args);
-if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == '--filter-tcp=443' &&
+if (z.args[1] == '--hostlist=g.txt' && z.args[2] == '--new' && z.args[3] == voice.args[0] &&
+    join(' ', slice(z.args, -2)) == '--filter-tcp=443 --dpi-desync=fake' &&
     index(zj, '--filter-l7=discord,stun') > 0 && index(zj, 'discord.media') > index(zj, '--filter-l7=discord,stun') &&
     index(zj, '--dpi-desync-cutoff=n2') > 0 && z.args[length(z.args) - 1] != '--new' &&
     index(z.tcp_ports, '2053') >= 0 && index(z.tcp_ports, '25565') >= 0 && z.udp_ports == '88,443,1024-2407,2409-4499,4502-65535' &&
@@ -487,6 +540,17 @@ if (sprintf('%J', compose({ main: [ '--a' ] })) == '{ "args": [ "--a" ], "tcp_po
 	passed++;
 else
 	fail('compose без наборов');
+
+// Основная без фильтра раньше забирала все игровые пакеты: после автоподбора
+// неизменённая Gv переставала работать. Специальные профили должны оставаться первыми.
+let broad = compose({ main: [ '--dpi-desync=multisplit' ], discord: dv[0], voice, games: gv[0] });
+let broadj = join(' ', broad.args);
+if (broad.args[0] == voice.args[0] &&
+    index(broadj, '--hostlist-domains=discord.media') < index(broadj, gv[0].args[0]) &&
+    broad.args[length(broad.args) - 1] == '--dpi-desync=multisplit')
+	passed++;
+else
+	fail(`compose с общей стратегией: ${broadj}`);
 
 // Без основной и YouTube — только порты Discord и игр, веб-трафик в очередь не идёт.
 let zo = compose({ main: [], discord: dv[0], voice }), zn = compose({ main: [] });

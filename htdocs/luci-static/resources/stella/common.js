@@ -34,7 +34,7 @@ const CHECKS = [
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 21;
+const API = 22;
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -302,9 +302,10 @@ return baseclass.extend({
 					own[net[name].mac.toLowerCase()] = true;
 				if (lan.indexOf(name) >= 0)
 					for (const a of (net[name].ipaddrs || []))
-						lans.push([ num(a.address), a.netmask ]);
+						lans.push([ num(a.address), String(a.netmask).includes('.')
+							? num(a.netmask) : (+a.netmask == 0 ? 0 : (0xffffffff << (32 - +a.netmask)) >>> 0) ]);
 			}
-			const inLan = (ip) => !lans.length || lans.some(([ net4, bits ]) => Math.floor(num(ip) / 2 ** (32 - bits)) == Math.floor(net4 / 2 ** (32 - bits)));
+			const inLan = (ip) => !lans.length || lans.some(([ net4, mask ]) => (num(ip) & mask) == (net4 & mask));
 			const byMac = {}, res = [];
 			for (const s of uci.sections('stella', 'device')) {
 				const mac = String(L.toArray(s.mac)[0] || '').toLowerCase();
@@ -314,13 +315,14 @@ return baseclass.extend({
 					policy: (s.policy == 'vpn' || s.policy == 'direct') ? s.policy : 'global' });
 			}
 			for (const m in hints) {
-				const mac = m.toLowerCase(), ip = (hints[m].ipaddrs || []).filter(inLan)[0];
+				const mac = m.toLowerCase(), addresses = hints[m].ipaddrs || [];
+				const ip = addresses.filter(inLan)[0];
 				let d = byMac[mac];
-				if (!d && (own[mac] || !ip))
+				if (!d && (own[mac] || (addresses.length && !ip)))
 					continue;
 				if (!d)
 					res.push(d = byMac[mac] = { mac, id: null, name: '', policy: 'global', configured: false });
-				d.ip = ip || null;
+				d.ip = ip || (hints[m].ip6addrs || [])[0] || null;
 				d.hostname = hints[m].name || null;
 			}
 			return res;

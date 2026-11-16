@@ -271,7 +271,8 @@ function enabled_lists() {
 
 // Используется ли действие zapret хоть где-то — тогда нужен nfqws и очередь.
 function zapret_used(lists) {
-	if (opt('main', 'default_action', 'vpn') == 'zapret')
+	if (opt('main', 'default_action', 'direct') == 'zapret' ||
+		opt('main', 'zapret_yt', '') || opt('main', 'zapret_discord', '') || opt('main', 'zapret_games', ''))
 		return true;
 	for (let l in lists)
 		if (l.action == 'zapret')
@@ -339,9 +340,9 @@ function zapret_localize(args) {
 	return localize(out, zapret_paths());
 }
 
-// Итоговая стратегия: YouTube (Yv) + основная (из каталога или своя) + Discord (Dv) + игры (Gv).
+// Итоговая стратегия: YouTube, Discord, игры, затем основная; special исключает основную.
 // Наборы выбираются по имени; пусто — выключено.
-function zapret_parts() {
+function zapret_parts(special) {
 	let cat = read_json(`${ZAPRET_DIR}/catalog.json`, []);
 	let pick = (key, family) => {
 		let v = opt('main', key, '');
@@ -351,7 +352,7 @@ function zapret_parts() {
 		return null;
 	};
 	let z = compose({
-		main: strategy_lines(opt('main', 'zapret_opts', '')),
+		main: special ? [] : strategy_lines(opt('main', 'zapret_opts', '')),
 		yt: pick('zapret_yt', 'yv'),
 		discord: pick('zapret_discord', 'dv'),
 		voice: filter(cat, (st) => st.family == 'voice')[0],
@@ -367,7 +368,9 @@ function zapret_parts() {
 
 function zapret_ports() {
 	let z = zapret_parts();
-	return { tcp_ports: z.tcp_ports, udp_ports: z.udp_ports };
+	let special = zapret_parts(true);
+	return { tcp_ports: z.tcp_ports, udp_ports: z.udp_ports,
+		special: opt('main', 'default_action', 'direct') == 'direct' && length(special.args) ? { qnum: ZAPRET_QNUM + 1, tcp_ports: special.tcp_ports, udp_ports: special.udp_ports } : null };
 }
 
 // Домены выбранных исключений Zapret, без повторов.
@@ -395,7 +398,7 @@ function routing_opts() {
 		nft: {
 			lan_ifnames: lan_ifnames(uci),
 			tproxy_port: TPROXY_PORT,
-			default_action: opt('main', 'default_action', 'vpn'),
+			default_action: opt('main', 'default_action', 'direct'),
 			dns_hijack: hijack,
 			lists: map(lists, (l) => ({ id: l.id, action: l.action, cidrs: l.cidrs, devices_mode: l.devices_mode, macs: l.macs })),
 			devices: load_devices(uci),
@@ -924,10 +927,13 @@ function cmd_dns_catalog() {
 
 
 // Команда запуска nfqws для init (по строке на аргумент); пусто — zapret не используется.
-function cmd_zapret_cmd() {
+function cmd_zapret_cmd(mode) {
 	if (!zapret_used(enabled_lists()))
 		return 1;
-	let z = zapret_parts();
+	let special = mode == 'special';
+	if (special && opt('main', 'default_action', 'direct') != 'direct')
+		return 1;
+	let z = zapret_parts(special);
 	if (!length(z.args))
 		return 1;
 	// Без нужного файла nfqws не стартует и молча перезапускается procd по кругу — лучше не
@@ -944,7 +950,7 @@ function cmd_zapret_cmd() {
 		return 1;
 	}
 	unlink(`${RUN_DIR}/zapret-missing.json`);
-	let args = [ bin, `--qnum=${ZAPRET_QNUM}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...z.args ];
+	let args = [ bin, `--qnum=${ZAPRET_QNUM + (special ? 1 : 0)}`, sprintf('--dpi-desync-fwmark=0x%x', NFQWS_DESYNC_MARK), ...z.args ];
 	print(join('\n', args), '\n');
 	return 0;
 }
@@ -1869,7 +1875,7 @@ function cmd_upgrade(what) {
 	// (pgrep -f не годится — он находит и саму оболочку с этой строкой.)
 	if (what == 'zapret')
 		for (let pid in split(trim(cmd_out('pidof nfqws')), ' '))
-			if (index(readfile(`/proc/${pid}/cmdline`) || '', `--qnum=${ZAPRET_QNUM}`) >= 0)
+			if (match(readfile(`/proc/${pid}/cmdline`) || '', /--qnum=20[23]\x00/) != null)
 				system(`kill ${+pid}`);
 	unlink(`${RUN_DIR}/update.json`);
 	print('обновлено\n');
