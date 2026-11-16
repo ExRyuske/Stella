@@ -581,7 +581,6 @@ return view.extend({
 			...sui.kv(_('Основная'), [ sel, ...pick('main', 'zapret_test_main', (st) => st.family == 'v' || st.family == 'fs'),
 				!cfg.zapret_opts && this.data.default_action == 'zapret'
 					? sui.hint(_('Основная стратегия не выбрана. Обход Zapret действует только для выбранных ниже профилей.')) : '' ]),
-			sui.hint(_('YouTube, Discord и игры работают и при режиме «остальной трафик напрямую». Правила списков и устройств имеют приоритет.')),
 			...sui.kv('YouTube', [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
 			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
 			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
