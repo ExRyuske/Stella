@@ -4,12 +4,12 @@
 'use strict';
 
 import { cursor as uci_cursor } from 'uci';
-import { readfile, writefile, popen, stat, glob } from 'fs';
+import { readfile, writefile, unlink, popen, stat, glob } from 'fs';
 import { RUN_DIR, CACHE_DIR, LISTS_DIR, TRACE_URL, DNS_DIR, dns_chain, dns_fallback, isp_dns, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, SOCKS_PORT, read_json, load_nodes, is_warp, sub_label, load_lists, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a, try_json } from 'stella.util';
 import { dns_set } from 'stella.firewall';
-import { list_overlaps } from 'stella.lists';
+import { list_overlaps, parse_list } from 'stella.lists';
 import { doh_url, is_ipv4, KINDS as DNS_KINDS } from 'stella.dns';
 import { FAKE_DIR } from 'stella.zapret';
 import { trace_info } from 'stella.warp';
@@ -150,6 +150,25 @@ function find_node(uci, id) {
 // Таблица Stella на месте: список одной цепочки, а не всей таблицы с тысячами адресов в сетах.
 function nft_up() {
 	return system('nft list chain inet stella prerouting >/dev/null 2>&1') == 0;
+}
+
+// Первый домен из первого включённого списка «VPN» — без чтения и разбора мегабайтных файлов
+// всех списков с диска.
+function first_vpn_list(uci) {
+	let found = null;
+	uci.foreach('stella', 'list', (s) => {
+		if (found || s.enabled == '0' || (s.action || 'vpn') != 'vpn')
+			return;
+		let e = s.entry;
+		let manual = parse_list(join('\n', (e == null) ? [] : (type(e) == 'array') ? e : [ e ])).domains;
+		let path = `${LISTS_DIR}/${s['.name']}.json`;
+		let head = readfile(path, 512) || '';
+		let d = manual[0] || match(head, /"domains":[ \t\r\n]*\[[ \t\r\n]*"([^"]+)"/)?.[1] ||
+			read_json(path, null)?.domains?.[0];
+		if (d)
+			found = { id: s['.name'], name: s.name || s['.name'], domain: d };
+	});
+	return found;
 }
 
 function host_of(url) {
@@ -328,32 +347,52 @@ const methods = {
 			let up = map(filter(mwan3_ifaces(uci), (i) => i.online), (i) => i.name);
 			let via = bk ? `резервный канал ${bk}` : length(up) ? `канал ${join(', ', up)}` : '';
 			// Напрямую — trace Cloudflare по адресу из каталога DNS (сервер Cloudflare и его boot):
-			// мимо DNS роутера, который сам идёт через xray.
+			// мимо DNS роутера, который сам идёт через xray. Если xray запущен — запросы напрямую
+			// и через VPN идут одновременно.
 			let cat = filter(read_json(`${DNS_DIR}/catalog.json`, []), (c) => c?.kind == 'plain' && doh_url(c.url) && is_ipv4(c.boot?.[0]));
 			let probe = filter(cat, (c) => c.id == 'cloudflare')[0] || cat[0];
+			let is_run = running();
+			let port = +(uci.get('stella', 'main', 'socks_port') || SOCKS_PORT);
+			let d_out = '', v_out = '';
+			if (probe && is_run) {
+				let h = match(probe.url, /^https:\/\/([^\/:]+)/)[1], ip = probe.boot[0];
+				let tag = fnv1a(readfile('/dev/urandom', 4) || `${time()}`);
+				let df = `${RUN_DIR}/check.d.${tag}`, vf = `${RUN_DIR}/check.v.${tag}`;
+				system(`mkdir -p ${shq(RUN_DIR)}; ` +
+					`curl -sk --max-time ${TIMEOUT.probe} --resolve ${shq(`${h}:443:${ip}`)} -w '\\n@%{time_total}' ${shq(`https://${h}/cdn-cgi/trace`)} >${shq(df)} 2>/dev/null & ` +
+					`curl -s --max-time ${TIMEOUT.probe} -w '\\n@%{time_total}' --socks5-hostname 127.0.0.1:${port} ${shq(TRACE_URL)} >${shq(vf)} 2>/dev/null & wait`);
+				d_out = readfile(df) || '';
+				v_out = readfile(vf) || '';
+				unlink(df);
+				unlink(vf);
+			}
+			else if (probe) {
+				let h = match(probe.url, /^https:\/\/([^\/:]+)/)[1], ip = probe.boot[0];
+				d_out = cmd_output(`curl -sk --max-time ${TIMEOUT.probe} --resolve ${shq(`${h}:443:${ip}`)} -w '\\n@%{time_total}' ${shq(`https://${h}/cdn-cgi/trace`)}`) || '';
+			}
+			else if (is_run)
+				v_out = cmd_output(`curl -s --max-time ${TIMEOUT.probe} -w '\\n@%{time_total}' --socks5-hostname 127.0.0.1:${port} ${shq(TRACE_URL)}`) || '';
+
 			if (!probe)
 				step('Напрямую', false, 'каталог DNS ещё не загружен — проверить не на чем');
 			else {
-				let h = match(probe.url, /^https:\/\/([^\/:]+)/)[1], ip = probe.boot[0];
-				let out = cmd_output(`curl -sk --max-time ${TIMEOUT.probe} --resolve ${shq(`${h}:443:${ip}`)} -w '\\n@%{time_total}' ${shq(`https://${h}/cdn-cgi/trace`)}`) || '';
-				let tr = trace_info(out), ms = int(+(match(out, /@([0-9.]+)$/)?.[1] || 0) * 1000);
+				let ip = probe.boot[0];
+				let tr = trace_info(d_out), ms = int(+(match(d_out, /@([0-9.]+)$/)?.[1] || 0) * 1000);
 				if (tr)
 					step('Напрямую', true, `${ip} отвечает, ${ms} мс, ${tr.loc}${via ? `, ${via}` : ''}`);
 				else
 					step('Напрямую', false, `${ip} не отвечает, нет интернета у провайдера${via ? ` (${via})` : ''}`);
 			}
 
-			if (!running()) {
+			if (!is_run) {
 				step('xray', false, 'служба не запущена, см. лог');
 				return { steps };
 			}
 
-			let port = +(uci.get('stella', 'main', 'socks_port') || SOCKS_PORT);
 			// Через VPN — trace Cloudflare: адрес выхода, страна, узел Cloudflare.
-			let out = cmd_output(`curl -s --max-time ${TIMEOUT.probe} -w '\\n@%{time_total}' --socks5-hostname 127.0.0.1:${port} ${shq(TRACE_URL)}`) || '';
-			let tr = trace_info(out), ip = match(out, /(^|\n)ip=([0-9a-f.:]+)/)?.[2];
+			let tr = trace_info(v_out), ip = match(v_out, /(^|\n)ip=([0-9a-f.:]+)/)?.[2];
 			if (tr)
-				step('Сервер VPN', true, `${ip || '?'}, ${tr.loc}, узел Cloudflare ${tr.colo || '?'}, ${int(+(match(out, /@([0-9.]+)$/)?.[1] || 0) * 1000)} мс`);
+				step('Сервер VPN', true, `${ip || '?'}, ${tr.loc}, узел Cloudflare ${tr.colo || '?'}, ${int(+(match(v_out, /@([0-9.]+)$/)?.[1] || 0) * 1000)} мс`);
 			else
 				step('Сервер VPN', false, 'сервер не отвечает');
 
@@ -369,16 +408,15 @@ const methods = {
 
 			// Сайт из первого включённого списка «VPN»: резолвим через dnsmasq роутера и
 			// смотрим, попал ли его IP в сет списка.
-			let vpn = filter(load_lists(uci), (l) => l.enabled && l.action == 'vpn' && length(l.domains));
-			let d = length(vpn) ? vpn[0].domains[0] : 'google.com';
+			let vpn = first_vpn_list(uci);
+			let d = vpn ? vpn.domain : 'google.com';
 			let ips = filter(map(match(cmd_output(`nslookup ${shq(d)} 127.0.0.1 2>&1`) || '', /Address:?[ \t]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/g) || [],
 				(m) => m[1]), (ip) => substr(ip, 0, 4) != '127.');
 			step('DNS', length(ips) > 0, length(ips) ? `${d} → ${ips[0]}` : `${d} не резолвится`);
 
-			if (length(vpn) && length(ips) && nftset && nft) {
-				let l = vpn[0];
-				let inset = system(`nft get element inet stella ${dns_set(l.id)} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
-				step(`Список «${l.name}»`, inset, inset ? `${d} идёт через VPN` :
+			if (vpn && length(ips) && nftset && nft) {
+				let inset = system(`nft get element inet stella ${dns_set(vpn.id)} '{ ${ips[0]} }' >/dev/null 2>&1`) == 0;
+				step(`Список «${vpn.name}»`, inset, inset ? `${d} идёт через VPN` :
 					`IP ${d} нет в правилах, откройте сайт ещё раз`);
 			}
 			return { steps };

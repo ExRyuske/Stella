@@ -102,16 +102,21 @@ let fetch_seq = 0;
 // Метка процесса: счётчик у каждого процесса свой и начинается с нуля.
 const PROC_TAG = fnv1a(readfile('/dev/urandom', 8) || `${time()}`);
 
-// Скачать в файл; удалось ли.
-function fetch_file(url, path, ua, proxy, header) {
-	return system(sprintf('curl -fsSL --connect-timeout %d --max-time %d --retry 2 -A %s %s%s-o %s %s',
-		TIMEOUT.connect, TIMEOUT.fetch, shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '',
+// Хосты, которые в этом запуске не ответили напрямую, но открылись через прокси: следующие
+// запросы к ним идут сразу через прокси без повторного ожидания таймаута напрямую.
+let proxy_hosts = {};
+
+// Скачать в файл; удалось ли. fast — короткая попытка напрямую перед резервом через прокси.
+function fetch_file(url, path, ua, proxy, header, fast) {
+	return system(sprintf('curl -fsSL --connect-timeout %d --max-time %d %s-A %s %s%s-o %s %s',
+		fast ? 4 : TIMEOUT.connect, fast ? 15 : TIMEOUT.fetch, fast ? '' : '--retry 2 ',
+		shq(ua), proxy ? `--socks5-hostname ${shq(proxy)} ` : '',
 		header ? `-H ${shq(header)} ` : '', shq(path), shq(url))) == 0;
 }
 
-function fetch(url, ua, proxy, header) {
+function fetch(url, ua, proxy, header, fast) {
 	let tmp = `/tmp/stella-fetch.${PROC_TAG}.${fnv1a(url)}.${fetch_seq++}`;
-	let body = fetch_file(url, tmp, ua, proxy, header) ? readfile(tmp) : null;
+	let body = fetch_file(url, tmp, ua, proxy, header, fast) ? readfile(tmp) : null;
 	unlink(tmp);
 	return body;
 }
@@ -121,9 +126,30 @@ function socks_proxy() {
 	return `127.0.0.1:${opt('main', 'socks_port', SOCKS_PORT)}`;
 }
 
+// Скачать в файл напрямую, а не вышло — через VPN (если хост уже не ответил напрямую в этом
+// запуске — сразу через VPN).
+function fetch_file_any(url, path, ua, header) {
+	ua ||= 'Mozilla/5.0';
+	let h = url_host(url);
+	let has_vpn = xray_pid() != null;
+	if (h && proxy_hosts[h] && has_vpn)
+		return fetch_file(url, path, ua, socks_proxy(), header) || fetch_file(url, path, ua, null, header);
+	if (fetch_file(url, path, ua, null, header, has_vpn))
+		return true;
+	if (fetch_file(url, path, ua, socks_proxy(), header)) {
+		if (h)
+			proxy_hosts[h] = true;
+		return true;
+	}
+	return false;
+}
+
 // Напрямую, а не вышло — через VPN.
 function fetch_any(url, ua, header) {
-	return fetch(url, ua || 'Mozilla/5.0', null, header) ?? fetch(url, ua || 'Mozilla/5.0', socks_proxy(), header);
+	let tmp = `/tmp/stella-fetch.${PROC_TAG}.${fnv1a(url)}.${fetch_seq++}`;
+	let body = fetch_file_any(url, tmp, ua, header) ? readfile(tmp) : null;
+	unlink(tmp);
+	return body;
 }
 
 // Файл релиза GitHub: через API (сразу с сервера файлов — у части провайдеров сам github.com
@@ -153,7 +179,7 @@ function cmd_update(...only) {
 			return;
 
 		let ua = s.user_agent || DEFAULT_UA;
-		let body = fetch(s.url, ua, null);
+		let body = fetch(s.url, ua, null, null, xray_pid() != null);
 		if (body == null) {
 			warn(`${sub_label(s)}: напрямую недоступна, пробую через прокси\n`);
 			body = fetch(s.url, ua, socks_proxy());
@@ -572,14 +598,29 @@ function list_sources(s) {
 	return res;
 }
 
-// Слить разобранные части списка в одну, без повторов.
+// Слить разобранные части списка в одну, без повторов. Если домены или подсети пришли только
+// из одной части (например, geosite + geoip), они уже отсортированы и без повторов.
 function merge_lists(parts) {
-	let domains = {}, cidrs = {};
-	for (let p in parts) {
-		for (let d in p.domains) domains[d] = true;
-		for (let c in p.cidrs) cidrs[c] = true;
+	let dp = filter(parts, (p) => length(p.domains) > 0);
+	let cp = filter(parts, (p) => length(p.cidrs) > 0);
+	let domains = [], cidrs = [];
+	if (length(dp) == 1)
+		domains = dp[0].domains;
+	else if (length(dp) > 1) {
+		let dset = {};
+		for (let p in dp)
+			for (let d in p.domains) dset[d] = true;
+		domains = sort(keys(dset));
 	}
-	return { domains: sort(keys(domains)), cidrs: sort(keys(cidrs)) };
+	if (length(cp) == 1)
+		cidrs = cp[0].cidrs;
+	else if (length(cp) > 1) {
+		let cset = {};
+		for (let p in cp)
+			for (let c in p.cidrs) cset[c] = true;
+		cidrs = sort(keys(cset));
+	}
+	return { domains, cidrs };
 }
 
 // Обновление списков (всех или перечисленных) по ссылкам и наборам. Неудача — остаётся прежнее
@@ -591,6 +632,12 @@ function cmd_lists(...only) {
 	uci.foreach('stella', 'list', (s) => {
 		let urls = list_sources(s);
 		if ((length(only) && !(s['.name'] in only)) || !length(urls))
+			return;
+		// Выключенный список с уже скачанным содержимым тех же источников при общем обновлении
+		// не перекачиваем (при явном указании id или смене ссылок — скачиваем).
+		if (!length(only) && s.enabled == '0' &&
+		    readfile(`${LISTS_DIR}/${s['.name']}.src`) == join('\n', urls) &&
+		    stat(`${LISTS_DIR}/${s['.name']}.json`)?.size > 0)
 			return;
 
 		// Наборы .srs разбираются сразу: в них уже готовые домены и подсети, общий разбор
@@ -612,7 +659,7 @@ function cmd_lists(...only) {
 			srs ? push(parts, srs) : push(text, body);
 		}
 
-		let res = merge_lists([ parse_list(join('\n', text)), ...parts ]);
+		let res = merge_lists([ ...(length(text) ? [ parse_list(join('\n', text)) ] : []), ...parts ]);
 		if (!length(res.domains) && !length(res.cidrs)) {
 			warn(`${s.name}: список пуст, оставляю прежний\n`);
 			failed++;
@@ -648,7 +695,7 @@ function itdog_tree_tgz() {
 	if (ITDOG_TGZ == '')
 		return null;
 	let tmp = `/tmp/stella-itdog.${PROC_TAG}.tgz`;
-	let names = (fetch_file(ITDOG_TGZ, tmp, 'stella', null) || fetch_file(ITDOG_TGZ, tmp, 'stella', socks_proxy()))
+	let names = fetch_file_any(ITDOG_TGZ, tmp, 'stella')
 		? split(cmd_out(`tar -tzf ${shq(tmp)} 2>/dev/null`), '\n') : [];
 	unlink(tmp);
 	// Имена в архиве — с папкой «репозиторий-ветка/» впереди.
@@ -938,7 +985,7 @@ function cmd_dns_catalog() {
 	let tmp = `/tmp/stella-dns-catalog.${PROC_TAG}.${fetch_seq++}`;
 	let cat = [];
 	// Файл большой (вся панель) — читается только массив серверов.
-	if (fetch_file(DNS_CATALOG_URL, tmp, 'stella', null) || fetch_file(DNS_CATALOG_URL, tmp, 'stella', socks_proxy()))
+	if (fetch_file_any(DNS_CATALOG_URL, tmp, 'stella'))
 		cat = doh_catalog(cmd_out(`sed -n '/PROVIDERS = \\[/,/^[[:space:]]*\\];/p' ${shq(tmp)}`));
 	unlink(tmp);
 	let rc = 0;
@@ -1719,8 +1766,14 @@ function mwan3_nft(ver) {
 function cmd_upgrade(what) {
 	system(`mkdir -p ${RUN_DIR}`);
 	if (what == 'check' || !what) {
-		system('apk update >/dev/null 2>&1');
+		let apk_flag = `${RUN_DIR}/apk-update.${PROC_TAG}`;
+		writefile(apk_flag, '1');
+		system(`(apk update >/dev/null 2>&1; rm -f ${shq(apk_flag)}) </dev/null >/dev/null 2>&1 &`);
 		let rel = latest_release();
+		let zr = zapret_release();
+		let mr = mwan3_release();
+		wait_until(() => stat(apk_flag) == null, 60000);
+		unlink(apk_flag);
 		let cur = pkg_version('luci-app-stella');
 		let info = {
 			at: time(),
@@ -1737,7 +1790,6 @@ function cmd_upgrade(what) {
 		info.xray.available = !!info.xray.latest;
 		// Zapret: Stella берёт из пакета nfqws и подделки; не установлен — предложим поставить.
 		let zcur = pkg_version('zapret');
-		let zr = zapret_release();
 		info.zapret = {
 			installed: zcur,
 			latest: zr ? replace(zr.tag, /^v/, '') : null,
@@ -1747,7 +1799,6 @@ function cmd_upgrade(what) {
 		};
 		// mwan3: не установлен — предложим поставить, стоит старый на iptables — заменить.
 		let mcur = pkg_version('mwan3');
-		let mr = mwan3_release();
 		info.mwan3 = {
 			installed: mcur,
 			nft: mwan3_nft(mcur),
@@ -2082,10 +2133,15 @@ function cmd_refresh() {
 		push(jobs, [ 'dnscat', '/usr/bin/stella dns-catalog' ]);
 	if (warp_needed())
 		push(jobs, [ 'warpdata', '/usr/bin/stella warp-data' ]);
+	let started = [];
 	for (let j in jobs)
-		if (!run_locked(j[0], j[1]))
+		if (run_locked(j[0], j[1], true))
+			push(started, j[0]);
+		else
 			warn(`${j[0]}: уже идёт\n`);
 	let rc = cmd_upgrade('check');
+	while (length(filter(started, task_busy)))
+		sleep(200);
 	if (opt('main', 'enabled', '0') == '1')
 		system('setsid /etc/init.d/stella reload </dev/null >/dev/null 2>&1 &');
 	return rc;
