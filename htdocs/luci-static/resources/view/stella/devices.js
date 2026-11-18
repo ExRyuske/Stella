@@ -51,7 +51,7 @@ return view.extend({
 			sui.saveSettings({ lan_ifname: v }).then((ok) => {
 				if (ok) {
 					this.cfg.lan_ifname = v;
-					this.refresh();
+					this.refresh(true);
 				}
 			});
 		});
@@ -64,10 +64,15 @@ return view.extend({
 		]);
 	},
 
-	refresh() {
-		return Promise.all([ sui.devices(), callLists() ]).then(([ d, l ]) => {
+	refresh(full) {
+		return (full ? Promise.all([ sui.devices(), callLists() ]) : sui.devices().then((d) => [ d, null ])).then(([ d, l ]) => {
+			if (l)
+				this.lists = l.lists;
+			const sig = JSON.stringify(d);
+			if (!full && sig == this.devSig)
+				return;
+			this.devSig = sig;
 			this.devices = d;
-			this.lists = l.lists;
 			this.renderTable();
 		});
 	},
@@ -83,7 +88,7 @@ return view.extend({
 			if (name != null)
 				sui.set(sid, 'name', name);
 			sui.set(sid, 'policy', policy);
-		}).then(() => this.refresh());
+		}).then(() => this.refresh(true));
 	},
 
 	// Окно: новое устройство (по MAC) или название и режим известного.
@@ -144,7 +149,7 @@ return view.extend({
 				E('div', { 'data-value': d.policy }, sui.select(d.policy, POLICIES, (v) => this.save(d.mac, undefined, v))),
 				E('div', {}, [
 					sui.rowButton(_('Изменить'), 'edit', () => this.showEdit(d)),
-					d.configured ? sui.rowButton(_('Забыть'), 'remove', () => sui.edit(() => uci.remove('stella', d.id)).then(() => this.refresh())) : ''
+					d.configured ? sui.rowButton(_('Забыть'), 'remove', () => sui.edit(() => uci.remove('stella', d.id)).then(() => this.refresh(true))) : ''
 				])
 			] };
 		}), 'st-devtable', this.devices.length ? _('Ничего не найдено.') : _('Устройства не найдены.')));
@@ -152,13 +157,14 @@ return view.extend({
 
 	render([ devs, lists, cfg, netdevs ]) {
 		this.devices = devs;
+		this.devSig = JSON.stringify(devs);
 		this.lists = lists.lists;
 		this.cfg = cfg;
 		this.netdevs = netdevs || {};
 		this.tableBox = E('div');
 		this.renderTable();
-		// Новые устройства появляются сами: раз в 30 с.
-		poll.add(() => this.tableBox.querySelector('.cbi-dropdown[open]') ? Promise.resolve() : this.refresh(), 30);
+		// Стандартный опрос LuCI (pollinterval, по умолчанию 5 с; управляется кнопкой в шапке).
+		poll.add(() => this.tableBox.querySelector('.cbi-dropdown[open]') ? Promise.resolve() : this.refresh());
 
 		return E([], [
 			E('style', {}, CSS),
@@ -170,7 +176,7 @@ return view.extend({
 						'input': (ev) => { this.filter = ev.target.value; this.renderTable(); } })
 				]),
 				this.tableBox,
-				sui.hint(_('Устройства, известные роутеру, появляются автоматически. Список обновляется каждые 30 секунд.')),
+				sui.hint(_('Устройства, известные роутеру, появляются автоматически.')),
 				sui.create(_('Добавить вручную'), () => this.showEdit(null))
 			])
 		]);

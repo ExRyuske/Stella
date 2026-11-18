@@ -2,6 +2,7 @@
 config stella 'main'
 	option enabled '1'
 	option default_action 'direct'
+	option torrent_action 'direct'
 	option zapret_games 'Gv1'
 	option zapret_test_yt '1'
 	option dns_mode 'geo'

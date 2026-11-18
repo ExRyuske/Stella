@@ -8,7 +8,7 @@ import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
 import { build_config } from 'stella.xray';
 import { stab_entry, stab_better, best_node, read_json } from 'stella.store';
-import { parse_list, itdog_catalog } from 'stella.lists';
+import { parse_list, itdog_catalog, list_overlaps } from 'stella.lists';
 import { doh_catalog, dns_query, dns_answer, resolv_servers, doh_url } from 'stella.dns';
 import { parse_srs } from 'stella.srs';
 import { warp_link, random_endpoints, iso_time, trace_info, warp_better, warp_data_parse, warp_data_reset, WARP_DATA } from 'stella.warp';
@@ -697,6 +697,61 @@ if (ti?.loc == 'RU' && ti.colo == 'ARN' && trace_info('<html>') == null &&
 	passed++;
 else
 	fail(`warp_better: ${sprintf('%J', ti)}`);
+
+// BitTorrent: определение чисто по протоколу в xray (без портов в nftables), вход bt-in
+// создаётся только когда остальной трафик не идёт в VPN.
+let btc_vpn = build_config({ node: parse(CASES[0].link), ...INTERCEPT, default_action: 'direct', torrent_action: 'vpn' });
+let btc_allvpn = build_config({ node: parse(CASES[0].link), ...INTERCEPT, default_action: 'vpn', torrent_action: 'vpn' });
+let btc_dir = build_config({ node: parse(CASES[0].link), ...INTERCEPT, default_action: 'direct', torrent_action: 'direct' });
+let btc_blk = build_config({ node: parse(CASES[0].link), ...INTERCEPT, default_action: 'direct', torrent_action: 'block' });
+let btc_off = build_config({ node: parse(CASES[0].link), ...INTERCEPT, default_action: 'direct', torrent_action: 'off' });
+let bt_in = filter(btc_vpn.inbounds, (i) => i.tag == 'bt-in')[0];
+let bt_rules_vpn = filter(btc_vpn.routing.rules, (r) => r.protocol?.[0] == 'bittorrent');
+let bt_rules_dir = filter(btc_dir.routing.rules, (r) => r.protocol?.[0] == 'bittorrent');
+let bt_rules_blk = filter(btc_blk.routing.rules, (r) => r.protocol?.[0] == 'bittorrent');
+let bt_rules_off = filter(btc_off.routing.rules, (r) => r.protocol?.[0] == 'bittorrent');
+let bt_fb = filter(btc_vpn.routing.rules, (r) => r.inboundTag?.[0] == 'bt-in');
+if (bt_in?.port == 10813 && bt_in.sniffing?.routeOnly === true &&
+    !length(filter(btc_allvpn.inbounds, (i) => i.tag == 'bt-in')) &&
+    !length(filter(btc_dir.inbounds, (i) => i.tag == 'bt-in')) &&
+    !length(filter(btc_off.inbounds, (i) => i.tag == 'bt-in')) &&
+    bt_rules_vpn[0]?.outboundTag == 'proxy' && bt_rules_dir[0]?.outboundTag == 'direct' && bt_rules_blk[0]?.outboundTag == 'block' &&
+    !length(bt_rules_off) && bt_fb[0]?.outboundTag == 'direct')
+	passed++;
+else
+	fail(`BitTorrent xray: ${sprintf('%J', { bt_in, bt_rules_vpn, bt_rules_dir, bt_rules_blk, bt_rules_off, bt_fb })}`);
+
+let bt_nft_vpn = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, bt_port: 10813, default_action: 'direct', torrent_action: 'vpn', lists: [] });
+let bt_nft_zap = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, bt_port: 10813, default_action: 'zapret', torrent_action: 'vpn',
+	zapret: { qnum: 202, tcp_ports: '80,443', udp_ports: '443' }, lists: [] });
+let bt_nft_dir = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'vpn', torrent_action: 'direct', lists: [] });
+let bt_nft_off = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'direct', torrent_action: 'off', lists: [] });
+if (index(bt_nft_vpn, '6881') < 0 && index(bt_nft_vpn, 'dport !=') < 0 &&
+    index(bt_nft_vpn, '\t\tgoto act_bt_inspect\n\t}') > 0 &&
+    index(bt_nft_vpn, 'tproxy ip to 127.0.0.1:10813') > 0 &&
+    index(bt_nft_zap, 'tcp dport { 80, 443 } goto act_zapret\n\t\tudp dport { 443 } goto act_zapret\n\t\tgoto act_bt_inspect') > 0 &&
+    index(bt_nft_dir, '6881') < 0 && index(bt_nft_dir, 'act_bt_inspect') < 0 && index(bt_nft_dir, '\t\tgoto act_vpn\n\t}') > 0 &&
+    index(bt_nft_off, '6881') < 0 && index(bt_nft_off, 'act_bt_inspect') < 0)
+	passed++;
+else
+	fail(`BitTorrent nft:\n${bt_nft_vpn}\n---\n${bt_nft_zap}`);
+
+// Пересечения списков: точные совпадения доменов, поддомены (в обе стороны), пересекающиеся
+// и вложенные подсети IPv4 (в т.ч. верхняя половина IPv4), учёт областей устройств.
+let ov = list_overlaps([
+	{ id: 'l1', name: 'Первый', enabled: true, action: 'zapret', domains: [ 'youtube.com', 'sub.example.org' ], cidrs: [ '10.10.0.0/16', '10.10.1.0/24', '200.1.0.0/16' ], devices_mode: 'all', macs: [] },
+	{ id: 'l2', name: 'Второй', enabled: true, action: 'vpn', domains: [ 'm.youtube.com', 'example.org', 'other.com' ], cidrs: [ '10.10.5.0/24', '1.1.1.0/24', '200.1.2.3/32' ], devices_mode: 'all', macs: [] },
+	{ id: 'l3', name: 'Выключен', enabled: false, action: 'block', domains: [ 'youtube.com' ], cidrs: [], devices_mode: 'all', macs: [] },
+	{ id: 'l4', name: 'Устройство А', enabled: true, action: 'vpn', domains: [ 'only.com' ], cidrs: [], devices_mode: 'only', macs: [ 'aa:bb:cc:dd:ee:01' ] },
+	{ id: 'l5', name: 'Устройство Б', enabled: true, action: 'direct', domains: [ 'only.com' ], cidrs: [], devices_mode: 'only', macs: [ 'aa:bb:cc:dd:ee:02' ] }
+]);
+if (length(ov.l2) == 1 && ov.l2[0].id == 'l1' && ov.l2[0].shadowed === true &&
+    ov.l2[0].domains_count == 2 && ov.l2[0].cidrs_count == 2 &&
+    length(ov.l1) == 1 && ov.l1[0].id == 'l2' && ov.l1[0].shadowed === false &&
+    !ov.l3 && !ov.l4 && !ov.l5)
+	passed++;
+else
+	fail(`list_overlaps: ${sprintf('%J', ov)}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);

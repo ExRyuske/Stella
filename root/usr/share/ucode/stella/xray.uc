@@ -189,8 +189,11 @@ export function outbound(n, tag) {
 	return ob;
 };
 
+export const BT_INSPECT_PORT = 10813;
+
 // opts: { node, auto_nodes, log_level, socks_port,
-//         intercept, tproxy_port, dns_port, dns_servers, dns_hosts, dns_last (или dns_isp) }
+//         intercept, tproxy_port, bt_port, dns_port, dns_servers, dns_hosts, dns_last (или dns_isp),
+//         default_action, torrent_action }
 //
 // node — выбранный вручную узел (outbound "proxy"). auto_nodes — узлы автовыбора:
 // каждый получает outbound "proxy-N", xray раз в минуту проверяет их и ведёт трафик через
@@ -204,6 +207,7 @@ export function build_config(opts) {
 	let auto = (length(opts.auto_nodes || []) >= 2) ? opts.auto_nodes : null;
 	let has_proxy = !!(opts.node || auto);
 	let to_main = auto ? { balancerTag: 'auto' } : { outboundTag: has_proxy ? 'proxy' : 'direct' };
+	let bt_inspect = opts.intercept && (opts.torrent_action in [ 'vpn', 'block' ]) && opts.default_action != 'vpn';
 	let outbounds = [];
 
 	// Адреса прокси-серверов xray узнаёт своим DNS — он и так напрямую.
@@ -262,6 +266,17 @@ export function build_config(opts) {
 			protocol: 'dokodemo-door',
 			settings: { address: '1.1.1.1', port: 53, network: 'tcp,udp' }
 		});
+		if (bt_inspect) {
+			push(inbounds, {
+				tag: 'bt-in',
+				listen: '127.0.0.1',
+				port: opts.bt_port || BT_INSPECT_PORT,
+				protocol: 'dokodemo-door',
+				settings: { network: 'tcp,udp', followRedirect: true },
+				streamSettings: { sockopt: { tproxy: 'tproxy' } },
+				sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true }
+			});
+		}
 		// Сам xray спрашивает и IPv6 — для WARP; устройствам, пока IPv6 закрыт, AAAA не отдаёт dnsmasq.
 		push(outbounds, { tag: 'dns-out', protocol: 'dns' });
 
@@ -283,7 +298,14 @@ export function build_config(opts) {
 	}
 
 	push(rules,
-		{ ip: PRIVATE_NETS, outboundTag: 'direct' },
+		{ ip: PRIVATE_NETS, outboundTag: 'direct' });
+	if (opts.torrent_action in [ 'direct', 'vpn', 'block' ]) {
+		let to_bt = (opts.torrent_action == 'vpn') ? to_main : { outboundTag: opts.torrent_action };
+		push(rules, { protocol: [ 'bittorrent' ], ...to_bt });
+	}
+	if (bt_inspect)
+		push(rules, { inboundTag: [ 'bt-in' ], outboundTag: 'direct' });
+	push(rules,
 		{ network: 'tcp,udp', ...to_main });
 
 	cfg.inbounds = inbounds;

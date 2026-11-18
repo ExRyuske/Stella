@@ -44,15 +44,16 @@ for (let m in [ 'status', 'nodes', 'lists', 'zapret_info', 'zapret_catalog', 'up
 }
 
 let r;
-let l = methods.lists.call({ args: {} }).lists[0];
-check('lists entry', l.domains == 2 && l.devices_mode == 'all' && length(l.geo) == 2, l);
+let lr = methods.lists.call({ args: {} });
+let l = lr.lists[0];
+check('lists entry', l.domains == 2 && l.devices_mode == 'all' && length(l.geo) == 2 && type(l.overlaps) == 'array' && lr.torrent_action == 'direct', lr);
 
 // Методов записи в плагине нет.
 check('no write methods', !length(filter([ 'select', 'auto_set', 'edit', 'remove', 'list_add', 'list_edit', 'list_remove', 'list_move',
 	'set_default_action', 'device_set', 'device_remove', 'settings_set',
 	'set_enabled', 'restart', 'devices', 'log' ], (m) => methods[m] != null)), keys(methods));
 check('block_doh gone', methods.settings.call({ args: {} }).block_doh == null, null);
-check('settings dns default', methods.settings.call({ args: {} }).dns_mode == 'geo', null);
+check('settings dns default', methods.settings.call({ args: {} }).dns_mode == 'geo' && methods.settings.call({ args: {} }).torrent_action == 'direct', null);
 set_main({ dns_mode: 'manual', dns_server: [ 'https://dns.comss.one/dns-query', 'https://1.1.1.1/dns-query' ],
 	lan_ifname: [ 'br-lan', 'br-guest' ], update_interval: '6' });
 let st = methods.settings.call({ args: {} });

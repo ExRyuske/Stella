@@ -9,6 +9,7 @@ import { RUN_DIR, CACHE_DIR, TRACE_URL, DNS_DIR, dns_chain, dns_fallback, isp_dn
 import { parse } from 'stella.uri';
 import { fnv1a, try_json } from 'stella.util';
 import { dns_set } from 'stella.firewall';
+import { list_overlaps } from 'stella.lists';
 import { doh_url, is_ipv4, KINDS as DNS_KINDS } from 'stella.dns';
 import { FAKE_DIR } from 'stella.zapret';
 import { trace_info } from 'stella.warp';
@@ -69,7 +70,7 @@ const SETTINGS = {
 	backup_iface: '', backup_node: '', backup_vpn: '0', backup_mode: 'single', backup_best_from: '', backup_best_interval: '6',
 	zapret_bin: '', zapret_opts: '', zapret_strategy: '', zapret_yt: '', zapret_discord: '', zapret_games: '',
 	zapret_games_fake: '', zapret_discord_fake: '', zapret_test_main: '0', zapret_test_yt: '0',
-	zapret_tcp_ports: '80,443', zapret_udp_ports: '443'
+	zapret_tcp_ports: '80,443', zapret_udp_ports: '443', torrent_action: 'direct'
 };
 
 // Подделки (*.bin), что есть на роутере: из пакета zapret и копии Flowseal; без повторов по имени
@@ -387,13 +388,17 @@ const methods = {
 	lists: {
 		call: function() {
 			let uci = cursor();
+			let all = load_lists(uci);
+			let overlaps = list_overlaps(all);
 			return {
 				default_action: uci.get('stella', 'main', 'default_action') || 'direct',
-				lists: map(load_lists(uci), (l) => ({
+				torrent_action: uci.get('stella', 'main', 'torrent_action') || 'direct',
+				lists: map(all, (l) => ({
 					id: l.id, name: l.name, enabled: l.enabled, action: l.action,
 					urls: l.urls, geo: l.geo, entries: l.entries, updated: l.updated,
 					domains: length(l.domains), cidrs: length(l.cidrs),
-					devices_mode: l.devices_mode, macs: l.macs
+					devices_mode: l.devices_mode, macs: l.macs,
+					overlaps: overlaps[l.id] || []
 				})),
 				updating: busy('lists'),
 				update_log: readfile(`${RUN_DIR}/lists.log`) || ''

@@ -78,13 +78,14 @@ function list_rules(l, verdict) {
 	return res;
 }
 
-// opts: { lan_ifnames, tproxy_port, default_action, dns_hijack,
+// opts: { lan_ifnames, tproxy_port, bt_port, default_action, torrent_action, dns_hijack,
 //         lists:   [ { id, action, cidrs, devices_mode, macs } ]   — включённые, по порядку,
 //         devices: [ { mac, policy } ]                               — vpn/direct в обход списков,
 //         zapret:  { qnum, tcp_ports, udp_ports, special: { qnum, tcp_ports, udp_ports } | null } | null,
 //         all_vpn: работает резервный канал, и на нём всё через VPN,
 //         block_ipv6: устройствам закрыт выход в интернет по IPv6 }
 export function nft_script(opts) {
+	let bt_inspect = (opts.torrent_action in [ 'vpn', 'block' ]) && opts.default_action != 'vpn';
 	let ifs = join(', ', map(opts.lan_ifnames, (i) => sprintf('%J', i)));
 	let out = [
 		'table inet stella',
@@ -148,7 +149,16 @@ export function nft_script(opts) {
 				push(out, `		${proto} dport { ${p} } goto act_special`);
 		}
 	}
-	push(out, `		goto act_${(opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
+	// Разбор BitTorrent чисто по протоколу: остаточный трафик направляется в xray (bt-in),
+	// а при режиме «Zapret по умолчанию» порты Zapret остаются в своей очереди.
+	if (bt_inspect && opts.default_action == 'zapret' && opts.zapret) {
+		for (let proto in [ 'tcp', 'udp' ]) {
+			let p = ports(opts.zapret[`${proto}_ports`]);
+			if (p)
+				push(out, `		${proto} dport { ${p} } goto act_zapret`);
+		}
+	}
+	push(out, `		goto act_${bt_inspect ? 'bt_inspect' : (opts.default_action in [ 'vpn', 'zapret' ]) ? opts.default_action : 'direct'}`, '	}');
 
 	push(out, '',
 		'	chain act_vpn {',
@@ -170,6 +180,13 @@ export function nft_script(opts) {
 		...(opts.zapret ? [ `		${dns_match('zapret_excl')} accept` ] : []),
 		`		ct mark set ct mark | ${hex(ZAPRET_MARK)} accept`,
 		'	}');
+
+	if (bt_inspect)
+		push(out, '',
+			'	chain act_bt_inspect {',
+			`		meta l4proto { tcp, udp } tproxy ip to 127.0.0.1:${opts.bt_port || 10813} meta mark set meta mark | ${hex(FW_MARK)} accept`,
+			'		accept',
+			'	}');
 
 	if (opts.zapret?.special)
 		push(out, '', '\tchain act_special {',

@@ -40,6 +40,15 @@ const ACTIONS = [
 	[ 'block', _('Блокировать') ]
 ];
 
+const ACTION_LABELS = Object.fromEntries(ACTIONS);
+
+const TORRENT_ACTIONS = [
+	[ 'direct', _('напрямую') ],
+	[ 'vpn', _('через VPN') ],
+	[ 'block', _('блокировать') ],
+	[ 'off', _('как остальной трафик') ]
+];
+
 
 const CSS = `
 .st-table tr.st-off td, .st-table .tr.st-off .td { opacity:.5 }
@@ -432,6 +441,69 @@ return view.extend({
 		return E('div', { 'class': 'st-dim st-scope' }, [ (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')) ]);
 	},
 
+	overlapParts(ov) {
+		const p = [];
+		if (ov.domains_count)
+			p.push('%d %s'.format(ov.domains_count, sui.plural(ov.domains_count, _('домен'), _('домена'), _('доменов'))));
+		if (ov.cidrs_count)
+			p.push('%d %s'.format(ov.cidrs_count, sui.plural(ov.cidrs_count, _('подсеть'), _('подсети'), _('подсетей'))));
+		return p.join(' · ');
+	},
+
+	showOverlaps(l) {
+		const ovs = l.overlaps || [];
+		const rows = ovs.map((ov) => {
+			const samples = [ ...(ov.domains || []), ...(ov.cidrs || []) ];
+			const total = (ov.domains_count || 0) + (ov.cidrs_count || 0);
+			const more = total > samples.length ? _('\n…и ещё %d').format(total - samples.length) : '';
+			const note = ov.shadowed
+				? (ov.action != l.action
+					? E('span', { 'class': 'st-mid' }, _('стоит выше — сработает «%s» вместо «%s»').format(ACTION_LABELS[ov.action] || ov.action, ACTION_LABELS[l.action] || l.action))
+					: sui.dim(_('стоит выше, то же действие')))
+				: sui.dim(_('стоит ниже — приоритет у этого списка'));
+			return sui.field(
+				sui.label(ov.name, ACTION_LABELS[ov.action] || ov.action),
+				[
+					E('div', { 'class': 'st-full' }, [ this.overlapParts(ov), ' — ', note ]),
+					samples.length ? E('textarea', {
+						'class': 'cbi-input-textarea st-full',
+						'readonly': 'readonly',
+						'rows': Math.min(samples.length + (more ? 1 : 0), 8),
+						'style': 'font-family:monospace;font-size:12px'
+					}, [ samples.join('\n') + more ]) : ''
+				]
+			);
+		});
+		ui.showModal(_('Пересечения списка «%s»').format(l.name), [
+			E('p', {}, _('Списки проверяются сверху вниз — для общих доменов (включая поддомены) и подсетей срабатывает первый подходящий.')),
+			sui.card(rows),
+			E('div', { 'class': 'st-buttons' }, [
+				E('span', { 'style': 'flex:1' }),
+				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.hideModal }, _('Закрыть'))
+			])
+		]);
+	},
+
+	overlapLabel(l) {
+		const ovs = l.overlaps || [];
+		if (!ovs.length)
+			return '';
+		const above = ovs.filter((o) => o.shadowed);
+		const below = ovs.filter((o) => !o.shadowed);
+		const conflict = above.some((o) => o.action != l.action);
+		const fmt = (arr) => arr.map((o) => '«' + o.name + '»').join(', ');
+		const parts = [];
+		if (above.length)
+			parts.push(_('перекрывается: %s').format(fmt(above)));
+		if (below.length)
+			parts.push(_('пересекается: %s').format(fmt(below)));
+		return E('div', {}, E('a', {
+			'href': '#',
+			'class': conflict ? 'st-mid' : 'st-dim',
+			'click': (ev) => { ev.preventDefault(); this.showOverlaps(l); }
+		}, [ parts.join('; ') ]));
+	},
+
 	/* Zapret */
 
 	showZapret() {
@@ -596,7 +668,8 @@ return view.extend({
 		dom.content(this.defaultBox, [
 			...sui.kv(_('Остальной трафик'), [ sui.select(d.default_action,
 				[ [ 'vpn', _('через VPN') ], [ 'zapret', _('через Zapret') ], [ 'direct', _('напрямую') ] ], (v) => this.saveSetting({ default_action: v })),
-				d.updating ? E('em', { 'class': 'spinning' }, _('загружаю списки…')) : '' ])
+				d.updating ? E('em', { 'class': 'spinning' }, _('загружаю списки…')) : '' ]),
+			...sui.kv(_('Торренты'), [ sui.select(d.torrent_action || 'direct', TORRENT_ACTIONS, (v) => this.saveSetting({ torrent_action: v })) ])
 		]);
 
 		this.renderZapret();
@@ -612,7 +685,7 @@ return view.extend({
 			], 'st-order'),
 			sui.td(null, E('input', { 'type': 'checkbox', 'title': _('Включён'), 'checked': l.enabled ? '' : null,
 				'change': (ev) => this.saveList(l.id, { enabled: ev.target.checked ? '1' : '0' }) }), 'st-order'),
-			sui.td(_('Список'), [ E('div', {}, [ l.name ]), this.scopeLabel(l) ]),
+			sui.td(_('Список'), [ E('div', {}, [ sui.label(l.name, ACTION_LABELS[l.action] || l.action) ]), this.scopeLabel(l), this.overlapLabel(l) ]),
 			sui.td(_('Содержимое'), countLabel(l)),
 			sui.td(_('Обновлён'), l.updated ? sui.time(l.updated) : '—'),
 			sui.td(null, [

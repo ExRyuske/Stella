@@ -7,7 +7,7 @@ import { cursor } from 'uci';
 import { readfile, writefile, rename, unlink, glob, popen, stat } from 'fs';
 import { parse } from 'stella.uri';
 import { decode } from 'stella.subscription';
-import { build_config, outbound } from 'stella.xray';
+import { build_config, outbound, BT_INSPECT_PORT } from 'stella.xray';
 import { fnv1a, try_json, b64dec_loose } from 'stella.util';
 import { warp_link, random_endpoints, iso_time, trace_info, warp_better, warp_data, warp_data_reset, warp_data_parse, WARP_DATA, WARP_SOURCE, WARP_FILES, WARP_PORT } from 'stella.warp';
 import { nft_script, dnsmasq_conf, restore_script, dns_set, FW_MARK, ROUTE_TABLE, NFQWS_DESYNC_MARK } from 'stella.firewall';
@@ -398,7 +398,9 @@ function routing_opts() {
 		nft: {
 			lan_ifnames: lan_ifnames(uci),
 			tproxy_port: TPROXY_PORT,
+			bt_port: BT_INSPECT_PORT,
 			default_action: opt('main', 'default_action', 'direct'),
+			torrent_action: opt('main', 'torrent_action', 'direct'),
 			dns_hijack: hijack,
 			lists: map(lists, (l) => ({ id: l.id, action: l.action, cidrs: l.cidrs, devices_mode: l.devices_mode, macs: l.macs })),
 			devices: load_devices(uci),
@@ -1040,10 +1042,13 @@ function current_config() {
 		socks_port: +opt('main', 'socks_port', SOCKS_PORT),
 		intercept: true,
 		tproxy_port: TPROXY_PORT,
+		bt_port: BT_INSPECT_PORT,
 		dns_port: DNS_PORT,
 		dns_servers: chain,
 		dns_hosts: dns_hosts([ ...chain, ...filter(last, (e) => doh_url(e)) ]),
-		dns_last: last
+		dns_last: last,
+		default_action: opt('main', 'default_action', 'direct'),
+		torrent_action: opt('main', 'torrent_action', 'direct')
 	});
 }
 
