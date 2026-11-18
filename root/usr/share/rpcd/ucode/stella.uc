@@ -5,7 +5,7 @@
 
 import { cursor as uci_cursor } from 'uci';
 import { readfile, writefile, popen, stat, glob } from 'fs';
-import { RUN_DIR, CACHE_DIR, TRACE_URL, DNS_DIR, dns_chain, dns_fallback, isp_dns, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, SOCKS_PORT, read_json, load_nodes, is_warp, sub_label, load_lists, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
+import { RUN_DIR, CACHE_DIR, LISTS_DIR, TRACE_URL, DNS_DIR, dns_chain, dns_fallback, isp_dns, STAB_PATH, ZAPRET_DIR, ZAPRET_QNUM, ZT_QNUM, TIMEOUT, SOCKS_PORT, read_json, load_nodes, is_warp, sub_label, load_lists, lan_ifnames, xray_pid, task_busy, task_script, mwan3_ifaces, on_backup } from 'stella.store';
 import { parse } from 'stella.uri';
 import { fnv1a, try_json } from 'stella.util';
 import { dns_set } from 'stella.firewall';
@@ -388,18 +388,35 @@ const methods = {
 	lists: {
 		call: function() {
 			let uci = cursor();
-			let all = load_lists(uci);
-			let overlaps = list_overlaps(all);
-			return {
-				default_action: uci.get('stella', 'main', 'default_action') || 'direct',
-				torrent_action: uci.get('stella', 'main', 'torrent_action') || 'direct',
-				lists: map(all, (l) => ({
+			let sig_parts = [];
+			uci.foreach('stella', 'list', (s) => {
+				let st = stat(`${LISTS_DIR}/${s['.name']}.json`);
+				push(sig_parts, sprintf('%s|%s|%s|%s|%J|%J|%d|%d|%J|%J|%J',
+					s['.name'], s.name || '', s.enabled || '1', s.action || 'vpn',
+					s.devices_mode || '', s.mac || '', st?.mtime || 0, st?.size || 0,
+					s.url || '', s.geo || '', s.entry || ''));
+			});
+			let sig = fnv1a(join('\n', sig_parts));
+			let cache_path = `${RUN_DIR}/lists-meta.json`;
+			let cached = read_json(cache_path, null);
+			let lists = (cached?.sig == sig && type(cached.lists) == 'array') ? cached.lists : null;
+			if (!lists) {
+				let all = load_lists(uci);
+				let overlaps = list_overlaps(all);
+				lists = map(all, (l) => ({
 					id: l.id, name: l.name, enabled: l.enabled, action: l.action,
 					urls: l.urls, geo: l.geo, entries: l.entries, updated: l.updated,
 					domains: length(l.domains), cidrs: length(l.cidrs),
 					devices_mode: l.devices_mode, macs: l.macs,
 					overlaps: overlaps[l.id] || []
-				})),
+				}));
+				system(`mkdir -p ${shq(RUN_DIR)}`);
+				writefile(cache_path, sprintf('%J', { sig, lists }));
+			}
+			return {
+				default_action: uci.get('stella', 'main', 'default_action') || 'direct',
+				torrent_action: uci.get('stella', 'main', 'torrent_action') || 'direct',
+				lists,
 				updating: busy('lists'),
 				update_log: readfile(`${RUN_DIR}/lists.log`) || ''
 			};

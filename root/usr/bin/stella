@@ -247,6 +247,8 @@ function dnsmasq_restart() {
 	system(`mkdir -p ${keep} && cp -p /var/run/dnsmasq.*.dhcp ${keep}/ 2>/dev/null; ` +
 	       `/etc/init.d/dnsmasq stop >/dev/null 2>&1; cp -p ${keep}/* /var/run/ 2>/dev/null; rm -rf ${keep}; ` +
 	       '/etc/init.d/dnsmasq start >/dev/null 2>&1');
+	for (let t = 0; t < 5000 && !match(readfile('/proc/net/udp') || '', /:0035 /); t += 100)
+		sleep(100);
 }
 
 function fw_down() {
@@ -270,14 +272,23 @@ function enabled_lists() {
 }
 
 // Используется ли действие zapret хоть где-то — тогда нужен nfqws и очередь.
+// Проверяет UCI напрямую, не читая мегабайтные JSON-файлы списков с диска.
 function zapret_used(lists) {
 	if (opt('main', 'default_action', 'direct') == 'zapret' ||
 		opt('main', 'zapret_yt', '') || opt('main', 'zapret_discord', '') || opt('main', 'zapret_games', ''))
 		return true;
-	for (let l in lists)
-		if (l.action == 'zapret')
-			return true;
-	return false;
+	if (lists) {
+		for (let l in lists)
+			if (l.action == 'zapret')
+				return true;
+		return false;
+	}
+	let used = false;
+	uci.foreach('stella', 'list', (s) => {
+		if (s.enabled != '0' && (s.action || 'vpn') == 'zapret')
+			used = true;
+	});
+	return used;
 }
 
 function strategy_lines(text) {
@@ -427,14 +438,18 @@ function set_elem(e) {
 	return (type(ex) == 'int' && ex > 0) ? `${v} expires ${ex}s` : v;
 }
 
-function saved_set_ips() {
-	let p = popen('nft -j list table inet stella 2>/dev/null', 'r');
-	let j = p ? try_json(p.read('all') || 'null') : null;
-	p?.close();
+function saved_set_ips(names) {
 	let res = {};
-	for (let o in j?.nftables || [])
-		if (o.set && match(o.set.name, /^(list_.*_dns|zapret_excl)$/))
-			res[o.set.name] = filter(map(o.set.elem || [], set_elem), (e) => e != null);
+	for (let name in names || []) {
+		if (!match(name, /^(list_.*_dns|zapret_excl)$/))
+			continue;
+		let p = popen(`nft -j list set inet stella ${name} 2>/dev/null`, 'r');
+		let j = p ? try_json(p.read('all') || 'null') : null;
+		p?.close();
+		for (let o in j?.nftables || [])
+			if (o.set && o.set.name == name)
+				res[name] = filter(map(o.set.elem || [], set_elem), (e) => e != null);
+	}
 	return res;
 }
 
@@ -443,42 +458,61 @@ function fw_up() {
 	let o = routing_opts();
 	system(`mkdir -p ${CONF_DIR}`);
 
-	// IP, которые dnsmasq уже положил в сеты: таблица пересоздаётся, а устройства
-	// не спросят DNS повторно, пока не истечёт их кэш — без этого сайты временно
-	// шли бы не по тому правилу.
-	let saved = saved_set_ips();
+	if (!o.dnsmasq.nftset && length(filter(o.dnsmasq.lists, (l) => length(l.domains))))
+		warn('dnsmasq без nftset (нужен dnsmasq-full): сайты из списков по доменам не работают\n');
+	let conf = dnsmasq_conf(o.dnsmasq);
+	let dconfs = dnsmasq_confs();
+	let changed = false;
+	for (let f in dconfs)
+		if (readfile(f) != conf)
+			changed = true;
 
-	// Содержимое сетов запоминается: в следующий раз адреса не вернутся в сет списка, из
-	// которого что-то убрали.
-	let cur = {};
-	for (let l in o.dnsmasq.lists)
-		cur[l.id] = l.domains;
-	for (let l in o.lists)
-		cur[dns_set(l.id)] = [ ...cur[dns_set(l.id)], ...l.cidrs ];
-	let state = `${CONF_DIR}/fw-sets.json`;
-	let restore = restore_script(saved, read_json(state, {}), cur);
-	// Не все сеты вернулись (из списка что-то убрали): по команде на каждый возвращённый сет.
-	let skipped = length(filter(keys(cur), (s) => length(saved[s]))) > length(restore);
+	let rules = nft_script(o.nft), nft = `${CONF_DIR}/fw.nft`, skipped = false;
+	let same_nft = !changed && readfile(nft) == rules &&
+		system('nft list chain inet stella prerouting >/dev/null 2>&1') == 0;
 
-	// Таблица и возврат адресов — одной транзакцией: между ними пакеты открытых соединений ушли
-	// бы мимо VPN, и сервер оборвал бы их. Не принято вместе — таблица без адресов (их снова
-	// положит dnsmasq, кэш которого тогда сбрасывается).
-	let rules = nft_script(o.nft), nft = `${CONF_DIR}/fw.nft`, applied = false;
-	if (length(restore)) {
-		writefile(nft, rules + join('\n', restore) + '\n');
-		applied = system(`nft -f ${nft} 2>/dev/null`) == 0;
-		if (!applied)
-			skipped = true;
-	}
-	if (!applied) {
-		writefile(nft, rules);
-		if (system(`nft -f ${nft}`) != 0) {
-			warn('nft не принял правила, перехват не включён\n');
-			fw_down();
-			return 1;
+	if (!same_nft) {
+		// IP, которые dnsmasq уже положил в сеты: таблица пересоздаётся, а устройства
+		// не спросят DNS повторно, пока не истечёт их кэш — без этого сайты временно
+		// шли бы не по тому правилу.
+		let saved = saved_set_ips(map(o.dnsmasq.lists, (l) => l.id));
+
+		// Содержимое сетов запоминается: в следующий раз адреса не вернутся в сет списка, из
+		// которого что-то убрали.
+		let cur = {};
+		for (let l in o.dnsmasq.lists)
+			cur[l.id] = l.domains;
+		for (let l in o.lists)
+			cur[dns_set(l.id)] = [ ...cur[dns_set(l.id)], ...l.cidrs ];
+		let state = `${CONF_DIR}/fw-sets.json`;
+		let restore = restore_script(saved, read_json(state, {}), cur);
+		// Не все сеты вернулись (из списка что-то убрали): по команде на каждый возвращённый сет.
+		skipped = length(filter(keys(cur), (s) => length(saved[s]))) > length(restore);
+
+		// Таблица и возврат адресов — одной транзакцией: между ними пакеты открытых соединений ушли
+		// бы мимо VPN, и сервер оборвал бы их. Не принято вместе — таблица без адресов (их снова
+		// положит dnsmasq, кэш которого тогда сбрасывается).
+		let applied = false;
+		if (length(restore)) {
+			let full = `${CONF_DIR}/fw-apply.nft`;
+			writefile(full, rules + join('\n', restore) + '\n');
+			applied = system(`nft -f ${full} 2>/dev/null`) == 0;
+			unlink(full);
+			if (!applied)
+				skipped = true;
 		}
+		if (!applied) {
+			writefile(nft, rules);
+			if (system(`nft -f ${nft}`) != 0) {
+				warn('nft не принял правила, перехват не включён\n');
+				fw_down();
+				return 1;
+			}
+		}
+		else
+			writefile(nft, rules);
+		writefile(state, sprintf('%J', cur));
 	}
-	writefile(state, sprintf('%J', cur));
 
 	// Правило, которое уже стоит (одно и с нашим приоритетом), не трогаем: между удалением и
 	// добавлением пакеты открытых соединений VPN ушли бы мимо xray.
@@ -495,17 +529,12 @@ function fw_up() {
 	    system(`ip route replace local 0.0.0.0/0 dev lo table ${ROUTE_TABLE}`) != 0)
 		warn('не удалось добавить маршрут для VPN (нужен пакет ip-full) — трафик списков VPN не пойдёт\n');
 
-	if (!o.dnsmasq.nftset && length(filter(o.dnsmasq.lists, (l) => length(l.domains))))
-		warn('dnsmasq без nftset (нужен dnsmasq-full): сайты из списков по доменам не работают\n');
-	let conf = dnsmasq_conf(o.dnsmasq);
-	let changed = false;
-	for (let f in dnsmasq_confs())
-		if (readfile(f) != conf) {
-			writefile(f, conf);
-			changed = true;
-		}
-	if (changed)
+	if (changed) {
+		for (let f in dconfs)
+			if (readfile(f) != conf)
+				writefile(f, conf);
 		dnsmasq_restart();
+	}
 	// Из кэша dnsmasq адреса в сеты не кладёт: без сброса кэша сайты невернувшихся сетов шли бы
 	// мимо правил, пока не истечёт их TTL (бывает, часами).
 	else if (skipped)
@@ -518,7 +547,7 @@ function fw_up() {
 		for (let e in parse_list(join('\n', l.entries)).domains)
 			if (length(manual) < 300)
 				push(manual, e);
-	if (length(manual))
+	if (!same_nft && length(manual))
 		system(`( for d in ${join(' ', manual)}; do nslookup $d 127.0.0.1 >/dev/null 2>&1; done ) </dev/null >/dev/null 2>&1 &`);
 	return 0;
 }
@@ -930,7 +959,7 @@ function cmd_dns_catalog() {
 
 // Команда запуска nfqws для init (по строке на аргумент); пусто — zapret не используется.
 function cmd_zapret_cmd(mode) {
-	if (!zapret_used(enabled_lists()))
+	if (!zapret_used())
 		return 1;
 	let special = mode == 'special';
 	if (special && opt('main', 'default_action', 'direct') != 'direct')
@@ -2032,7 +2061,7 @@ function warp_needed() {
 function yt_first_due(from_warp) {
 	return +opt('main', 'zapret_test_yt', '0') > 0 && opt('main', 'zapret_yt', '') == '' &&
 		stat(`${ZAPRET_DIR}/catalog.json`) != null && stat(opt('main', 'zapret_bin', ZAPRET_BIN)) != null &&
-		zapret_used(enabled_lists()) && (from_warp || (!task_busy('warp') && !warp_first_retry())) &&
+		zapret_used() && (from_warp || (!task_busy('warp') && !warp_first_retry())) &&
 		!length(filter(values(read_json(`${ZAPRET_DIR}/results.json`, {})?.items || {}), (r) => r?.family == 'yv'));
 }
 
@@ -2046,7 +2075,7 @@ function yt_first_pick(from_warp) {
 // кнопки на «Обзоре»). Каждое — под своей блокировкой, как у планировщика; затем reload.
 function cmd_refresh() {
 	let jobs = [ [ 'update', '/usr/bin/stella update' ], [ 'lists', '/usr/bin/stella lists' ] ];
-	if (zapret_used(enabled_lists()) && !task_busy('ztest'))
+	if (zapret_used() && !task_busy('ztest'))
 		push(jobs, [ 'zcatalog', '/usr/bin/stella zapret-catalog' ]);
 	// Проверка DNS уже идёт — каталог позже: у них общие временные файлы.
 	if (!task_busy('dnscheck'))
@@ -2104,7 +2133,7 @@ function cmd_stale() {
 	// цепочку и сам перезагружает службу, если она сменилась).
 	let cats = [];
 	// После каталога Zapret — сразу первый подбор для YouTube (если он нужен).
-	if (zapret_used(enabled_lists()) && !stat(`${ZAPRET_DIR}/catalog.json`))
+	if (zapret_used() && !stat(`${ZAPRET_DIR}/catalog.json`))
 		push(cats, [ 'zcatalog', `/usr/bin/stella zapret-catalog${reload}; /usr/bin/stella zapret-first` ]);
 	if (!stat(`${DNS_DIR}/catalog.json`))
 		push(cats, [ 'dnscat', '/usr/bin/stella dns-catalog' ]);
@@ -2169,7 +2198,7 @@ function cmd_tick() {
 	let ztest = (scope, key) => ({ name: `ztest_${scope}`, task: 'ztest',
 		every: +opt('main', key, '0') * 86400 - 3600,
 		since: () => +(read_json(`${ZAPRET_DIR}/results.json`, null)?.at || now),
-		when: () => hour >= 3 && hour < 5 && zapret_used(enabled_lists()),
+		when: () => hour >= 3 && hour < 5 && zapret_used(),
 		cmd: `/usr/bin/stella zapret-test ${scope} --apply --scheduled` });
 	// Задачи по расписанию: every — период в секундах (0 и меньше — выключена); since — от
 	// чего отсчитывать, пока состояния нет (после загрузки); when — дополнительное условие;
@@ -2181,7 +2210,7 @@ function cmd_tick() {
 		  since: () => newest_mtime(`${LISTS_DIR}/*.json`), cmd: '/usr/bin/stella lists', reload: true },
 		// Каталог Zapret — если Zapret где-то выбран; каталог DNS — всегда.
 		{ name: 'zcatalog', every: every_update, since: () => +(readfile(`${ZAPRET_DIR}/catalog.updated`) || 0),
-		  when: () => zapret_used(enabled_lists()) && !task_busy('ztest'), cmd: '/usr/bin/stella zapret-catalog', reload: true },
+		  when: () => zapret_used() && !task_busy('ztest'), cmd: '/usr/bin/stella zapret-catalog', reload: true },
 		{ name: 'dnscat', every: every_update, since: () => +(readfile(`${DNS_DIR}/catalog.updated`) || 0),
 		  when: () => !task_busy('dnscheck'), cmd: '/usr/bin/stella dns-catalog' },
 		// Данные WARP (подсети, маски, API) — у генератора; reload подхватит новые маски.

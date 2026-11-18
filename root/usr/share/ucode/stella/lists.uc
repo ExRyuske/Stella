@@ -121,17 +121,28 @@ export function itdog_catalog(tree) {
 	return res;
 };
 
-// Перевод строки CIDR или IP в [ start_ip, end_ip ] (числа 0..4294967295).
-function cidr_range(s) {
-	let m = match(s, /^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)(\/([0-9]+))?$/);
-	if (!m)
+// Упаковка CIDR или IP в 62-битное целое: (start << 30) | (bits << 24) | idx.
+// Это позволяет сортировать десятки тысяч подсетей нативным C-шным sort() без колбэка ucode
+// и без создания вложенных массивов на каждую подсеть.
+function pack_cidr(s, idx) {
+	let k = index(s, '/');
+	let a = iptoarr((k >= 0) ? substr(s, 0, k) : s);
+	if (!a || length(a) != 4)
 		return null;
-	let ip = ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) & 0xffffffff;
-	let bits = (m[6] != null) ? +m[6] : 32;
+	let bits = (k >= 0) ? +substr(s, k + 1) : 32;
+	if (bits < 0 || bits > 32)
+		return null;
+	let ip = ((a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3]) & 0xffffffff;
 	let mask = (bits == 0) ? 0 : ((0xffffffff << (32 - bits)) & 0xffffffff);
 	let start = ip & mask;
-	let end = start | ((~mask) & 0xffffffff);
-	return [ start, end ];
+	return (start << 30) | (bits << 24) | (idx & 0xffffff);
+}
+
+function unpack_end(p) {
+	let start = (p >> 30) & 0xffffffff;
+	let bits = (p >> 24) & 0x3f;
+	let mask = (bits == 0) ? 0 : ((0xffffffff << (32 - bits)) & 0xffffffff);
+	return start | ((~mask) & 0xffffffff);
 }
 
 // Сравнение областей действия устройств двух списков: могут ли оба сработать для одного устройства.
@@ -172,38 +183,48 @@ const SAMPLE_MAX = 25;
 // Возвращает { id_списка: [ { id, name, action, shadowed, domains_count, cidrs_count, domains, cidrs } ] }.
 export function list_overlaps(lists) {
 	let res = {};
-	if (length(lists || []) < 2)
+	let en = filter(lists || [], (l) => l.enabled);
+	if (length(en) < 2)
 		return res;
 
-	// Предварительно разбираем диапазоны CIDR для каждого списка и убираем вложенные дубли.
+	let with_dom = filter(en, (l) => length(l.domains) > 0);
+	let with_cidr = filter(en, (l) => length(l.cidrs) > 0);
+
+	// Предварительно разбираем диапазоны CIDR только если хотя бы у двух включённых списков есть подсети.
 	let parsed_cidrs = {};
-	for (let l in lists) {
-		let rngs = [];
-		for (let c in l.cidrs || []) {
-			let r = cidr_range(c);
-			if (r)
-				push(rngs, [ r[0], r[1], c ]);
+	if (length(with_cidr) >= 2) {
+		for (let l in with_cidr) {
+			let rngs = [];
+			for (let idx, c in l.cidrs) {
+				let p = pack_cidr(c, idx);
+				if (p != null)
+					push(rngs, p);
+			}
+			sort(rngs);
+			let merged = [], last_end = -1;
+			for (let p in rngs) {
+				let end = unpack_end(p);
+				if (end > last_end) {
+					push(merged, p);
+					last_end = end;
+				}
+			}
+			parsed_cidrs[l.id] = merged;
 		}
-		rngs = sort(rngs, (x, y) => (x[0] < y[0]) ? -1 : (x[0] > y[0]) ? 1 : (y[1] < x[1]) ? -1 : (y[1] > x[1]) ? 1 : 0);
-		let merged = [];
-		for (let r in rngs)
-			if (!length(merged) || r[1] > merged[length(merged) - 1][1])
-				push(merged, r);
-		parsed_cidrs[l.id] = merged;
 	}
 
 	let dom_sets = {};
-	for (let l in lists) {
-		let s = {};
-		for (let d in l.domains || [])
-			s[d] = true;
-		dom_sets[l.id] = s;
+	if (length(with_dom) >= 2) {
+		for (let l in with_dom) {
+			let s = {};
+			for (let d in l.domains)
+				s[d] = true;
+			dom_sets[l.id] = s;
+		}
 	}
 
-	// Покрывается ли домен d каким-либо доменом (или родительским доменом) из набора set_a.
-	let dom_in = (d, set_a) => {
-		if (set_a[d])
-			return d;
+	// Покрывается ли домен d родительским доменом из набора set_a.
+	let sub_in = (d, set_a) => {
 		for (let i = index(d, '.'); i >= 0; i = index(d, '.')) {
 			d = substr(d, i + 1);
 			if (set_a[d])
@@ -212,39 +233,37 @@ export function list_overlaps(lists) {
 		return null;
 	};
 
-	for (let i = 0; i < length(lists); i++) {
-		let a = lists[i];
-		if (!a.enabled)
-			continue;
+	for (let i = 0; i < length(en); i++) {
+		let a = en[i];
 		let set_a = dom_sets[a.id];
 		let cidrs_a = parsed_cidrs[a.id];
 
-		for (let j = i + 1; j < length(lists); j++) {
-			let b = lists[j];
-			if (!b.enabled || !scopes_overlap(a, b))
+		for (let j = i + 1; j < length(en); j++) {
+			let b = en[j];
+			if (!scopes_overlap(a, b))
 				continue;
 			let set_b = dom_sets[b.id];
 			let cidrs_b = parsed_cidrs[b.id];
 
 			let d_count = 0, d_samples = [];
-			// Домены из b, покрытые в a (перекрываются списком a, стоящим выше),
-			// либо домены из a, являющиеся поддоменами домена в b.
-			for (let d in b.domains || []) {
-				let p = dom_in(d, set_a);
-				if (p) {
-					d_count++;
-					if (length(d_samples) < SAMPLE_MAX)
-						push(d_samples, (p == d) ? d : `${d} (⊂ ${p})`);
+			if (set_a && set_b) {
+				for (let d in b.domains) {
+					let p = set_a[d] ? d : sub_in(d, set_a);
+					if (p) {
+						d_count++;
+						if (length(d_samples) < SAMPLE_MAX)
+							push(d_samples, (p == d) ? d : `${d} (⊂ ${p})`);
+					}
 				}
-			}
-			for (let d in a.domains || []) {
-				if (set_b[d])
-					continue; // точное совпадение уже посчитано выше
-				let p = dom_in(d, set_b);
-				if (p) {
-					d_count++;
-					if (length(d_samples) < SAMPLE_MAX)
-						push(d_samples, `${d} (⊂ ${p})`);
+				for (let d in a.domains) {
+					if (set_b[d])
+						continue;
+					let p = sub_in(d, set_b);
+					if (p) {
+						d_count++;
+						if (length(d_samples) < SAMPLE_MAX)
+							push(d_samples, `${d} (⊂ ${p})`);
+					}
 				}
 			}
 
@@ -252,21 +271,25 @@ export function list_overlaps(lists) {
 			if (length(cidrs_a) && length(cidrs_b)) {
 				let ia = 0, ib = 0, na = length(cidrs_a), nb = length(cidrs_b);
 				while (ia < na && ib < nb) {
-					let ra = cidrs_a[ia], rb = cidrs_b[ib];
-					if (ra[0] <= rb[1] && rb[0] <= ra[1]) {
+					let pa = cidrs_a[ia], pb = cidrs_b[ib];
+					let sa = (pa >> 30) & 0xffffffff, ea = unpack_end(pa);
+					let sb = (pb >> 30) & 0xffffffff, eb = unpack_end(pb);
+					if (sa <= eb && sb <= ea) {
 						c_count++;
-						if (length(c_samples) < SAMPLE_MAX)
-							push(c_samples, (ra[2] == rb[2]) ? ra[2] : `${rb[2]} (∩ ${ra[2]})`);
-						if (ra[1] < rb[1])
+						if (length(c_samples) < SAMPLE_MAX) {
+							let ca = a.cidrs[pa & 0xffffff], cb = b.cidrs[pb & 0xffffff];
+							push(c_samples, (ca == cb) ? ca : `${cb} (∩ ${ca})`);
+						}
+						if (ea < eb)
 							ia++;
-						else if (rb[1] < ra[1])
+						else if (eb < ea)
 							ib++;
 						else {
 							ia++;
 							ib++;
 						}
 					}
-					else if (ra[1] < rb[0])
+					else if (ea < sb)
 						ia++;
 					else
 						ib++;

@@ -169,9 +169,17 @@ export function load_lists(uci) {
 		let path = `${LISTS_DIR}/${s['.name']}.json`;
 		let remote = read_json(path, { domains: [], cidrs: [] });
 		let manual = parse_list(join('\n', as_array(s.entry)));
-		let domains = {}, cidrs = {};
-		for (let d in [ ...remote.domains, ...manual.domains ]) domains[d] = true;
-		for (let c in [ ...remote.cidrs, ...manual.cidrs ]) cidrs[c] = true;
+		let domains = remote.domains || [], cidrs = remote.cidrs || [];
+		if (length(manual.domains)) {
+			let m = {};
+			for (let d in [ ...domains, ...manual.domains ]) m[d] = true;
+			domains = keys(m);
+		}
+		if (length(manual.cidrs)) {
+			let m = {};
+			for (let c in [ ...cidrs, ...manual.cidrs ]) m[c] = true;
+			cidrs = keys(m);
+		}
 
 		push(res, {
 			id: s['.name'],
@@ -181,8 +189,8 @@ export function load_lists(uci) {
 			urls: as_array(s.url),
 			geo: as_array(s.geo),
 			entries: as_array(s.entry),
-			domains: keys(domains),
-			cidrs: keys(cidrs),
+			domains,
+			cidrs,
 			updated: stat(path)?.mtime,
 			// Для каких устройств действует: all — для всех, only/except — MAC из списка.
 			devices_mode: (s.devices_mode in [ 'only', 'except' ] && length(as_array(s.mac))) ? s.devices_mode : 'all',

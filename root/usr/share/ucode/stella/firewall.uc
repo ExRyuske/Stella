@@ -265,11 +265,13 @@ export function restore_script(saved, prev, cur) {
 	for (let id, entries in cur) {
 		if (!length(saved[id]))
 			continue;
-		let now = {};
-		for (let e in entries)
-			now[e] = true;
-		if (length(filter(prev[id] || [], (e) => !now[e])))
-			continue;
+		if (length(prev[id])) {
+			let now = {};
+			for (let e in entries)
+				now[e] = true;
+			if (length(filter(prev[id], (e) => !now[e])))
+				continue;
+		}
 		push(out, `add element inet stella ${id} { ${join(', ', saved[id])} }`);
 	}
 	return out;
@@ -279,14 +281,17 @@ export function restore_script(saved, prev, cur) {
 // Домен из нескольких списков получает все их сеты одной строкой.
 export function dnsmasq_conf(opts) {
 	let sets = {}, order = [];
-	for (let l in opts.lists || [])
+	for (let l in opts.lists || []) {
+		let tag = `4#inet#stella#${l.id}`;
 		for (let d in l.domains || []) {
 			if (!sets[d]) {
-				sets[d] = [];
+				sets[d] = tag;
 				push(order, d);
 			}
-			push(sets[d], `4#inet#stella#${l.id}`);
+			else
+				sets[d] += `,${tag}`;
 		}
+	}
 
 	// max-ttl: устройства переспрашивают не реже раза в минуту — новый список начинает
 	// действовать через минуту, а не когда истечёт TTL сайта. Кэш dnsmasq держит настоящий TTL.
@@ -298,7 +303,7 @@ export function dnsmasq_conf(opts) {
 	// Без поддержки nftset (обычный dnsmasq, не dnsmasq-full) он с такими строками не запустится.
 	if (opts.nftset !== false)
 		for (let d in order)
-			push(out, `nftset=/${d}/${join(',', sets[d])}`);
+			push(out, `nftset=/${d}/${sets[d]}`);
 	push(out, '');
 	return join('\n', out);
 };
