@@ -295,7 +295,16 @@ export function dnsmasq_conf(opts) {
 
 	// max-ttl: устройства переспрашивают не реже раза в минуту — новый список начинает
 	// действовать через минуту, а не когда истечёт TTL сайта. Кэш dnsmasq держит настоящий TTL.
-	let out = [ 'no-resolv', `server=127.0.0.1#${opts.dns_port}`, 'max-ttl=60', `max-cache-ttl=${DNS_CACHE_TTL}` ];
+	// Запасные серверы (обычно DNS провайдера) идут строго после xray (strict-order): пока
+	// xray работает — запросы идут только в него, а на время его перезапуска dnsmasq
+	// мгновенно переключается на запасной сервер без провала DNS для устройств.
+	let out = [ 'no-resolv' ];
+	if (length(opts.fallback_servers))
+		push(out, 'strict-order');
+	push(out, `server=127.0.0.1#${opts.dns_port}`);
+	for (let s in opts.fallback_servers || [])
+		push(out, `server=${s}`);
+	push(out, 'max-ttl=60', `max-cache-ttl=${DNS_CACHE_TTL}`);
 	// IPv6 закрыт — и адреса IPv6 устройствам не нужны (пустой ответ на AAAA). Сам xray
 	// спрашивает и IPv6 — для WARP.
 	if (opts.block_ipv6 !== false)

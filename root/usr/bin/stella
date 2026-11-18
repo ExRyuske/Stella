@@ -430,6 +430,15 @@ function routing_opts() {
 	let hijack = opt('main', 'dns_hijack', '1') == '1';
 	// IPv6 устройств закрыт (по умолчанию): перехват Stella — только для IPv4.
 	let block_ipv6 = opt('main', 'block_ipv6', '1') == '1';
+	let fb = [];
+	for (let e in dns_fallback(uci)) {
+		if (e == 'isp')
+			push(fb, ...isp_dns());
+		else if (is_ipv4(e))
+			push(fb, e);
+	}
+	if (!length(fb))
+		fb = isp_dns();
 	return {
 		lists,
 		nft: {
@@ -445,7 +454,7 @@ function routing_opts() {
 			all_vpn: opt('main', 'backup_vpn', '0') == '1' && on_backup(uci) != null,
 			block_ipv6
 		},
-		dnsmasq: { dns_port: DNS_PORT, block_ipv6, nftset: dnsmasq_nftset(), lists: [
+		dnsmasq: { dns_port: DNS_PORT, fallback_servers: uniq(fb), block_ipv6, nftset: dnsmasq_nftset(), lists: [
 			...map(lists, (l) => ({ id: dns_set(l.id), domains: l.domains })),
 			...(zapret ? [ { id: 'zapret_excl', domains: zapret_exclude_domains() } ] : [])
 		] }

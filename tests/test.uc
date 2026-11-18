@@ -475,6 +475,12 @@ if (index(dp, 'nftset=') < 0 && index(dp, 'server=127.0.0.1#10853\n') >= 0)
 else
 	fail(`dnsmasq_conf без nftset:\n${dp}`);
 
+let dfb = dnsmasq_conf({ dns_port: 10853, fallback_servers: [ '192.168.1.1' ], lists: [] });
+if (index(dfb, 'strict-order\n') >= 0 && index(dfb, 'server=127.0.0.1#10853\nserver=192.168.1.1\n') >= 0)
+	passed++;
+else
+	fail(`dnsmasq_conf с fallback_servers:\n${dfb}`);
+
 // Каталог Zapret: три источника на реальных образцах.
 let fs = flowseal_strategy(readfile('tests/fixtures/flowseal-general-alt3.bat'), 'general (ALT3)', '/etc/stella/zapret/fake');
 let fsj = fs ? join(' ', fs.args) : '';
