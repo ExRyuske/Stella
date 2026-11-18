@@ -23,6 +23,25 @@ for f in htdocs/luci-static/resources/view/stella/*.js htdocs/luci-static/resour
 	fi
 done
 
+python3 - <<'PY'
+import glob, re, sys
+bad = 0
+for path in sorted(glob.glob('htdocs/**/*.js', recursive=True)):
+    src = open(path).read()
+    nc = re.sub(r'//.*', '', src)
+    nc = re.sub(r'/\*.*?\*/', '', nc, flags=re.S)
+    reqs = { (m.group(2) or m.group(1).split('.')[-1]) for m in re.finditer(r"'require\s+([a-zA-Z0-9_.]+)(?:\s+as\s+([a-zA-Z0-9_]+))?';", src) }
+    rest = re.sub(r"'require\s+[^']+';", '', nc)
+    rest = re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", "''", rest)
+    for g in ('ui', 'poll', 'dom', 'uci', 'rpc', 'fs', 'view', 'form', 'sui', 'baseclass'):
+        if re.search(r'(?:^|[^.\w]|\.\.\.)' + g + r'\s*\.', rest) and g not in reqs:
+            print(f'FAIL: {path}: {g} используется без require', file=sys.stderr)
+            bad = 1
+sys.exit(bad)
+PY
+
+node tests/devices.js
+
 for f in root/usr/share/luci/menu.d/*.json root/usr/share/rpcd/acl.d/*.json; do
 	python3 -m json.tool "$f" >/dev/null || { echo "FAIL: $f"; exit 1; }
 done

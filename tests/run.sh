@@ -6,7 +6,8 @@ UCODE="${UCODE:-ucode}"
 UCODE_LIB="${UCODE_LIB:-$(dirname "$(command -v "$UCODE")")}"
 
 uc() {
-	"$UCODE" -L "$UCODE_LIB/*.so" -L "$PWD/tests/mock/*.uc" -L "$PWD/root/usr/share/ucode/*.uc" "$@"
+	LD_LIBRARY_PATH="$UCODE_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		"$UCODE" -L "$UCODE_LIB/*.so" -L "$PWD/tests/mock/*.uc" -L "$PWD/root/usr/share/ucode/*.uc" "$@"
 }
 
 # Вызовы функций до объявления: ucode их не поднимает, и ошибка всплывает только при работе.

@@ -39,7 +39,8 @@ DNSMASQ="$T/dnsmasq-full"
 # «--» перед скриптом: getopt из glibc переставляет аргументы и принял бы «--apply» команды
 # за ключ самого ucode (на роутере musl так не делает, а в CI — glibc).
 run() {
-	PATH="$DNSMASQ:$PATH" STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" STELLA_WARP_DATA="$T/warp.json" "$UCODE" -S \
+	LD_LIBRARY_PATH="$UCODE_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		STELLA_PROBE_TIMEOUT=1 PATH="$DNSMASQ:$PATH" STELLA_UCI_JSON="$T/uci.json" STELLA_CACHE_DIR="$T/cache" STELLA_RUN_DIR="$T/run" STELLA_LISTS_DIR="$T/lists" STELLA_ZAPRET_DIR="$T/zapret" STELLA_MWAN3_STATE="$T/mwan3" STELLA_WARP_DATA="$T/warp.json" "$UCODE" -S \
 		-L "$PWD/tests/mock/*.uc" -L "$UCODE_LIB/*.so" -L "$PWD/root/usr/share/ucode/*.uc" \
 		-- root/usr/bin/stella "$@"
 }

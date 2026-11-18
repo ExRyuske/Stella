@@ -146,7 +146,7 @@ export const XRAY_CONF = `${CONF_DIR}/config.json`;
 export const PROBE_URL = getenv('STELLA_PROBE_URL') || 'https://cp.cloudflare.com/generate_204';
 export const TRACE_URL = getenv('STELLA_TRACE_URL') || 'https://www.cloudflare.com/cdn-cgi/trace';
 
-export const TIMEOUT = { connect: 10, fetch: 60, probe: 8 };
+export const TIMEOUT = { connect: 10, fetch: 60, probe: +(getenv('STELLA_PROBE_TIMEOUT') || 8) };
 export const AUTO_MAX = 30;
 export const SOCKS_PORT = 10808;
 export const TPROXY_PORT = 10812;

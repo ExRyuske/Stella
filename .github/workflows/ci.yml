@@ -87,7 +87,7 @@ jobs:
             [ -e "$p" ] || continue
             git -C ucode apply "$p"
           done
-          cmake -S ucode -B ucode/build -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
+          cmake -S ucode -B ucode/build -DCMAKE_BUILD_RPATH='$ORIGIN' -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF \
             -DDEBUG_SUPPORT=OFF -DRTNL_SUPPORT=OFF -DNL80211_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
             -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF -DZLIB_SUPPORT=ON >/dev/null
           cmake --build ucode/build -j"$(nproc)"
@@ -149,23 +149,36 @@ jobs:
           test -n "$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - id: sdk-week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      # Подготовленный SDK (распакованный архив, фиды без .git и собранные хост-инструменты
+      # luci-base: jsmin, po2lmo, lua) кэшируется на неделю — на повторных прогонах сборка
+      # пакета занимает секунды вместо 6+ минут.
+      - name: sdk cache
+        id: sdk-cache
+        uses: actions/cache@v6
+        with:
+          path: sdk
+          key: openwrt-sdk-v1-${{ env.SDK_TARGET }}-${{ env.OPENWRT }}-${{ steps.sdk-week.outputs.week }}
+
       # SDK ищет пакеты в подкаталогах фида, а у нас пакет — корень репозитория.
       # Поэтому фид собирается рядом: каталог с Makefile, root/ и htdocs/.
       #
-      # Без зависимостей в дереве SDK молча выкинул бы пакет как неудовлетворимый,
-      # но собирает он их все, прежде чем взяться за наш: xray-core тянет за собой
-      # сборку Go, curl — mbedtls, и это ~20 минут ради пакета без единого бинарника.
-      # Поэтому xray-core, curl, ip-full и модули ядра (их SDK собирал бы из исходников ядра)
-      # здесь — пустые заглушки с теми же именами: в .apk
-      # попадают только имена зависимостей. Что настоящие пакеты есть в фиде
-      # packages этой версии, проверяется отдельно. luci-base и ucode — настоящие:
-      # luci.mk нужны инструменты luci-base.
+      # Все runtime-зависимости, не нужные для сборки noarch-пакета, — пустые заглушки с теми же
+      # именами: в .apk попадают только имена зависимостей, а их наличие в настоящих фидах
+      # OpenWrt проверяется отдельно. Из настоящего фида luci ставится только luci-base (его
+      # хост-инструмент jsmin сжимает JS-виды при упаковке).
       - name: build .apk
+        env:
+          SDK_CACHE_HIT: ${{ steps.sdk-cache.outputs.cache-hit }}
         run: |
           set -e
-          mkdir -p feed/luci-app-stella out
+          mkdir -p feed/luci-app-stella out sdk
           cp -r Makefile root htdocs feed/luci-app-stella/
-          for p in xray-core curl kmod-nft-tproxy kmod-nft-queue ip-full; do
+          for p in xray-core curl kmod-nft-tproxy kmod-nft-queue ip-full \
+                   ucode ucode-mod-fs ucode-mod-uci ucode-mod-zlib \
+                   ucode-mod-log ucode-mod-ubus ucode-mod-math; do
             mkdir -p "feed/$p"
             printf '%s\n' \
               'include $(TOPDIR)/rules.mk' \
@@ -181,28 +194,57 @@ jobs:
           # запись всем, rpcd не загружает («world writable») — и это ещё и дыра.
           chmod -R a+rX feed
           chmod a+rwx out
-          # SDK (~250 МБ) образ докачивает сам (setup.sh, wget) — по умолчанию с mirror-03,
-          # внутреннего зеркала OpenWrt. В ноябре 2026 оно отдавало по 20 КБ/с, и задача дважды
-          # простояла до таймаута. Берём SDK из общей раздачи downloads.openwrt.org (она за CDN),
-          # подпись и контрольная сумма проверяются так же. А wget после минуты тишины
-          # переподключается и докачивает с того же места, а не ждёт 15 минут.
+          IMG="ghcr.io/openwrt/sdk:$SDK_TARGET-$OPENWRT"
+          SDK_UID="$(docker run --rm --entrypoint id "$IMG" -u)"
+          SDK_GID="$(docker run --rm --entrypoint id "$IMG" -g)"
+          sudo chown -R "$SDK_UID:$SDK_GID" sdk
+          # SDK (~250 МБ) образ докачивает сам (setup.sh, wget) — берём с downloads.openwrt.org
+          # (CDN, с проверкой подписи и контрольной суммы). На повторных прогонах /sdk уже готов
+          # из кэша, а отключение CONFIG_ALL_KMODS убирает сборку сотен лишних kmod-*.
           docker run --rm -e UPSTREAM_URL=https://downloads.openwrt.org \
-            -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" "ghcr.io/openwrt/sdk:$SDK_TARGET-$OPENWRT" bash -ec '
-            printf "%s\n" "read_timeout = 60" "tries = 10" "waitretry = 10" "retry_connrefused = on" > ~/.wgetrc
-            [ -x ./scripts/feeds ] || ./setup.sh
-            echo "src-link stella /feed" >> feeds.conf.default
-            ./scripts/feeds update base packages luci stella >/dev/null
+            -e SDK_CACHE_HIT="$SDK_CACHE_HIT" \
+            -v "$PWD/feed:/feed:ro" -v "$PWD/out:/out" -v "$PWD/sdk:/sdk" "$IMG" bash -ec '
+            cd /sdk
+            if [ ! -x ./scripts/feeds ]; then
+              printf "%s\n" "read_timeout = 60" "tries = 10" "waitretry = 10" "retry_connrefused = on" > ~/.wgetrc
+              /builder/setup.sh
+              ./scripts/feeds update base packages luci >/dev/null
+              ./scripts/feeds install luci-base >/dev/null
+              rm -rf package/feeds/base/ucode
+            fi
             for p in xray-core curl; do
               ./scripts/feeds list -r packages | sed "s/[[:space:]].*//" | grep -qx "$p" || { echo "в фиде packages нет $p"; exit 1; }
             done
-            ./scripts/feeds install -p stella xray-core curl kmod-nft-tproxy kmod-nft-queue ip-full luci-app-stella
-            ./scripts/feeds install luci-base ucode ucode-mod-fs ucode-mod-uci ucode-mod-zlib >/dev/null
+            for p in ucode ucode-mod-fs ucode-mod-uci ucode-mod-zlib; do
+              ./scripts/feeds list -r base | sed "s/[[:space:]].*//" | grep -qx "$p" || { echo "в фиде base нет $p"; exit 1; }
+            done
+            grep -qxF "src-link stella /feed" feeds.conf.default || echo "src-link stella /feed" >> feeds.conf.default
+            ./scripts/feeds update stella >/dev/null
+            ./scripts/feeds install -f -p stella xray-core curl kmod-nft-tproxy kmod-nft-queue ip-full \
+              ucode ucode-mod-fs ucode-mod-uci ucode-mod-zlib \
+              ucode-mod-log ucode-mod-ubus ucode-mod-math luci-app-stella >/dev/null
+            printf "%s\n" \
+              "# CONFIG_ALL is not set" \
+              "# CONFIG_ALL_KMODS is not set" \
+              "# CONFIG_ALL_NONSHARED is not set" \
+              "CONFIG_PACKAGE_luci-base=m" \
+              "CONFIG_LUCI_JSMIN=y" \
+              "# CONFIG_LUCI_CSSTIDY is not set" \
+              "# CONFIG_LUCI_SRCDIET is not set" \
+              "CONFIG_PACKAGE_luci-app-stella=m" > .config
             make defconfig >/dev/null
+            grep -qx "CONFIG_LUCI_JSMIN=y" .config || { echo "CONFIG_LUCI_JSMIN не включён"; exit 1; }
             make package/luci-app-stella/compile -j"$(nproc)" V=s
             bad="$(find build_dir -path "*/ipkg-all/luci-app-stella/*" -perm -0002 ! -type l)"
             [ -z "$bad" ] || { echo "в пакете файлы с записью для всех:"; echo "$bad"; exit 1; }
             find bin -name "luci-app-stella*.apk" -exec cp {} /out/ \;
+            if [ "$SDK_CACHE_HIT" != "true" ]; then
+              rm -rf feeds/*/.git dl bin tmp build_dir/target-* feeds/stella feeds/stella.* package/feeds/stella .config .config.old
+            fi
           '
+          if [ "$SDK_CACHE_HIT" != "true" ]; then
+            sudo chown -R "$(id -u):$(id -g)" sdk
+          fi
           ls -la out
           test -n "$(ls out/*.apk)"
 
