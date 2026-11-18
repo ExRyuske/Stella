@@ -1,11 +1,11 @@
 #!/bin/sh
 # Установка или обновление Stella на OpenWrt 25.12 — последний релиз с GitHub:
-#   wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
+#   wget -qO- https://raw.githubusercontent.com/ExRyuske/stella/main/install.sh | sh
 # После пакета — `stella setup`, как и при обновлении Stella на самом роутере: dnsmasq-full и
 # zapret (mwan3 ставится только кнопкой на «Обзоре»).
 set -e
 
-json=$(wget -qO- https://api.github.com/repos/ExRyuske/Stella/releases/latest)
+json=$(wget -qO- https://api.github.com/repos/ExRyuske/stella/releases/latest)
 # Пакет — через API GitHub (сразу с сервера файлов: у части провайдеров сам github.com
 # недоступен), запасной путь — обычная ссылка на github.com.
 api= url= i=0

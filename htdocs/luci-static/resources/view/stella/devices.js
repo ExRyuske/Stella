@@ -32,7 +32,7 @@ function label(d) {
 
 return view.extend({
 	load() {
-		return sui.need(22).then(() => Promise.all([ sui.devices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
+		return sui.need(23).then(() => Promise.all([ sui.devices(), callLists(), callSettings(), callNetDevices().catch(() => ({})) ]));
 	},
 
 	// Интерфейсы LAN, с которых перехватывается трафик (обычно br-lan; гостевая сеть — отдельный мост).
@@ -100,22 +100,19 @@ return view.extend({
 		const sel = sui.select(policy, POLICIES, (v) => policy = v);
 		const save = () => {
 			const m = mac.value.trim().toLowerCase();
-			if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(m))
-				return ui.addNotification(null, E('p', {}, _('Нужен MAC вида aa:bb:cc:dd:ee:ff.')), 'warning');
+			if (!(/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/).test(m))
+				return sui.notify(_('Нужен MAC вида aa:bb:cc:dd:ee:ff.'));
 			ui.hideModal();
 			return this.save(m, name.value.trim(), policy);
 		};
-		ui.showModal(dev ? (label(dev) || dev.mac) : _('Новое устройство'), [
-			sui.card([
-				dev ? sui.field('IP, MAC', [ [ dev.ip, dev.mac ].filter((x) => x).join(', ') ]) : sui.field('MAC', mac),
-				sui.field(_('Название'), name),
-				sui.field(_('Режим'), sel)
-			]),
-			E('div', { 'class': 'st-buttons' }, [
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, save) }, _('Сохранить'))
-			])
+		sui.modal(dev ? (label(dev) || dev.mac) : _('Новое устройство'), sui.card([
+			dev ? sui.field('IP, MAC', [ [ dev.ip, dev.mac ].filter((x) => x).join(', ') ]) : sui.field('MAC', mac),
+			sui.field(_('Название'), name),
+			sui.field(_('Режим'), sel)
+		]), [
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
+			E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, save) }, _('Сохранить'))
 		]);
 	},
 

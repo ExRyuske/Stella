@@ -75,10 +75,15 @@ start_traffic() {
 	# соединения, если поменялись одни списки.
 	# GOMEMLIMIT — мягкий предел памяти для Go (треть ОЗУ): без него xray держит память с
 	# большим запасом, и на роутере со 128–256 МБ до нехватки памяти недалеко.
-	local mem_kb
+	local mem_kb gogc limit
 	mem_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+	if [ "${mem_kb:-0}" -gt 0 ]; then
+		limit=$((mem_kb / 3 / 1024))
+		[ "$limit" -lt 16 ] && limit=16
+		[ "$mem_kb" -le 262144 ] && gogc='GOGC=50'
+	fi
 	procd_set_param env STELLA_CONF_SUM="$(md5sum <"$CONF" | cut -d' ' -f1)" \
-		${mem_kb:+GOMEMLIMIT=$((mem_kb / 3 / 1024))MiB}
+		${limit:+GOMEMLIMIT=${limit}MiB} $gogc
 	procd_set_param respawn 3600 5 0
 	procd_set_param limits nofile="65535 65535"
 	procd_set_param stdout 1

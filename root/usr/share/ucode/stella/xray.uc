@@ -2,7 +2,7 @@
 
 'use strict';
 
-import { SOCKS_PORT, PROBE_URL } from 'stella.store';
+import { SOCKS_PORT, BT_INSPECT_PORT, PROBE_URL, is_ipv4, url_host, xray_start, xray_stop } from 'stella.core';
 import { quic_noise } from 'stella.warp';
 
 const NET_NAMES = {
@@ -19,6 +19,7 @@ const PRIVATE_NETS = [
 // а xray спрашивает серверы по очереди: при упавших DoH-серверах до DNS провайдера надо дойти
 // раньше. Прямой DoH отвечает за 0,1–0,6 с вместе с подключением.
 const DNS_TIMEOUT_MS = 1500;
+const DNS_VPN_TIMEOUT_MS = 2500;
 // Истёкшую запись xray отдаёт сразу (с TTL 1) и обновляет её в фоне, но не дольше суток после
 // срока: при упавшем туннеле знакомые имена отвечают без ожидания.
 const DNS_STALE_TTL = 86400;
@@ -113,7 +114,7 @@ function stream_settings(n) {
 	return ss;
 }
 
-export function outbound(n, tag) {
+function outbound(n, tag) {
 	let ob = { tag, protocol: n.protocol };
 
 	switch (n.protocol) {
@@ -187,30 +188,45 @@ export function outbound(n, tag) {
 		ob.streamSettings = stream_settings(n);
 
 	return ob;
-};
+}
 
-export const BT_INSPECT_PORT = 10813;
+// Запустить временный xray со своим socks-входом (base + i) для каждого узла; { stop }.
+export function xray_socks_start(nodes, base) {
+	let cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [], routing: { rules: [] } };
+	let ports = [];
+	for (let i, n in nodes) {
+		push(cfg.inbounds, { tag: `in${i}`, listen: '127.0.0.1', port: base + i, protocol: 'socks' });
+		push(cfg.outbounds, outbound(n, `out${i}`));
+		push(cfg.routing.rules, { inboundTag: [ `in${i}` ], outboundTag: `out${i}` });
+		push(ports, base + i);
+	}
+	let pid = xray_start(cfg, base, ports);
+	return pid ? { stop: () => xray_stop(pid) } : null;
+};
 
 // opts: { node, auto_nodes, log_level, socks_port,
 //         intercept, tproxy_port, bt_port, dns_port, dns_servers, dns_hosts, dns_last (или dns_isp),
-//         default_action, torrent_action }
+//         dns_vpn, default_action, torrent_action }
 //
 // node — выбранный вручную узел (outbound "proxy"). auto_nodes — узлы автовыбора:
 // каждый получает outbound "proxy-N", xray раз в минуту проверяет их и ведёт трафик через
 // самый быстрый живой (balancer leastPing); если не отвечает ни один — через node.
 //
 // intercept = прозрачный прокси для LAN: вход TPROXY и DNS для dnsmasq.
-// DNS — напрямую, цепочкой: DoH-серверы dns_servers по порядку, за ними запасные dns_last (DoH
-// или обычный UDP; по умолчанию — DNS провайдера). Имена DoH-серверов xray берёт из dns_hosts (их адреса узнаёт
-// Stella): иначе он спросил бы их у dnsmasq, а тот — у самого xray.
+// DNS — цепочкой: DoH-серверы dns_servers по порядку (напрямую или через VPN при dns_vpn),
+// за ними запасные dns_last (DoH или обычный UDP; по умолчанию — DNS провайдера). Имена
+// DoH-серверов xray берёт из dns_hosts, а адреса VPN-серверов всегда разрешаются напрямую.
 export function build_config(opts) {
 	let auto = (length(opts.auto_nodes || []) >= 2) ? opts.auto_nodes : null;
 	let has_proxy = !!(opts.node || auto);
 	let to_main = auto ? { balancerTag: 'auto' } : { outboundTag: has_proxy ? 'proxy' : 'direct' };
 	let bt_inspect = opts.intercept && (opts.torrent_action in [ 'vpn', 'block' ]) && opts.default_action != 'vpn';
 	let outbounds = [];
+	let servers_of = [];
 
-	// Адреса прокси-серверов xray узнаёт своим DNS — он и так напрямую.
+	let vpn_dns = !!(opts.intercept && opts.dns_vpn && has_proxy);
+
+	// Адреса прокси-серверов xray узнаёт своим DNS — всегда напрямую.
 	let add_proxy = (n, tag) => {
 		let ob = outbound(n, tag);
 		// Прозрачный VPN обслуживает и приложения без отката с QUIC на TCP. Обычный
@@ -221,6 +237,8 @@ export function build_config(opts) {
 		if (opts.intercept)
 			ob.streamSettings = { ...(ob.streamSettings || {}), sockopt: { domainStrategy: 'UseIPv4' } };
 		push(outbounds, ob);
+		if (vpn_dns && n.address && !is_ipv4(n.address) && index(n.address, ':') < 0 && !(`full:${n.address}` in servers_of))
+			push(servers_of, `full:${n.address}`);
 	};
 
 	if (opts.node)
@@ -283,11 +301,28 @@ export function build_config(opts) {
 		// Свой выход для DNS: имя DoH-сервера он узнаёт у встроенного DNS xray, то есть из hosts.
 		push(outbounds, { tag: 'direct-dns', protocol: 'freedom', streamSettings: { sockopt: { domainStrategy: 'UseIPv4' } } });
 		let servers = [];
+		if (vpn_dns) {
+			for (let url in [ ...(opts.dns_servers || []), ...(opts.dns_last ?? []) ]) {
+				if (is_ipv4(url))
+					continue;
+				let h = url_host(url);
+				if (h && !is_ipv4(h) && !opts.dns_hosts?.[h] && !(`full:${h}` in servers_of))
+					push(servers_of, `full:${h}`);
+			}
+			// Имя самого VPN-сервера (и DoH без адреса в hosts) разрешается напрямую — иначе
+			// для подключения к VPN потребовался бы сам VPN.
+			if (length(servers_of)) {
+				let boot = filter(opts.dns_last ?? opts.dns_isp ?? [], is_ipv4)[0] || (opts.dns_isp || [])[0] || '1.1.1.1';
+				push(servers, { address: boot, port: 53, domains: servers_of, skipFallback: true, tag: 'dns-direct' });
+			}
+		}
+		let doh_opts = vpn_dns ? { timeoutMs: DNS_VPN_TIMEOUT_MS, tag: 'dns-tunnel' } : { timeoutMs: DNS_TIMEOUT_MS };
 		for (let url in opts.dns_servers || [])
-			push(servers, { address: url, timeoutMs: DNS_TIMEOUT_MS });
+			push(servers, { address: url, ...doh_opts });
 		// Запасные по порядку: DoH или обычный DNS (IPv4, UDP 53); без них — DNS провайдера.
 		for (let x in opts.dns_last ?? opts.dns_isp ?? [])
-			push(servers, match(x, /^[0-9.]+$/) ? { address: x, port: 53 } : { address: x, timeoutMs: DNS_TIMEOUT_MS });
+			push(servers, is_ipv4(x) ? (vpn_dns ? { address: x, port: 53, tag: 'dns-direct' } : { address: x, port: 53 })
+				: { address: x, ...doh_opts });
 
 		cfg.dns = { tag: 'dns-direct', queryStrategy: 'UseIP', serveStale: true, serveExpiredTTL: DNS_STALE_TTL, servers };
 		if (length(opts.dns_hosts || {}))
@@ -295,6 +330,8 @@ export function build_config(opts) {
 
 		push(rules, { inboundTag: ['dns-in'], outboundTag: 'dns-out' });
 		push(rules, { inboundTag: ['dns-direct'], outboundTag: 'direct-dns' });
+		if (vpn_dns)
+			push(rules, { inboundTag: ['dns-tunnel'], ...to_main });
 	}
 
 	push(rules,

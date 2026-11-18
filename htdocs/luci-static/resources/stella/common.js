@@ -3,6 +3,7 @@
 'require rpc';
 'require ui';
 'require uci';
+'require poll';
 
 // Общее для страниц Stella: стили, выпадающие списки с готовыми вариантами, время, склонение,
 // запись настроек.
@@ -34,7 +35,7 @@ const CHECKS = [
 // Версия модуля. LuCI запрашивает его по адресу со своей версией, а не Stella, и uhttpd не
 // запрещает кэш: после обновления Stella браузер может днями брать прежний модуль из кэша.
 // Страницы вызывают need() с нужной им версией; повышать, когда страницам нужно новое отсюда.
-const API = 22;
+const API = 23;
 
 // Расписания в часах — одни для всех: подписки, списки, подбор узла, автообновление.
 const HOURS = [ [ '0', _('вручную') ], [ '1', _('каждый час') ], [ '3', _('каждые 3 ч') ], [ '6', _('каждые 6 ч') ],
@@ -88,6 +89,25 @@ function injectCss() {
 	document.head.appendChild(E('style', { 'id': 'stella-ui-css' }, CSS));
 }
 
+// Выпадающие списки — только виджеты LuCI, а не <select> браузера: у них другие отступы и
+// стрелка. choices — [ [значение, подпись] ] в нужном порядке; подпись может быть элементом.
+// Виджет сообщает об изменении и при простом закрытии списка — поэтому onchange зовётся,
+// только если значение действительно стало другим.
+function dropdown(widget, value, choices, onchange, opts) {
+	value = (value == null) ? '' : String(value);
+	const w = new widget(value, Object.fromEntries(choices), Object.assign({ sort: choices.map((c) => c[0]) }, opts));
+	const el = w.render();
+	let last = value;
+	el.addEventListener('widget-change', () => {
+		const v = w.getValue();
+		if (v == null || v === last || (v === '' && widget === ui.Combobox))
+			return;
+		last = v;
+		onchange(v);
+	});
+	return el;
+}
+
 return baseclass.extend({
 	__init__() {
 		injectCss();
@@ -118,16 +138,16 @@ return baseclass.extend({
 	// значения в строку, пояснение под ними. Массив — чтобы строки собирались через «...».
 	// Подпись стоит у верха строки и при прокрутке длинного значения (каталог списков, серверы
 	// DNS) остаётся на виду, а не уезжает в середину или за край.
-	kv(label, value, title) {
+	kv(label, value) {
 		return [ E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td left', 'width': '33%', 'title': title || null }, E('div', { 'class': 'st-kl' }, label)),
+			E('td', { 'class': 'td left', 'width': '33%' }, E('div', { 'class': 'st-kl' }, label)),
 			E('td', { 'class': 'td left' }, E('div', { 'class': 'st-row' }, value))
 		]) ];
 	},
 
 	// Строки kv — таблицей.
-	card(rows, cls) {
-		return E('table', { 'class': 'table st-info' + (cls ? ' ' + cls : '') }, rows);
+	card(rows) {
+		return E('table', { 'class': 'table st-info' }, rows);
 	},
 
 	// Флажок, как у форм LuCI (ui.Checkbox): подпись — у строки, рядом только флажок.
@@ -202,6 +222,29 @@ return baseclass.extend({
 		return E('button', { 'class': 'btn cbi-button cbi-button-' + cls, 'click': ui.createHandlerFn(this, handler) }, label);
 	},
 
+	notify(text, type) {
+		ui.addNotification(null, E('p', {}, [].concat(text)), type || 'warning');
+	},
+
+	notifyLog(title, text, type) {
+		ui.addNotification(title, E('pre', { 'style': 'white-space:pre-wrap' }, [ text ]), type || 'info');
+	},
+
+	poll(owner, key, busy, fn, sec) {
+		if (busy && !owner[key]) {
+			owner[key] = () => fn();
+			poll.add(owner[key], sec || 2);
+		}
+		else if (!busy && owner[key]) {
+			poll.remove(owner[key]);
+			owner[key] = null;
+		}
+	},
+
+	modal(title, body, buttons) {
+		ui.showModal(title, [ ...[].concat(body), E('div', { 'class': 'st-buttons' }, buttons) ]);
+	},
+
 	// Поле в окне — такой же строкой «подпись | значение», окно собирает их в card().
 	field(label, content) {
 		return this.kv(label, [].concat(content))[0];
@@ -221,28 +264,9 @@ return baseclass.extend({
 		return this.combo(value, HOURS, onchange, { custom_placeholder: _('часов…') });
 	},
 
-	// Выпадающие списки — только виджеты LuCI, а не <select> браузера: у них другие отступы и
-	// стрелка. choices — [ [значение, подпись] ] в нужном порядке; подпись может быть элементом.
-	// Виджет сообщает об изменении и при простом закрытии списка — поэтому onchange зовётся,
-	// только если значение действительно стало другим.
-	dropdown(widget, value, choices, onchange, opts) {
-		value = (value == null) ? '' : String(value);
-		const w = new widget(value, Object.fromEntries(choices), Object.assign({ sort: choices.map((c) => c[0]) }, opts));
-		const el = w.render();
-		let last = value;
-		el.addEventListener('widget-change', () => {
-			const v = w.getValue();
-			if (v == null || v === last || (v === '' && widget === ui.Combobox))
-				return;
-			last = v;
-			onchange(v);
-		});
-		return el;
-	},
-
 	// Готовые варианты и своё значение.
 	combo(value, choices, onchange, opts) {
-		return this.dropdown(ui.Combobox, value, choices, onchange, Object.assign({ custom_placeholder: _('свой вариант…') }, opts));
+		return dropdown(ui.Combobox, value, choices, onchange, Object.assign({ custom_placeholder: _('свой вариант…') }, opts));
 	},
 
 	// Только готовые варианты (пустое значение — обычный вариант; снять выбор нельзя).
@@ -252,7 +276,7 @@ return baseclass.extend({
 		value = (value == null) ? '' : String(value);
 		if (!choices.some((c) => c[0] === value))
 			value = choices[0][0];
-		return this.dropdown(ui.Dropdown, value, choices, onchange, { optional: false });
+		return dropdown(ui.Dropdown, value, choices, onchange, { optional: false });
 	},
 
 	// Подпись варианта с серой припиской — вместо групп <optgroup>.
@@ -274,7 +298,7 @@ return baseclass.extend({
 			.catch((e) => {
 				// Отправленное наполовину не должно записаться вместе со следующей правкой.
 				uci.unload('stella');
-				ui.addNotification(null, E('p', {}, [ _('Не удалось сохранить: %s').format(e.message || e) ]), 'danger');
+				this.notify(_('Не удалось сохранить: %s').format(e.message || e), 'danger');
 				return callRevert('stella').catch(() => null).then(() => false);
 			}).then((ok) => {
 				writing = false;
@@ -346,7 +370,7 @@ return baseclass.extend({
 			const v = values[key];
 			const bad = CHECKS.find((c) => c[0].test(key) && !c[1].test(String(v).trim()));
 			if (bad) {
-				ui.addNotification(null, E('p', {}, [ bad[2] ]), 'danger');
+				this.notify(bad[2], 'danger');
 				return Promise.resolve(false);
 			}
 		}

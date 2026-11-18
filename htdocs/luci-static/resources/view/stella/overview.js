@@ -29,7 +29,7 @@ function ver(v) {
 
 return view.extend({
 	load() {
-		return sui.need(21).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
+		return sui.need(23).then(() => Promise.all([ callStatus(), callSettings(), callUpdateInfo() ]));
 	},
 
 	renderStatus(st) {
@@ -154,18 +154,12 @@ return view.extend({
 			const was = this.upd && this.upd.installing;
 			this.upd = u;
 			this.renderUpdates(u);
-			const busy = u.checking || u.installing;
-			if (busy && !this.updPoll) {
-				this.updPoll = () => this.pollUpdates();
-				poll.add(this.updPoll, 3);
-			}
-			else if (!busy && this.updPoll) {
-				poll.remove(this.updPoll);
-				this.updPoll = null;
-			}
+			sui.poll(this, 'updPoll', u.checking || u.installing, () => this.pollUpdates(), 3);
 			if (was && !u.installing) {
-				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, [ u.log || _('Готово.') ]), 'info');
-				setTimeout(() => location.reload(), 3000);
+				const ok = /обновлено\s*$/.test(u.log || '');
+				sui.notifyLog(null, u.log || _('Готово.'), ok ? 'info' : 'warning');
+				if (ok)
+					setTimeout(() => location.reload(), 3000);
 			}
 		}).catch(() => {
 			// Во время обновления rpcd перезапускается — вызов может не пройти, это нормально.
@@ -181,7 +175,11 @@ return view.extend({
 			mwan3: _('Установить mwan3 (nftables) и luci-app-mwan3? Настройки сохранятся.'),
 			dnsmasq: _('Заменить dnsmasq на dnsmasq-full? DNS пропадёт на несколько секунд.') }[what] || _('Установить новую версию Stella?')))
 			return;
-		return callUpdateInstall(what).then(() => this.pollUpdates());
+		return callUpdateInstall(what).then((r) => {
+			if (r && r.error)
+				sui.notify(r.error, 'danger');
+			return this.pollUpdates();
+		});
 	},
 
 	handleEnable(on) {
@@ -210,7 +208,7 @@ return view.extend({
 	handleLog() {
 		// Системный журнал — тем же способом, что «Состояние → Системный журнал».
 		return fs.exec_direct('/usr/libexec/syslog-wrapper').then((text) => {
-			const log = String(text || '').split('\n').filter((l) => /xray|stella/.test(l)).slice(-LOG_LINES).join('\n');
+			const log = String(text || '').split('\n').filter((l) => (/xray|stella/).test(l)).slice(-LOG_LINES).join('\n');
 			this.logBox.value = log || _('Лог пуст.');
 			this.logBox.scrollTop = this.logBox.scrollHeight;
 		});

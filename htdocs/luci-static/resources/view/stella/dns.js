@@ -2,7 +2,6 @@
 'require view';
 'require rpc';
 'require ui';
-'require poll';
 'require dom';
 'require stella.common as sui';
 
@@ -14,19 +13,16 @@ const callInfo = rpc.declare({ object: 'stella', method: 'dns_info' });
 const callCheck = rpc.declare({ object: 'stella', method: 'dns_check', params: [ 'apply' ] });
 const callSettings = rpc.declare({ object: 'stella', method: 'settings' });
 
-const KINDS = [
-	[ 'geo', _('обход геоблокировок') ],
-	[ 'plain', _('без фильтрации') ],
-	[ 'safe', _('защита от угроз') ],
-	[ 'family', _('семейный фильтр') ]
-];
+const KIND = {
+	safe: _('защита от угроз'),
+	family: _('семейный фильтр')
+};
 // Группы каталога на странице.
 const GROUPS = [
 	[ _('Обход геоблокировок'), [ 'geo' ] ],
 	[ _('Без фильтрации'), [ 'plain' ] ],
 	[ _('С фильтрацией'), [ 'safe', 'family' ] ]
 ];
-const KIND = Object.fromEntries(KINDS);
 const MAX = 4;
 
 const CSS = `
@@ -39,13 +35,13 @@ function title(c) {
 	const m = String(c.label).match(/^(.*?) · (.+)$/);
 	if (m)
 		return '%s (%s)'.format(m[1], m[2].charAt(0).toLowerCase() + m[2].slice(1));
-	return (c.kind == 'safe' || c.kind == 'family') ? '%s (%s)'.format(c.label, KIND[c.kind]) : c.label;
+	return KIND[c.kind] ? '%s (%s)'.format(c.label, KIND[c.kind]) : c.label;
 }
 
 return view.extend({
 
 	load() {
-		return sui.need(21).then(() => Promise.all([ callInfo(), callSettings() ]));
+		return sui.need(23).then(() => Promise.all([ callInfo(), callSettings() ]));
 	},
 
 	// Сервер — названием из каталога и адресом.
@@ -107,12 +103,14 @@ return view.extend({
 		const w = new ui.DynamicList(values, choices, { sort: order, validate: (v) => validate(v) });
 		const el = w.render();
 		el.querySelectorAll('li[data-value^="__group"]').forEach((li) => li.setAttribute('unselectable', ''));
+		let last = values.slice();
 		el.addEventListener('widget-change', () => {
 			const v = [].concat(w.getValue() || []).map((x) => String(x).trim()).filter((x) => x && x.indexOf('__group') != 0);
-			if (v.join(' ') == values.join(' '))
+			if (v.join(' ') == last.join(' '))
 				return;
 			if (v.length > MAX)
-				return ui.addNotification(null, E('p', {}, _('Не больше %d серверов.').format(MAX)), 'warning');
+				return sui.notify(_('Не больше %d серверов.').format(MAX));
+			last = v;
 			this.save({ [key]: v });
 		});
 		return el;
@@ -121,8 +119,8 @@ return view.extend({
 	renderMain() {
 		const d = this.info, cfg = this.cfg;
 		const geo = (cfg.dns_mode || 'geo') != 'manual';
-		const doh = (v) => /^https:\/\/[A-Za-z0-9.-]+\.[A-Za-z0-9-]+(:[0-9]+)?(\/\S*)?$/.test(v);
-		const ipv4 = (v) => /^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(v);
+		const doh = (v) => (v.length <= 200 && (/^https:\/\/[A-Za-z0-9.-]+\.[A-Za-z0-9-]+(:[0-9]{1,5})?(\/[A-Za-z0-9._~%\/+=&?-]*)?$/).test(v));
+		const ipv4 = (v) => ((/^([0-9]{1,3}\.){3}[0-9]{1,3}$/).test(v) && v.split('.').every((x) => +x <= 255));
 		const names = (d.check.names || []).join(', ');
 		const rows = [
 			...sui.kv(_('Серверы'), [
@@ -147,6 +145,8 @@ return view.extend({
 			...sui.kv(_('Запасные'), [ this.serverList('dns_fallback', [].concat(d.fallback || [ 'isp' ]), { isp: this.label('isp') },
 				(v) => (!v || v == 'isp' || doh(v) || ipv4(v)) ? true : _('Нужен адрес DoH (https://…) или IPv4')),
 				sui.hint(_('Если серверы выше не ответили. Свой сервер: https://… или IPv4.')) ]),
+			...sui.kv(_('DoH через VPN'), [ sui.checkbox(cfg.dns_vpn == '1', (on) => this.save({ dns_vpn: on ? '1' : '0' })),
+				sui.hint(_('Запросы к DoH-серверам идут через VPN-туннель (меньше обрывов со стороны провайдера, но CDN подбираются под страну сервера). Запасной DNS провайдера и адрес VPN-сервера всегда идут напрямую.')) ]),
 			...sui.kv(_('Перехват DNS'), [ sui.checkbox(cfg.dns_hijack == '1', (on) => this.save({ dns_hijack: on ? '1' : '0' })),
 				sui.hint(_('Запросы к другим DNS-серверам идут на роутер.')) ])
 		);
@@ -205,16 +205,9 @@ return view.extend({
 				this.renderMain();
 			this.renderCatalog();
 			const busy = d.checking || d.updating;
-			if (busy && !this.polling) {
-				this.polling = () => this.refresh();
-				poll.add(this.polling, 2);
-			}
-			else if (!busy && this.polling) {
-				poll.remove(this.polling);
-				this.polling = null;
-			}
+			sui.poll(this, 'polling', busy, () => this.refresh(), 2);
 			if (was && !busy && d.log)
-				ui.addNotification(_('DNS'), E('pre', { 'style': 'white-space:pre-wrap' }, [ d.log ]), 'info');
+				sui.notifyLog(_('DNS'), d.log);
 		});
 	},
 

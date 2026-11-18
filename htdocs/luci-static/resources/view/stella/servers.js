@@ -2,7 +2,6 @@
 'require view';
 'require rpc';
 'require ui';
-'require poll';
 'require dom';
 'require uci';
 'require stella.common as sui';
@@ -81,7 +80,7 @@ return view.extend({
 	open: null,
 
 	load() {
-		return sui.need(21).then(() => Promise.all([ callNodes(), callSettings() ]));
+		return sui.need(23).then(() => Promise.all([ callNodes(), callSettings() ]));
 	},
 
 	refresh() {
@@ -97,34 +96,34 @@ return view.extend({
 			else
 				this.renderAll();
 
-			const busy = data.pinging || data.updating || data.picking || data.warping;
-			if (busy && !this.polling) {
-				this.polling = () => this.refresh();
-				poll.add(this.polling, 2);
-			}
-			else if (!busy && this.polling) {
-				poll.remove(this.polling);
-				this.polling = null;
-			}
+			sui.poll(this, 'polling', data.pinging || data.updating || data.picking || data.warping, () => this.refresh(), 2);
 			if (wasUpdating && !data.updating && data.update_log)
-				ui.addNotification(_('Обновление подписок'), E('pre', { 'style': 'white-space:pre-wrap' }, [ data.update_log ]), 'info');
+				sui.notifyLog(_('Обновление подписок'), data.update_log);
 			if (wasWarping && !data.warping)
-				ui.addNotification(_('WARP'), E('pre', { 'style': 'white-space:pre-wrap' }, [ data.warp_log || '' ]), 'info');
+				sui.notifyLog(_('WARP'), data.warp_log || '');
 		});
 	},
 
 	/* действия */
+
+	call(p, type) {
+		return p.then((r) => {
+			if (r && r.error)
+				sui.notify(r.error, type || 'danger');
+			return this.refresh();
+		});
+	},
 
 	handleSelect(id) {
 		return sui.edit(() => sui.set('main', 'node', id)).then(() => this.refresh());
 	},
 
 	handleUpdate(id) {
-		return callUpdate(id || undefined).then(() => this.refresh());
+		return this.call(callUpdate(id || undefined));
 	},
 
 	handlePing(ids) {
-		return callPing(ids || []).then(() => this.refresh());
+		return this.call(callPing(ids || []));
 	},
 
 	handleRemove(id, what) {
@@ -146,79 +145,73 @@ return view.extend({
 
 	showAdd() {
 		const text = E('textarea', {
-			'class': 'cbi-input-textarea', 'rows': 6, 'style': 'width:100%',
+			'class': 'cbi-input-textarea', 'rows': 6,
 			'placeholder': 'https://example.com/sub/…\nvless://…\nhysteria2://…'
 		});
-		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'placeholder': _('необязательно') });
+		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'placeholder': _('необязательно') });
 
-		ui.showModal(_('Добавить серверы'), [
-			sui.card([
-				sui.field(_('Подписка или ссылки'), [ text, sui.hint(_('По одной в строке.')) ]),
-				sui.field(_('Название'), name)
-			]),
-			E('div', { 'class': 'st-buttons' }, [
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', {
-					'class': 'btn cbi-button-positive',
-					'click': ui.createHandlerFn(this, () => {
-						return callAdd(text.value, name.value.trim() || undefined).then((r) => {
-							ui.hideModal();
-							const msg = [];
-							if (r.subscriptions)
-								msg.push(_('Добавлено подписок: %d, загружаю узлы…').format(r.subscriptions));
-							if (r.links)
-								msg.push(_('Добавлено ссылок: %d').format(r.links));
-							for (const e of (r.errors || []))
-								msg.push(_('Не разобрано «%s…»: %s').format(e.line, e.error));
-							if (msg.length)
-								ui.addNotification(null, msg.map((m) => E('p', {}, [ m ])), (r.errors && r.errors.length) ? 'warning' : 'info');
-							return this.refresh();
-						});
-					})
-				}, _('Добавить'))
-			])
+		sui.modal(_('Добавить серверы'), sui.card([
+			sui.field(_('Подписка или ссылки'), [ text, sui.hint(_('По одной в строке.')) ]),
+			sui.field(_('Название'), name)
+		]), [
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
+			E('button', {
+				'class': 'btn cbi-button-positive',
+				'click': ui.createHandlerFn(this, () => {
+					return callAdd(text.value, name.value.trim() || undefined).then((r) => {
+						ui.hideModal();
+						const msg = [];
+						if (r.subscriptions)
+							msg.push(_('Добавлено подписок: %d, загружаю узлы…').format(r.subscriptions));
+						if (r.links)
+							msg.push(_('Добавлено ссылок: %d').format(r.links));
+						for (const e of (r.errors || []))
+							msg.push(_('Не разобрано «%s…»: %s').format(e.line, e.error));
+						if (msg.length)
+							ui.addNotification(null, msg.map((m) => E('p', {}, [ m ])), (r.errors && r.errors.length) ? 'warning' : 'info');
+						return this.refresh();
+					});
+				})
+			}, _('Добавить'))
 		]);
 		text.focus();
 	},
 
 	showEdit(src) {
-		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.name });
-		const url = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.url || '' });
-		const ua = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'style': 'width:100%', 'value': src.user_agent, 'placeholder': 'v2rayN/7.0' });
+		const name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': src.name });
+		const url = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': src.url || '' });
+		const ua = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': src.user_agent, 'placeholder': 'v2rayN/7.0' });
 
-		ui.showModal(_('Подписка'), [
-			sui.card([
-				sui.field(_('Название'), name),
-				sui.field(_('Ссылка'), url),
-				sui.field(_('User-Agent'), ua)
-			]),
-			E('div', { 'class': 'st-buttons' }, [
-				E('button', {
-					'class': 'btn cbi-button-negative',
-					'click': () => { ui.hideModal(); this.handleRemove(src.id, src.name); }
-				}, _('Удалить')),
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', {
-					'class': 'btn cbi-button-positive',
-					'click': ui.createHandlerFn(this, () => {
-						if (!/^https?:\/\/\S+$/.test(url.value.trim()))
-							return ui.addNotification(null, E('p', {}, _('Нужна ссылка http(s)://')), 'danger');
-						return sui.edit(() => {
-							sui.set(src.id, 'name', name.value.trim());
-							sui.set(src.id, 'url', url.value.trim());
-							sui.set(src.id, 'user_agent', ua.value.trim());
-							sui.set(src.id, 'enabled', '1');
-						}).then((ok) => {
-							if (!ok)
-								return;
-							ui.hideModal();
-							return this.refresh();
-						});
-					})
-				}, _('Сохранить'))
-			])
+		sui.modal(_('Подписка'), sui.card([
+			sui.field(_('Название'), name),
+			sui.field(_('Ссылка'), url),
+			sui.field(_('User-Agent'), ua)
+		]), [
+			E('button', {
+				'class': 'btn cbi-button-negative',
+				'click': () => { ui.hideModal(); this.handleRemove(src.id, src.name); }
+			}, _('Удалить')),
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
+			E('button', {
+				'class': 'btn cbi-button-positive',
+				'click': ui.createHandlerFn(this, () => {
+					if (!(/^https?:\/\/\S+$/).test(url.value.trim()))
+						return sui.notify(_('Нужна ссылка http(s)://'), 'danger');
+					return sui.edit(() => {
+						sui.set(src.id, 'name', name.value.trim());
+						sui.set(src.id, 'url', url.value.trim());
+						sui.set(src.id, 'user_agent', ua.value.trim());
+						sui.set(src.id, 'enabled', '1');
+					}).then((ok) => {
+						if (!ok)
+							return;
+						ui.hideModal();
+						return this.refresh();
+					});
+				})
+			}, _('Сохранить'))
 		]);
 	},
 
@@ -233,7 +226,7 @@ return view.extend({
 				return;
 			const ids = L.toArray(uci.get('stella', 'main', 'auto_node')).filter((x) => x != id);
 			if (on && ids.length >= AUTO_MAX) {
-				ui.addNotification(null, E('p', {}, _('В автовыборе не больше %d узлов.').format(AUTO_MAX)), 'warning');
+				sui.notify(_('В автовыборе не больше %d узлов.').format(AUTO_MAX));
 				return false;
 			}
 			sui.set('main', 'auto_node', on ? ids.concat(id) : ids);
@@ -280,11 +273,7 @@ return view.extend({
 				d.picking ? E('em', { 'class': 'spinning' }, _('подбираю…')) :
 					E('button', { 'class': 'btn cbi-button cbi-button-action', 'disabled': (d.pinging || wait) ? '' : null,
 						'title': wait ? _('Подбирается через резервный канал, когда он работает') : _('Проверить узлы и выбрать лучший'),
-						'click': ui.createHandlerFn(this, () => callPick(forBackup || undefined).then((r) => {
-							if (r && r.error)
-								ui.addNotification(null, E('p', {}, r.error), 'warning');
-							return this.refresh();
-						})) }, _('Подобрать сейчас'))
+						'click': ui.createHandlerFn(this, () => this.call(callPick(forBackup || undefined), 'warning')) }, _('Подобрать сейчас'))
 			];
 		};
 		const pick = best ? pickRow('best_from', 'best_interval', false) : [];
@@ -330,7 +319,7 @@ return view.extend({
 	},
 
 	handleWarp() {
-		return callWarp(undefined).then(() => this.refresh());
+		return this.call(callWarp(undefined));
 	},
 
 	// Сохранить настройку и запомнить её у себя.

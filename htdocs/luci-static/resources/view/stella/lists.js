@@ -2,7 +2,6 @@
 'require view';
 'require rpc';
 'require ui';
-'require poll';
 'require dom';
 'require uci';
 'require stella.common as sui';
@@ -51,9 +50,7 @@ const TORRENT_ACTIONS = [
 
 
 const CSS = `
-.st-table tr.st-off td, .st-table .tr.st-off .td { opacity:.5 }
-.modal .cbi-value-field textarea, .modal .cbi-value-field input[type=text] { width:100% }
-.st-table select { width:auto }
+.st-table .tr.st-off .td { opacity:.5 }
 .st-order .btn { line-height:1.8em; min-height:0 }
 .st-order { white-space:nowrap; width:1% }
 @media (max-width:854px) { .st-lists .td.st-act { flex:1 1 100%; text-align:left } }
@@ -73,17 +70,17 @@ const CSS = `
 .st-chip a { text-decoration:none; opacity:.7 }
 `;
 
-function actionSelect(value, onchange) {
-	return sui.select(value, ACTIONS, onchange);
+function countText(d, c) {
+	const p = [];
+	if (d)
+		p.push('%d %s'.format(d, sui.plural(d, _('домен'), _('домена'), _('доменов'))));
+	if (c)
+		p.push('%d %s'.format(c, sui.plural(c, _('подсеть'), _('подсети'), _('подсетей'))));
+	return p.join(' · ');
 }
 
 function countLabel(l) {
-	const p = [];
-	if (l.domains)
-		p.push('%d %s'.format(l.domains, sui.plural(l.domains, _('домен'), _('домена'), _('доменов'))));
-	if (l.cidrs)
-		p.push('%d %s'.format(l.cidrs, sui.plural(l.cidrs, _('подсеть'), _('подсети'), _('подсетей'))));
-	return p.length ? p.join(' · ') : ((l.urls.length || l.geo.length) ? _('не загружен') : _('пусто'));
+	return countText(l.domains, l.cidrs) || ((l.urls.length || l.geo.length) ? _('не загружен') : _('пусто'));
 }
 
 function lines(text) {
@@ -116,7 +113,7 @@ function listName(url) {
 
 return view.extend({
 	load() {
-		return sui.need(21).then(() => Promise.all([ callLists(), sui.devices(), callSettings(), callZapretInfo(), callZCatalog() ]));
+		return sui.need(23).then(() => Promise.all([ callLists(), sui.devices(), callSettings(), callZapretInfo(), callZCatalog() ]));
 	},
 
 	setDevices(dr) {
@@ -144,20 +141,12 @@ return view.extend({
 			else
 				this.renderAll();
 			if ((wasTesting || this.zStarted) && !zc.testing && zc.progress && zc.progress.message)
-				ui.addNotification(null, E('p', {}, [ _('Автоподбор: %s').format(zc.progress.message) ]), 'info');
+				sui.notify(_('Автоподбор: %s').format(zc.progress.message), 'info');
 			if (zc.testing || !this.zStarted || (zc.progress && zc.progress.message))
 				this.zStarted = false;
-			const busy = d.updating || zc.testing || zc.updating || zi.installing;
-			if (busy && !this.polling) {
-				this.polling = () => this.refresh();
-				poll.add(this.polling, 2);
-			}
-			else if (!busy && this.polling) {
-				poll.remove(this.polling);
-				this.polling = null;
-			}
+			sui.poll(this, 'polling', d.updating || zc.testing || zc.updating || zi.installing, () => this.refresh(), 2);
 			if (was && !d.updating && d.update_log)
-				ui.addNotification(_('Обновление списков'), E('pre', { 'style': 'white-space:pre-wrap' }, [ d.update_log ]), 'info');
+				sui.notifyLog(_('Обновление списков'), d.update_log);
 		});
 	},
 
@@ -169,7 +158,7 @@ return view.extend({
 	call(p) {
 		return p.then((r) => {
 			if (r && r.error)
-				ui.addNotification(null, E('p', {}, r.error), 'danger');
+				sui.notify(r.error, 'danger');
 			return this.refresh();
 		});
 	},
@@ -205,7 +194,7 @@ return view.extend({
 		// отмечены, а их ссылки не дублируются в поле ниже. Пункты — из индекса, который присылает
 		// роутер; пока он загружается — «загружаю…».
 		let action = l.action;
-		const actSel = actionSelect(action, (v) => action = v);
+		const actSel = sui.select(action, ACTIONS, (v) => action = v);
 		const checks = [];
 		const cat = E('div', { 'class': 'st-cat' }, E('em', { 'class': 'spinning' }, _('загружаю списки…')));
 		let catDrawn = false, textEdited = false, text = null;
@@ -361,50 +350,43 @@ return view.extend({
 		const save = () => {
 			const macs = boxes.filter(([ , cb ]) => cb.checked).map(([ d ]) => d.mac);
 			if (devMode != 'all' && !macs.length)
-				return ui.addNotification(null, E('p', {}, _('Выберите хотя бы одно устройство.')), 'warning');
+				return sui.notify(_('Выберите хотя бы одно устройство.'));
 			const all = lines(text.value).map(puny);
 			const urls = all.filter(isListUrl), sites = all.filter((s) => !isListUrl(s));
 			const geo = geoSel.map((p) => p[0] + ':' + p[1]);
-
-			// Для каких устройств: «все» — без отметок.
-			const scope = { devices_mode: devMode == 'all' ? null : devMode, mac: devMode == 'all' ? null : macs };
-			if (!isNew) {
-				const all_urls = [ ...new Set([ ...checks.filter(([ cb ]) => cb.checked).flatMap(([ , , u ]) => u), ...urls ]) ];
-				if (!all_urls.length && !geo.length && !sites.length)
-					return ui.addNotification(null, E('p', {}, _('Список пуст.')), 'warning');
-				ui.hideModal();
-				return this.saveList(l.id, Object.assign({ name: name.value.trim() || l.name, action, url: all_urls, geo, entry: sites }, scope),
-					all_urls.join() != l.urls.join() || geo.join() != l.geo.join());
-			}
-
-			// Всё выбранное — один список: пункты каталога, наборы, свои ссылки и сайты.
 			const picked = checks.filter(([ cb ]) => cb.checked);
 			const all_urls = [ ...new Set([ ...picked.flatMap(([ , , u ]) => u), ...urls ]) ];
 			if (!all_urls.length && !geo.length && !sites.length)
-				return ui.addNotification(null, E('p', {}, _('Ничего не выбрано.')), 'warning');
-			const names = [ ...picked.map(([ , n ]) => n), ...geo, ...urls.map(listName),
-				...(sites.length ? [ _('свои сайты') ] : []) ];
-			const auto = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
+				return sui.notify(isNew ? _('Ничего не выбрано.') : _('Список пуст.'));
+
+			// Для каких устройств: «все» — без отметок.
+			const scope = { devices_mode: devMode == 'all' ? null : devMode, mac: devMode == 'all' ? null : macs };
+			let title = name.value.trim();
+			if (!title && isNew) {
+				const names = [ ...picked.map(([ , n ]) => n), ...geo, ...urls.map(listName),
+					...(sites.length ? [ _('свои сайты') ] : []) ];
+				title = (names.length > 3) ? names.slice(0, 3).join(', ') + _(' и ещё %d').format(names.length - 3) : names.join(', ');
+			}
+			const fields = Object.assign({ name: title || l.name, action, url: all_urls, geo, entry: sites }, scope);
+			if (isNew)
+				fields.enabled = '1';
+			const upd = isNew ? (all_urls.length + geo.length > 0) : (all_urls.join() != l.urls.join() || geo.join() != l.geo.join());
 			ui.hideModal();
-			return this.saveList(sui.newId('list'), Object.assign({ name: name.value.trim() || auto, action, enabled: '1', url: all_urls, geo, entry: sites }, scope),
-				all_urls.length + geo.length > 0);
+			return this.saveList(isNew ? sui.newId('list') : l.id, fields, upd);
 		};
 
-		ui.showModal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], [
-			sui.card([
-				sui.field(_('Название'), name),
-				sui.field(_('Действие'), actSel),
-				sui.field(_('Готовые списки'), cat),
-				sui.field(_('Наборы geosite и geoip'), [ chips, search, hits, geoState ]),
-				sui.field(_('Свои сайты и ссылки'), [ text, sui.hint(_('Сайты, подсети и ссылки на списки, по одному в строке.')) ]),
-				sui.field(_('Устройства'), [ mode, devList ])
-			]),
-			E('div', { 'class': 'st-buttons' }, [
-				isNew ? '' : E('button', { 'class': 'btn cbi-button-negative', 'click': () => { ui.hideModal(); this.handleRemove(l); } }, _('Удалить')),
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, save) }, isNew ? _('Добавить') : _('Сохранить'))
-			])
+		sui.modal([ isNew ? _('Новый список') : _('Список «%s»').format(l.name) ], sui.card([
+			sui.field(_('Название'), name),
+			sui.field(_('Действие'), actSel),
+			sui.field(_('Готовые списки'), cat),
+			sui.field(_('Наборы geosite и geoip'), [ chips, search, hits, geoState ]),
+			sui.field(_('Свои сайты и ссылки'), [ text, sui.hint(_('Сайты, подсети и ссылки на списки, по одному в строке.')) ]),
+			sui.field(_('Устройства'), [ mode, devList ])
+		]), [
+			isNew ? '' : E('button', { 'class': 'btn cbi-button-negative', 'click': () => { ui.hideModal(); this.handleRemove(l); } }, _('Удалить')),
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
+			E('button', { 'class': 'btn cbi-button-positive', 'click': ui.createHandlerFn(this, save) }, isNew ? _('Добавить') : _('Сохранить'))
 		]);
 	},
 
@@ -441,15 +423,6 @@ return view.extend({
 		return E('div', { 'class': 'st-dim st-scope' }, [ (l.devices_mode == 'only' ? _('только: %s') : _('кроме: %s')).format(names.join(', ')) ]);
 	},
 
-	overlapParts(ov) {
-		const p = [];
-		if (ov.domains_count)
-			p.push('%d %s'.format(ov.domains_count, sui.plural(ov.domains_count, _('домен'), _('домена'), _('доменов'))));
-		if (ov.cidrs_count)
-			p.push('%d %s'.format(ov.cidrs_count, sui.plural(ov.cidrs_count, _('подсеть'), _('подсети'), _('подсетей'))));
-		return p.join(' · ');
-	},
-
 	showOverlaps(l) {
 		const ovs = l.overlaps || [];
 		const rows = ovs.map((ov) => {
@@ -464,7 +437,7 @@ return view.extend({
 			return sui.field(
 				sui.label(ov.name, ACTION_LABELS[ov.action] || ov.action),
 				[
-					E('div', { 'class': 'st-full' }, [ this.overlapParts(ov), ' — ', note ]),
+					E('div', { 'class': 'st-full' }, [ countText(ov.domains_count, ov.cidrs_count), ' — ', note ]),
 					samples.length ? E('textarea', {
 						'class': 'cbi-input-textarea st-full',
 						'readonly': 'readonly',
@@ -474,13 +447,12 @@ return view.extend({
 				]
 			);
 		});
-		ui.showModal(_('Пересечения списка «%s»').format(l.name), [
+		sui.modal(_('Пересечения списка «%s»').format(l.name), [
 			E('p', {}, _('Списки проверяются сверху вниз — для общих доменов (включая поддомены) и подсетей срабатывает первый подходящий.')),
-			sui.card(rows),
-			E('div', { 'class': 'st-buttons' }, [
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn cbi-button-positive', 'click': ui.hideModal }, _('Закрыть'))
-			])
+			sui.card(rows)
+		], [
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn cbi-button-positive', 'click': ui.hideModal }, _('Закрыть'))
 		]);
 	},
 
@@ -514,34 +486,31 @@ return view.extend({
 		const tcp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': cfg.zapret_tcp_ports || '', 'placeholder': '80,443' });
 		const udp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': cfg.zapret_udp_ports || '', 'placeholder': '443' });
 
-		ui.showModal(_('Своя стратегия Zapret'), [
-			sui.card([
-				sui.field(_('Программа'), bin),
-				sui.field(_('Параметры nfqws'), [ opts, sui.hint(_('По одному в строке.')) ]),
-				sui.field(_('Порты TCP'), tcp),
-				sui.field(_('Порты UDP'), udp)
-			]),
-			E('div', { 'class': 'st-buttons' }, [
-				zi.import_opts ? E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': () => {
-					opts.value = String(zi.import_opts).trim();
-					if (zi.import_tcp) tcp.value = zi.import_tcp;
-					if (zi.import_udp) udp.value = zi.import_udp;
-				} }, _('Взять из zapret')) : '',
-				E('span', { 'style': 'flex:1' }),
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
-				E('button', {
-					'class': 'btn cbi-button-positive',
-					'click': ui.createHandlerFn(this, () => sui.saveSettings({
-						zapret_bin: binV, zapret_opts: opts.value, zapret_strategy: '',
-						zapret_tcp_ports: tcp.value.trim(), zapret_udp_ports: udp.value.trim()
-					}).then((ok) => {
-						if (!ok)
-							return;
-						ui.hideModal();
-						return this.refresh();
-					}))
-				}, _('Сохранить'))
-			])
+		sui.modal(_('Своя стратегия Zapret'), sui.card([
+			sui.field(_('Программа'), bin),
+			sui.field(_('Параметры nfqws'), [ opts, sui.hint(_('По одному в строке.')) ]),
+			sui.field(_('Порты TCP'), tcp),
+			sui.field(_('Порты UDP'), udp)
+		]), [
+			zi.import_opts ? E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': () => {
+				opts.value = String(zi.import_opts).trim();
+				if (zi.import_tcp) tcp.value = zi.import_tcp;
+				if (zi.import_udp) udp.value = zi.import_udp;
+			} }, _('Взять из zapret')) : '',
+			E('span', { 'style': 'flex:1' }),
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Отмена')),
+			E('button', {
+				'class': 'btn cbi-button-positive',
+				'click': ui.createHandlerFn(this, () => sui.saveSettings({
+					zapret_bin: binV, zapret_opts: opts.value, zapret_strategy: '',
+					zapret_tcp_ports: tcp.value.trim(), zapret_udp_ports: udp.value.trim()
+				}).then((ok) => {
+					if (!ok)
+						return;
+					ui.hideModal();
+					return this.refresh();
+				}))
+			}, _('Сохранить'))
 		]);
 	},
 
@@ -570,7 +539,7 @@ return view.extend({
 		const fam = (f) => byScore(zc.strategies.filter((st) => st.family == f));
 		const cur = (key) => cfg[key] || '';
 		const stLabel = (st) => res[st.name] ? sui.label(st.name, score(st.name)) : st.name;
-		const setSel = (key, f) => sui.select(cur(key, f), [ [ '', f == 'yv' ? off('yv') : _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
+		const setSel = (key, f) => sui.select(cur(key), [ [ '', f == 'yv' ? off('yv') : _('выключено') ], ...fam(f).map((st) => [ st.name, stLabel(st) ]) ],
 			(v) => this.saveSetting({ [key]: v }));
 		const ytSel = setSel('zapret_yt', 'yv'), dvSel = setSel('zapret_discord', 'dv'), gvSel = setSel('zapret_games', 'gv');
 		const fakeName = (f) => f.replace(/^.*\//, '').replace(/\.bin$/, '');
@@ -599,7 +568,7 @@ return view.extend({
 			state = E('span', { 'class': 'st-dim' }, _('Stella выключена'));
 		else if (!zc.strategies.length)
 			state = E('span', { 'class': 'st-dim' }, zc.updating ? _('загружаю каталог…') : _('каталог ещё не загружен'));
-		else if (!cfg.zapret_opts && !cur('zapret_yt', 'yv') && !cur('zapret_discord', 'dv') && !cur('zapret_games', 'gv'))
+		else if (!cfg.zapret_opts && !cur('zapret_yt') && !cur('zapret_discord') && !cur('zapret_games'))
 			state = E('span', { 'class': 'st-bad' }, _('стратегия не выбрана'));
 		else if (zi.stella_nfqws)
 			state = E('span', { 'class': 'st-ok' }, _('работает'));
@@ -636,7 +605,7 @@ return view.extend({
 				'class': 'btn cbi-button-negative', 'style': 'padding:0 .6em;line-height:1.7em;min-height:0',
 				'click': ui.createHandlerFn(this, () => callZapretOff().then((r) => {
 					if (r.running)
-						ui.addNotification(null, E('p', {}, _('nfqws службы zapret всё ещё запущен. Проверьте zapret2 и zapret-manager.')), 'warning');
+						sui.notify(_('nfqws службы zapret всё ещё запущен. Проверьте zapret2 и zapret-manager.'));
 					return this.refresh();
 				}))
 			}, (zi.service_running || zi.service_enabled) ? _('Остановить и отключить') : _('Убрать правила'))
@@ -654,8 +623,8 @@ return view.extend({
 				!cfg.zapret_opts && this.data.default_action == 'zapret'
 					? sui.hint(_('Основная стратегия не выбрана. Обход Zapret действует только для выбранных ниже профилей.')) : '' ]),
 			...sui.kv('YouTube', [ ytSel, ...pick('yv', 'zapret_test_yt', (st) => st.family == 'yv') ]),
-			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord', 'dv') ? fakeSel('zapret_discord_fake') : []) ]),
-			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games', 'gv') ? fakeSel('zapret_games_fake') : []) ]),
+			...sui.kv('Discord', [ dvSel, ...(cur('zapret_discord') ? fakeSel('zapret_discord_fake') : []) ]),
+			...sui.kv(_('Игры'), [ gvSel, ...(cur('zapret_games') ? fakeSel('zapret_games_fake') : []) ]),
 			// Конфликт с отдельной службой zapret — только если он есть.
 			...(svcBad ? sui.kv(_('Служба zapret'), svc) : [])
 		]);
@@ -722,7 +691,7 @@ return view.extend({
 		this.tableBox = E('div');
 		this.zapretBox = sui.card([]);
 		this.renderAll();
-		if (data.updating || zc.testing || zc.updating)
+		if (data.updating || zc.testing || zc.updating || zi.installing)
 			this.refresh();
 
 		return E([], [

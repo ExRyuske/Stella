@@ -15,7 +15,7 @@ wget -qO- https://yeru.cc/stella.sh | sh
 Или с GitHub:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/ExRyuske/Stella/main/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/ExRyuske/stella/main/install.sh | sh
 ```
 
 [Скрипт](install.sh) устанавливает последний [релиз](../../releases) и зависимости:

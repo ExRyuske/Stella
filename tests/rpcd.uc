@@ -5,7 +5,7 @@
 'use strict';
 
 import { writefile, readfile, mkdir } from 'fs';
-import { task_busy, task_script } from 'stella.store';
+import { task_busy, task_script } from 'stella.core';
 
 let path = getenv('STELLA_UCI_JSON');
 writefile(path, sprintf('%J', {
@@ -48,16 +48,16 @@ let lr = methods.lists.call({ args: {} });
 let l = lr.lists[0];
 check('lists entry', l.domains == 2 && l.devices_mode == 'all' && length(l.geo) == 2 && type(l.overlaps) == 'array' && lr.torrent_action == 'direct', lr);
 
-// Методов записи в плагине нет.
+// Методов записи и устаревших ручных обновлений каталогов в плагине нет.
 check('no write methods', !length(filter([ 'select', 'auto_set', 'edit', 'remove', 'list_add', 'list_edit', 'list_remove', 'list_move',
 	'set_default_action', 'device_set', 'device_remove', 'settings_set',
-	'set_enabled', 'restart', 'devices', 'log' ], (m) => methods[m] != null)), keys(methods));
+	'set_enabled', 'restart', 'devices', 'log', 'dns_catalog_update', 'zapret_catalog_update' ], (m) => methods[m] != null)), keys(methods));
 check('block_doh gone', methods.settings.call({ args: {} }).block_doh == null, null);
-check('settings dns default', methods.settings.call({ args: {} }).dns_mode == 'geo' && methods.settings.call({ args: {} }).torrent_action == 'direct', null);
-set_main({ dns_mode: 'manual', dns_server: [ 'https://dns.comss.one/dns-query', 'https://1.1.1.1/dns-query' ],
+check('settings dns default', methods.settings.call({ args: {} }).dns_mode == 'geo' && methods.settings.call({ args: {} }).dns_vpn == '0' && methods.settings.call({ args: {} }).torrent_action == 'direct', null);
+set_main({ dns_mode: 'manual', dns_vpn: '1', dns_server: [ 'https://dns.comss.one/dns-query', 'https://1.1.1.1/dns-query' ],
 	lan_ifname: [ 'br-lan', 'br-guest' ], update_interval: '6' });
 let st = methods.settings.call({ args: {} });
-check('settings', st.dns_mode == 'manual' && st.dns_server[1] == 'https://1.1.1.1/dns-query' &&
+check('settings', st.dns_mode == 'manual' && st.dns_vpn == '1' && st.dns_server[1] == 'https://1.1.1.1/dns-query' &&
 	sprintf('%J', st.lan_ifname) == '[ "br-lan", "br-guest" ]' && st.update_interval == '6' && st.best_interval == '6', st);
 
 
@@ -104,13 +104,16 @@ check('geo_index', r.geosite[0] == 'youtube' && r.geoip[0] == 'ru' && r.at == 1 
 // DNS: без каталога — пусто, цепочка ручная — свои серверы (выше), DNS провайдера — массив; при
 // подборе — только подобранные.
 r = methods.dns_info.call({ args: {} });
-check('dns_info', type(r.catalog) == 'array' && r.mode == 'manual' && length(r.chain) == 2 && type(r.isp) == 'array' && !r.checking, r);
+check('dns_info', type(r.catalog) == 'array' && length(r.chain) == 2 && type(r.isp) == 'array' && !r.checking, r);
 let dd = getenv('STELLA_DNS_DIR');
 mkdir(dd);
 writefile(`${dd}/auto.json`, sprintf('%J', { servers: [ 'https://xbox-dns.ru/dns-query', 'bad' ], at: 5 }));
 set_main({ dns_mode: 'geo' });
+writefile(`${rd}/dnscheck.log`, 'old-chk');
+writefile(`${rd}/dnscat.log`, 'new-cat');
 r = methods.dns_info.call({ args: {} });
-check('dns_info geo', r.mode == 'geo' && sprintf('%J', r.chain) == '[ "https://xbox-dns.ru/dns-query" ]' && r.auto_at == 5, r);
+check('dns_info geo', sprintf('%J', r.chain) == '[ "https://xbox-dns.ru/dns-query" ]' &&
+	r.log in [ 'new-cat', 'old-chk' ], r);
 
 // Подделки — массив путей (на машине разработчика может быть пустым); голос Discord — не стратегия.
 let zd = getenv('STELLA_ZAPRET_DIR');

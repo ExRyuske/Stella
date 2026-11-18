@@ -14,7 +14,7 @@
 
 'use strict';
 
-import { b64dec_loose, urldecode, pctdecode, parse_url, valid_port, split_list, try_json } from 'stella.util';
+import { b64dec_loose, pctdecode, parse_url, valid_port, split_list, try_json, fnv1a, CACHE_DIR, read_json, sub_label, is_warp } from 'stella.core';
 
 const NETWORKS = {
 	'': 'raw', raw: 'raw', tcp: 'raw',
@@ -412,4 +412,75 @@ export function parse(s) {
 	if (!node.error && node.name == '')
 		node.name = `${node.address}:${node.port}`;
 	return node;
+};
+
+// Разбор тела подписки: base64 или открытый список ссылок, по одной в строке.
+function looks_like_links(s) {
+	return match(s, /^[ \t\r\n]*[a-zA-Z0-9]+:\/\//) != null;
+}
+
+export function decode(body, prefix) {
+	let text = body || '';
+	if (!looks_like_links(text)) {
+		let dec = b64dec_loose(text);
+		if (dec && looks_like_links(dec))
+			text = dec;
+	}
+
+	let nodes = [], errors = [], seen_link = {}, seen_id = {};
+	for (let line in split(text, /\r?\n/)) {
+		line = trim(line);
+		if (line == '' || substr(line, 0, 1) == '#')
+			continue;
+
+		let n = parse(line);
+		if (n.error) {
+			push(errors, { line: substr(line, 0, 64), error: n.error });
+			continue;
+		}
+		if (seen_link[line])
+			continue;
+		seen_link[line] = true;
+
+		let key = `${n.name}|${n.address}|${n.port}`;
+		let id = `${prefix}_${fnv1a(key)}`;
+		for (let i = 1; seen_id[id]; i++)
+			id = `${prefix}_${fnv1a(`${key}|${i}`)}`;
+		seen_id[id] = true;
+
+		n.id = id;
+		push(nodes, n);
+	}
+	return { nodes, errors };
+};
+
+// Узлы из UCI (отдельные ссылки) и кэша подписок.
+export function load_nodes(uci, errors) {
+	let nodes = [];
+
+	uci.foreach('stella', 'node', (s) => {
+		let n = parse(s.link);
+		if (n.error) {
+			if (errors)
+				push(errors, { id: s['.name'], name: s.name || s['.name'], error: n.error });
+			return;
+		}
+		n.id = s['.name'];
+		if (s.name)
+			n.name = s.name;
+		n.source = n.source_id = is_warp(s) ? 'warp' : 'manual';
+		push(nodes, n);
+	});
+
+	uci.foreach('stella', 'subscription', (s) => {
+		if (s.enabled == '0')
+			return;
+		for (let n in read_json(`${CACHE_DIR}/${s['.name']}.json`, [])) {
+			n.source = sub_label(s);
+			n.source_id = s['.name'];
+			push(nodes, n);
+		}
+	});
+
+	return nodes;
 };

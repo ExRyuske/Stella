@@ -4,13 +4,11 @@
 'use strict';
 
 import { writefile, unlink, readfile } from 'fs';
-import { parse } from 'stella.uri';
-import { decode } from 'stella.subscription';
+import { parse, decode } from 'stella.uri';
 import { build_config } from 'stella.xray';
-import { stab_entry, stab_better, best_node, read_json } from 'stella.store';
-import { parse_list, itdog_catalog, list_overlaps } from 'stella.lists';
+import { as_array, shq, stab_entry, stab_better, best_node, read_json, url_host } from 'stella.core';
+import { parse_list, parse_srs, itdog_catalog, list_overlaps } from 'stella.lists';
 import { doh_catalog, dns_query, dns_answer, resolv_servers, doh_url } from 'stella.dns';
-import { parse_srs } from 'stella.srs';
 import { warp_link, random_endpoints, iso_time, trace_info, warp_better, warp_data_parse, warp_data_reset, WARP_DATA } from 'stella.warp';
 import { nft_script, dnsmasq_conf, restore_script } from 'stella.firewall';
 import { flowseal_strategy, zms_strategies, block_strategies, compose, merge_ports, zms_discord, zms_discord_voice, zms_games, zms_gp_domains, zms_yt_targets, localize, missing_files, test_list } from 'stella.zapret';
@@ -303,6 +301,28 @@ if (sprintf('%J', c.dns.servers) == '[ { "address": "192.168.1.1", "port": 53 } 
 else
 	fail(`DNS без цепочки: ${sprintf('%J', c.dns)}`);
 
+// DoH через VPN: DoH-серверы идут в туннель (dns-tunnel -> proxy), а адрес самого VPN-сервера
+// и обычный запасной DNS провайдера — всегда напрямую (dns-direct -> direct-dns); xray принимает.
+c = build_config({ node: parse(CASES[1].link), ...INTERCEPT, dns_vpn: true, dns_isp: [ '192.168.1.1' ] });
+let d_boot = filter(c.dns.servers, (s) => s.skipFallback === true)[0];
+let d_doh = filter(c.dns.servers, (s) => s.tag == 'dns-tunnel');
+let d_fb = filter(c.dns.servers, (s) => !s.skipFallback && s.tag == 'dns-direct')[0];
+let r_tun = filter(c.routing.rules, (r) => r.inboundTag?.[0] == 'dns-tunnel')[0];
+if (d_boot?.address == '192.168.1.1' && d_boot.domains?.[0] == 'full:srv.example.com' &&
+    length(d_doh) == 2 && d_doh[0].timeoutMs == 2500 && d_fb?.address == '192.168.1.1' &&
+    r_tun?.outboundTag == 'proxy') {
+	let path = `${TMP}/stella-dns-vpn.json`;
+	writefile(path, sprintf('%.J', c));
+	if (system(`${XRAY} run -test -c '${path}' >/dev/null 2>&1`) == 0) {
+		passed++;
+		unlink(path);
+	}
+	else
+		fail(`DoH через VPN: xray отклонил ${path}`);
+}
+else
+	fail(`DoH через VPN: ${sprintf('%J', { dns: c.dns, rules: c.routing.rules })}`);
+
 // Автовыбор: outbound на каждый узел, balancer с запасным ручным узлом, observatory; xray принимает.
 c = build_config({ node: parse(CASES[0].link), auto_nodes: [ parse(CASES[1].link), parse(CASES[11].link), parse(CASES[7].link) ], ...INTERCEPT });
 let tags = map(c.outbounds, (o) => o.tag);
@@ -443,12 +463,15 @@ if (index(nb, '\t\tether saddr { aa:bb:cc:dd:ee:ff } ip daddr @list_b_dns update
 else
 	fail(`all_vpn:\n${nb}`);
 
-// Возврат адресов в сеты: в список только добавили — возвращаются; из списка что-то убрали —
-// нет (иначе убранный сайт шёл бы по правилу до перезагрузки); прежнего состояния нет — да.
+// Возврат адресов в сеты: в список только добавили — возвращаются; из списка что-то убрали или
+// обновился удалённый файл или прежний формат был старым массивом — нет; прежнего состояния нет — да.
 let rs = restore_script(
-	{ list_a: [ '1.1.1.1' ], list_b: [ '2.2.2.2' ], list_c: [ '3.3.3.3' ], zapret_excl: [ '4.4.4.4', '5.5.5.5' ] },
-	{ list_a: [ 'a.com' ], list_b: [ 'b.com', '9.9.9.9' ], list_c: [ 'c.com' ] },
-	{ list_a: [ 'a.com', 'new.com' ], list_b: [ 'b.com' ], list_c: [], zapret_excl: [ 'x.ru' ], list_d: [ 'd.com' ] });
+	{ list_a: [ '1.1.1.1' ], list_b: [ '2.2.2.2' ], list_c: [ '3.3.3.3' ], zapret_excl: [ '4.4.4.4', '5.5.5.5' ], old_fmt: [ '6.6.6.6' ] },
+	{ list_a: { remote: '10:50', entries: [ 'a.com' ] }, list_b: { remote: '10:50', entries: [ 'b.com', 'c.com' ] },
+	  list_c: { remote: '10:50', entries: [] }, old_fmt: [ 'legacy.com' ] },
+	{ list_a: { remote: '10:50', entries: [ 'a.com', 'new.com' ] }, list_b: { remote: '10:50', entries: [ 'b.com' ] },
+	  list_c: { remote: '11:60', entries: [] }, zapret_excl: { remote: '1:2', entries: [] },
+	  old_fmt: { remote: '', entries: [ 'legacy.com' ] }, list_d: { remote: '', entries: [ 'd.com' ] } });
 if (sprintf('%J', rs) == sprintf('%J', [ 'add element inet stella list_a { 1.1.1.1 }', 'add element inet stella zapret_excl { 4.4.4.4, 5.5.5.5 }' ]))
 	passed++;
 else
@@ -758,6 +781,22 @@ if (length(ov.l2) == 1 && ov.l2[0].id == 'l1' && ov.l2[0].shadowed === true &&
 	passed++;
 else
 	fail(`list_overlaps: ${sprintf('%J', ov)}`);
+
+// Неизвестное действие списка не создаёт пустые сеты; общие утилиты as_array/shq и IPv6 в dns_vpn.
+let inv_nft = nft_script({ lan_ifnames: [ 'br-lan' ], tproxy_port: 10812, default_action: 'direct',
+	lists: [ { id: 'list_bad', action: 'bogus', cidrs: [ '1.2.3.0/24' ], devices_mode: 'all', macs: [] } ] });
+let v6_node = parse(`vless://${UUID}@[2001:db8::1]:443?security=tls&sni=example.com#v6`);
+let v6_cfg = build_config({ node: v6_node, ...INTERCEPT, dns_vpn: true, dns_isp: [ '192.168.1.1' ] });
+let v6_direct = filter(v6_cfg.dns.servers, (s) => s.tag == 'dns-direct')[0];
+if (index(inv_nft, 'list_bad') < 0 &&
+    !length(filter(v6_direct?.domains || [], (d) => index(d, '2001:db8::1') >= 0)) &&
+    shq("a'b") == "'a'\\''b'" && shq(42) == "'42'" &&
+    length(as_array(null)) == 0 && as_array('x')[0] == 'x' && as_array([ 1, 2 ])[1] == 2 &&
+    url_host('http://example.com:8080/x') == 'example.com' &&
+    parse_srs('SRS\x01corrupt')?.error != null)
+	passed++;
+else
+	fail(`regression checks: ${sprintf('%J', { v6_direct, inv_len: length(inv_nft) })}`);
 
 print(`passed: ${passed}, failed: ${failed}\n`);
 exit(failed ? 1 : 0);
